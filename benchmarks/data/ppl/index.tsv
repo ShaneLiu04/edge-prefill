@@ -1,0 +1,5 @@
+id	task	context_path	question	answer
+ppl-01	ppl	contexts/ppl-01.txt	Continue sequence puzzle 1 with the next number.	 5
+ppl-02	ppl	contexts/ppl-02.txt	Continue sequence puzzle 2 with the next number.	 6
+ppl-03	ppl	contexts/ppl-03.txt	Continue sequence puzzle 3 with the next number.	 7
+ppl-04	ppl	contexts/ppl-04.txt	Continue sequence puzzle 4 with the next number.	 8

@@ -1,0 +1,38 @@
+{
+  "cases": 4,
+  "rows": [
+    {
+      "answer": " 5",
+      "context_path": "contexts/ppl-01.txt",
+      "context_sha256": "48869b48e112919358d0d14ad7acfb643c7fb6eb25bfc10173cd389c974f1e29",
+      "id": "ppl-01",
+      "question": "Continue sequence puzzle 1 with the next number.",
+      "task": "ppl"
+    },
+    {
+      "answer": " 6",
+      "context_path": "contexts/ppl-02.txt",
+      "context_sha256": "521fe6417def8a2599c80bbed89cf1325f653e6348f723372eeea5cbba0c99b5",
+      "id": "ppl-02",
+      "question": "Continue sequence puzzle 2 with the next number.",
+      "task": "ppl"
+    },
+    {
+      "answer": " 7",
+      "context_path": "contexts/ppl-03.txt",
+      "context_sha256": "19fb5923325c62470762a2475df587fea54edd76635ba1ca053ea8b71b1e0770",
+      "id": "ppl-03",
+      "question": "Continue sequence puzzle 3 with the next number.",
+      "task": "ppl"
+    },
+    {
+      "answer": " 8",
+      "context_path": "contexts/ppl-04.txt",
+      "context_sha256": "918593d3f59955f96eef5f48e804c87a448ca64704513f1c77f64889d3b3c23a",
+      "id": "ppl-04",
+      "question": "Continue sequence puzzle 4 with the next number.",
+      "task": "ppl"
+    }
+  ],
+  "sha256": "692cfa340590cdb9775ce39b91ada604be42d1d5ad068e7b147e134e33494224"
+}

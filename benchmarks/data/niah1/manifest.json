@@ -1,0 +1,14 @@
+{
+  "cases": 1,
+  "rows": [
+    {
+      "answer": "MAGENTA-FALCON-7000",
+      "context_path": "contexts/niah-01.txt",
+      "context_sha256": "43612af80f814b512477bd3b18cd1775c8e7bb87caf6d8cd0c3c1ad0d27593a6",
+      "id": "niah-01",
+      "question": "What is the secret passcode for vault 1?",
+      "task": "niah"
+    }
+  ],
+  "sha256": "247f7dee773e6381efd12956b998dfec8f0839b9a7da8b486669779620747410"
+}

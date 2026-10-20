@@ -1,0 +1,153 @@
+diff --git a/include/llama.h b/include/llama.h
+index 3af6e22..a846515 100644
+--- a/include/llama.h
++++ b/include/llama.h
+@@ -746,6 +746,20 @@ extern "C" {
+                          int32_t   il_start,
+                          int32_t   il_end);
+ 
++    // EdgePrefill extension: phase-asymmetric prefill FFN skipping.
++    // Sets whether the current decode call is a prefill pass.
++    LLAMA_API void llama_set_prefill_mode(struct llama_context * ctx, bool prefill);
++
++    // Sets a bitmask of layer indices whose FFN is skipped while prefill mode is on.
++    // Bits >= llama_model_n_layer(model) are ignored.
++    LLAMA_API void llama_set_prefill_ffn_skip(struct llama_context * ctx, uint64_t layer_mask);
++
++    // Returns the effective FFN skip mask.
++    LLAMA_API uint64_t llama_get_prefill_ffn_skip(const struct llama_context * ctx);
++
++    // Returns whether prefill mode is currently enabled.
++    LLAMA_API bool llama_get_prefill_mode(const struct llama_context * ctx);
++
+     //
+     // Memory
+     //
+diff --git a/src/llama-batch.cpp b/src/llama-batch.cpp
+index 321aa9d..b5bdd64 100644
+--- a/src/llama-batch.cpp
++++ b/src/llama-batch.cpp
+@@ -342,7 +342,10 @@ bool llama_batch_allocr::init(
+     // consistency checks
+     //
+ 
+-    if (n_pos_per_embd > 1) {
++    if (batch_inp.allow_position_gaps && n_pos_per_embd == 1) {
++        // EdgePrefill: sparse prefill skips token blocks; arbitrary positions
++        // are handled by the KV cache allocation below.
++    } else if (n_pos_per_embd > 1) {
+         // in a mixed batch, the first entry of each seq picks the rule
+         std::vector<int8_t> seq_first_embd(n_seq_max, batch.token ? 0 : 1);
+         if (mixed) {
+diff --git a/src/llama-batch.h b/src/llama-batch.h
+index e1e4397..e8a295f 100644
+--- a/src/llama-batch.h
++++ b/src/llama-batch.h
+@@ -104,6 +104,10 @@ struct llama_batch_ext {
+     const llama_token n_vocab;     // max token ID that we accept
+     const size_t n_pos_per_embd;
+ 
++    // EdgePrefill: sparse prefill intentionally skips token blocks, so batch
++    // positions may be non-contiguous.
++    bool allow_position_gaps = false;
++
+     // actual embd row width of this batch, set by the first set_token_embd()
+     // must be either n_embd_inp or n_embd_inp_enc; encode/decode verify it against the graph input
+     size_t n_embd = 0;
+diff --git a/src/llama-context.cpp b/src/llama-context.cpp
+index 9ee64b5..42913ad 100644
+--- a/src/llama-context.cpp
++++ b/src/llama-context.cpp
+@@ -4378,6 +4378,35 @@ int32_t llama_set_adapter_cvec(
+     return res ? 0 : -1;
+ }
+ 
++// EdgePrefill extension
++void llama_set_prefill_mode(llama_context * ctx, bool prefill) {
++    if (!ctx) {
++        return;
++    }
++    ctx->set_prefill_mode(prefill);
++}
++
++void llama_set_prefill_ffn_skip(llama_context * ctx, uint64_t layer_mask) {
++    if (!ctx) {
++        return;
++    }
++    const int32_t n_layer = llama_model_n_layer(llama_get_model(ctx));
++    if (n_layer > 0 && n_layer < 64) {
++        layer_mask &= ((uint64_t(1) << n_layer) - 1);
++    } else if (n_layer >= 64) {
++        layer_mask = 0;
++    }
++    ctx->set_prefill_ffn_skip(layer_mask);
++}
++
++uint64_t llama_get_prefill_ffn_skip(const llama_context * ctx) {
++    return ctx ? ctx->get_prefill_ffn_skip() : 0;
++}
++
++bool llama_get_prefill_mode(const llama_context * ctx) {
++    return ctx ? ctx->get_prefill_mode() : false;
++}
++
+ //
+ // memory
+ //
+@@ -4605,6 +4634,7 @@ int llama_context::encode(const llama_batch & batch_inp) {
+ 
+ int llama_context::decode(const llama_batch & batch_inp) {
+     llama_batch_compat compat(this, batch_inp);
++    compat.batch_ext->allow_position_gaps = cparams.prefill_mode;
+     return decode(*compat.batch_ext);
+ }
+ 
+diff --git a/src/llama-context.h b/src/llama-context.h
+index 6938fb1..faa34d4 100644
+--- a/src/llama-context.h
++++ b/src/llama-context.h
+@@ -63,6 +63,11 @@ struct llama_context {
+     const llama_model   & get_model()   const;
+     const llama_cparams & get_cparams() const;
+ 
++    void set_prefill_mode(bool prefill) { cparams.prefill_mode = prefill; }
++    void set_prefill_ffn_skip(uint64_t mask) { cparams.prefill_ffn_skip_mask = mask; }
++    uint64_t get_prefill_ffn_skip() const { return cparams.prefill_ffn_skip_mask; }
++    bool get_prefill_mode() const { return cparams.prefill_mode; }
++
+     ggml_backend_sched_t get_sched() const;
+ 
+     uint32_t n_ctx()     const;
+diff --git a/src/llama-cparams.h b/src/llama-cparams.h
+index f4eb181..91a97f7 100644
+--- a/src/llama-cparams.h
++++ b/src/llama-cparams.h
+@@ -55,6 +55,10 @@ struct llama_cparams {
+     bool pipeline_parallel;
+     bool training;           // set by llama_opt_init()
+ 
++    // EdgePrefill extension
++    bool     prefill_mode = false;
++    uint64_t prefill_ffn_skip_mask = 0;
++
+     size_t moe_cache_size;
+ 
+     std::vector<bool> embeddings_layer_inp; // [n_layer()] extract input embeddings for layer
+diff --git a/src/llama-graph.cpp b/src/llama-graph.cpp
+index 2bc3a29..b7e3744 100644
+--- a/src/llama-graph.cpp
++++ b/src/llama-graph.cpp
+@@ -1897,6 +1897,13 @@ ggml_tensor * llm_graph_context::build_ffn(
+      llm_ffn_op_type   type_op,
+    llm_ffn_gate_type   type_gate,
+                  int   il) const {
++    // EdgePrefill: phase-asymmetric prefill FFN skip.
++    // Returning a zero tensor preserves the caller's residual connection.
++    if (cparams.prefill_mode && il >= 0 && il < 64 &&
++        (cparams.prefill_ffn_skip_mask & (uint64_t(1) << il))) {
++        return ggml_scale(ctx0, cur, 0.0f);
++    }
++
+     // NVFP4 support is currently restricted to
+     // 1) LORA absence (*_s would be applied after LORA residual, which is incorrect)
+     // 2) bias absense (*_s would be applied after bias addition, which is incorrect)
