@@ -12,9 +12,11 @@
 #include <sys/utsname.h>
 #include <unistd.h>
 
+#include "edge_prefill/attention_sparsity.h"
 #include "edge_prefill/backend.h"
 #include "edge_prefill/benchmark.h"
 #include "edge_prefill/config.h"
+#include "edge_prefill/draft_scorer.h"
 #include "edge_prefill/ffn_skip.h"
 #include "edge_prefill/json_writer.h"
 #include "edge_prefill/log.h"
@@ -40,12 +42,16 @@ struct Args {
     std::string mode;
     std::string kv_type;
     std::string skip_ffn;
+    std::string draft_model;
+    std::string attn_top_k_layers;
     uint32_t tokens = 0;
     uint32_t max_new_tokens = 32;
     uint32_t n_ctx = 0;
     uint32_t n_ubatch = 512;
     int32_t threads = 0;
     int32_t repeats = 5;
+    uint32_t attn_top_k = 0;
+    bool attn_top_k_set = false;
     double budget = 0.5;
     bool budget_set = false;
     bool chat = false;
@@ -65,9 +71,22 @@ void usage() {
         "Common options:\n"
         "  --mode latency|balanced|quality|reuse|dense\n"
         "  --budget <0..1>   --kv-type f16|q8_0|q4_0   --skip-ffn <spec>\n"
+        "  --draft-model M   --attn-top-k N  --attn-top-k-layers 4,8,16\n"
         "  --threads N       --n-ctx N                 --n-ubatch N\n"
         "  --max-new-tokens N  --chat   --dump-plan P  --dump-selection P\n"
         "  --verbose\n";
+}
+
+bool parse_i64_strict(const std::string& text, int64_t* out) {
+    try {
+        size_t pos = 0;
+        const int64_t value = std::stoll(text, &pos, 10);
+        if (pos != text.size()) return false;
+        *out = value;
+        return true;
+    } catch (...) {
+        return false;
+    }
 }
 
 Status parse_args(int argc, char** argv, Args* args) {
@@ -118,6 +137,26 @@ Status parse_args(int argc, char** argv, Args* args) {
         } else if (flag == "--skip-ffn") {
             auto st = next(&args->skip_ffn);
             if (!st.ok()) return st;
+        } else if (flag == "--draft-model") {
+            auto st = next(&args->draft_model);
+            if (!st.ok()) return st;
+        } else if (flag == "--attn-top-k-layers") {
+            auto st = next(&args->attn_top_k_layers);
+            if (!st.ok()) return st;
+            // Reject malformed lists before any model is loaded.
+            std::vector<uint32_t> layers;
+            auto list_st = parse_u32_list(args->attn_top_k_layers, &layers);
+            if (!list_st.ok()) return list_st;
+        } else if (flag == "--attn-top-k") {
+            std::string value;
+            auto st = next(&value);
+            if (!st.ok()) return st;
+            int64_t parsed = 0;
+            if (!parse_i64_strict(value, &parsed) || parsed < 0 || parsed > 0xffffffffll) {
+                return Status::error(ErrorCode::InvalidArgument, "invalid --attn-top-k: " + value);
+            }
+            args->attn_top_k = static_cast<uint32_t>(parsed);
+            args->attn_top_k_set = true;
         } else if (flag == "--tokens") {
             std::string value;
             auto st = next(&value);
@@ -262,6 +301,9 @@ Status apply_common_config(const Args& args, Config* cfg) {
         cfg->skip_ffn_overridden = true;
         cfg->skip_ffn_mask = 0; // parsed after model load (needs n_layer)
     }
+    if (!args.draft_model.empty()) cfg->draft_model_path = args.draft_model;
+    if (args.attn_top_k_set) cfg->attn_top_k = args.attn_top_k;
+    if (!args.attn_top_k_layers.empty()) cfg->attn_top_k_layers = args.attn_top_k_layers;
     if (args.max_new_tokens != 32) cfg->max_new_tokens = args.max_new_tokens;
     if (args.n_ctx != 0) cfg->n_ctx = args.n_ctx;
     if (args.n_ubatch != 512) cfg->n_ubatch = args.n_ubatch;
@@ -302,6 +344,30 @@ Status run_command(const Args& args) {
         if (!mask_st.ok()) {
             LlamaBackend::shutdown();
             return mask_st;
+        }
+    }
+    if (!cfg.attn_top_k_layers.empty()) {
+        std::vector<uint32_t> layers;
+        auto layer_st = parse_u32_list(cfg.attn_top_k_layers, &layers);
+        if (!layer_st.ok()) {
+            LlamaBackend::shutdown();
+            return layer_st;
+        }
+        if (layers.size() != static_cast<size_t>(backend.n_layer())) {
+            LlamaBackend::shutdown();
+            return Status::error(ErrorCode::InvalidArgument,
+                                 "attn-top-k-layers size != n_layer");
+        }
+    }
+    LlamaDraftScorer draft;
+    if (!cfg.draft_model_path.empty()) {
+        DraftScorerOptions dopts;
+        dopts.block_size = cfg.block_size;
+        dopts.n_threads = cfg.n_threads;
+        auto draft_st = draft.load_model(cfg.draft_model_path, dopts);
+        if (!draft_st.ok()) {
+            LlamaBackend::shutdown();
+            return draft_st;
         }
     }
 
@@ -368,10 +434,35 @@ Status run_command(const Args& args) {
     sopts.weights = run_cfg.weights;
     Selection selection;
     BlockSelector selector;
-    st = selector.select(tokens, run_cfg.prompt, pieces, sopts, nullptr, &selection);
+    st = selector.select(tokens, run_cfg.prompt, pieces, sopts,
+                         draft.loaded() ? &draft : nullptr, &selection);
     if (!st.ok()) {
         LlamaBackend::shutdown();
         return st;
+    }
+    if (plan.attention_top_k > 0 && !selection.dense) {
+        AttentionSparsityOptions aopts;
+        aopts.block_size = run_cfg.block_size;
+        aopts.top_k_blocks = plan.attention_top_k;
+        if (!run_cfg.attn_top_k_layers.empty()) {
+            aopts.per_layer = true;
+            auto layer_st = parse_u32_list(run_cfg.attn_top_k_layers, &aopts.layer_top_k);
+            if (!layer_st.ok()) {
+                LlamaBackend::shutdown();
+                return layer_st;
+            }
+        }
+        std::vector<int32_t> attn_indices;
+        std::string attn_reason;
+        auto attn_st = AttentionSparsityController::build(selection, aopts,
+                                                          &attn_indices, &attn_reason);
+        if (!attn_st.ok()) {
+            LlamaBackend::shutdown();
+            return attn_st;
+        }
+        selection.attention_indices = std::move(attn_indices);
+        selection.attention_top_k = static_cast<uint32_t>(selection.attention_indices.size());
+        log_info("attention sparsity: " + attn_reason);
     }
     if (!args.dump_selection.empty()) {
         std::ofstream out(args.dump_selection);
@@ -437,6 +528,8 @@ Status plan_command(const Args& args) {
         cfg.budget = args.budget;
         cfg.budget_overridden = true;
     }
+    if (args.attn_top_k_set) cfg.attn_top_k = args.attn_top_k;
+    if (!args.attn_top_k_layers.empty()) cfg.attn_top_k_layers = args.attn_top_k_layers;
     PlannerInput in;
     in.n_tokens = args.tokens;
     in.mode = cfg.mode;

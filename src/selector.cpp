@@ -13,6 +13,7 @@
 #include <unordered_set>
 
 #include "edge_prefill/json_writer.h"
+#include "edge_prefill/log.h"
 
 namespace edge_prefill {
 namespace {
@@ -124,6 +125,12 @@ std::string Selection::to_json() const {
     json.key("block_indices");
     json.begin_array();
     for (auto b : block_indices) json.value(static_cast<uint64_t>(b));
+    json.end_array();
+    json.key("attention_top_k");
+    json.value(static_cast<uint64_t>(attention_top_k));
+    json.key("attention_indices");
+    json.begin_array();
+    for (auto i : attention_indices) json.value(static_cast<uint64_t>(i));
     json.end_array();
     json.key("mandatory_blocks");
     json.begin_array();
@@ -289,17 +296,24 @@ Status BlockSelector::select(const std::vector<llama_token>& tokens,
     if (draft) {
         std::vector<double> per_token;
         auto st = draft->score(tokens, query_text, &per_token);
-        if (!st.ok()) return st;
-        if (per_token.size() != tokens.size()) {
-            return Status::error(ErrorCode::Internal, "draft score size mismatch");
-        }
-        draft_enabled = true;
-        for (uint32_t b = 0; b < n_blocks; ++b) {
-            const uint32_t begin = b * block_size;
-            const uint32_t end = std::min(n_tokens, begin + block_size);
-            double sum = 0.0;
-            for (uint32_t i = begin; i < end; ++i) sum += per_token[i];
-            draft_scores[b] = sum / std::max<uint32_t>(1, end - begin);
+        // A failed draft pass (missing model, vocab mismatch, oversized
+        // prompt) must degrade to lexical-only selection rather than fail
+        // the request; never fabricate semantic scores.
+        if (st.ok() && per_token.size() == tokens.size()) {
+            draft_enabled = true;
+            for (uint32_t b = 0; b < n_blocks; ++b) {
+                const uint32_t begin = b * block_size;
+                const uint32_t end = std::min(n_tokens, begin + block_size);
+                double sum = 0.0;
+                for (uint32_t i = begin; i < end; ++i) sum += per_token[i];
+                draft_scores[b] = sum / std::max<uint32_t>(1, end - begin);
+            }
+        } else if (!st.ok()) {
+            out->reason = "draft-disabled";
+            log_info("draft scorer disabled: " + st.message);
+        } else {
+            out->reason = "draft-disabled";
+            log_info("draft scorer disabled: score size mismatch");
         }
     }
 

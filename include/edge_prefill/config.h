@@ -55,6 +55,13 @@ struct Config {
     KvPrecision decode_kv_type = KvPrecision::F16;
 
     uint64_t skip_ffn_mask = 0;
+    // Attention-level top-k: number of highest-scoring blocks whose tokens
+    // the attention layers gather during prefill. 0 disables the gather
+    // path (dense attention over the selected tokens).
+    uint32_t attn_top_k = 0;
+    // Comma-separated per-layer top-k override; validated against the model
+    // layer count after model load. Empty string disables per-layer control.
+    std::string attn_top_k_layers;
     bool enable_prefix_cache = true;
     uint64_t prefix_cache_bytes = 256ull * 1024 * 1024;
     bool enable_ffn_skip = true;
@@ -77,6 +84,9 @@ struct Plan {
     uint32_t chunk_size = 512;
     uint64_t skip_ffn_mask = 0;
     KvPrecision kv_type = KvPrecision::F16;
+    // Attention top-k in blocks (mirrors Config::attn_top_k); 0 in every
+    // dense-fallback plan because dense prefill never gathers.
+    uint32_t attention_top_k = 0;
     bool dense_fallback = false;
     std::vector<std::string> reasons;
 
@@ -137,5 +147,7 @@ struct EnvironmentInfo {
 Status parse_config_file(const std::string& path, Config* out);
 Status parse_kv_precision(const std::string& text, KvPrecision* out);
 Status parse_mode(const std::string& text, Mode* out);
+// Parses a comma-separated list of non-negative integers ("4,8,16").
+Status parse_u32_list(const std::string& text, std::vector<uint32_t>* out);
 
 } // namespace edge_prefill

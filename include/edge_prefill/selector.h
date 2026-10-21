@@ -8,6 +8,7 @@
 #include <llama.h>
 
 #include "edge_prefill/config.h"
+#include "edge_prefill/draft_scorer.h"
 #include "edge_prefill/status.h"
 
 namespace edge_prefill {
@@ -25,6 +26,11 @@ struct Selection {
     std::vector<uint32_t> token_indices;
     std::vector<BlockSignal> signals;
     std::vector<uint32_t> mandatory_blocks;
+    // Attention-level top-k gather indices (strictly ascending token
+    // positions), populated by AttentionSparsityController. Empty means
+    // the dense attention path is used.
+    std::vector<int32_t> attention_indices;
+    uint32_t attention_top_k = 0;
     uint32_t total_tokens = 0;
     uint32_t selected_tokens = 0;
     bool dense = false;
@@ -41,14 +47,6 @@ struct SelectionOptions {
     uint32_t recent_blocks = 2;
     uint32_t coverage_stride = 8;
     SelectorWeights weights;
-};
-
-class DraftScorer {
-public:
-    virtual ~DraftScorer() = default;
-    virtual Status score(const std::vector<llama_token>& tokens,
-                         const std::string& query,
-                         std::vector<double>* per_token_scores) = 0;
 };
 
 class BlockSelector {

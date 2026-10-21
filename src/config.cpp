@@ -116,6 +116,28 @@ Status parse_mode(const std::string& text, Mode* out) {
     return Status::success();
 }
 
+Status parse_u32_list(const std::string& text, std::vector<uint32_t>* out) {
+    if (!out) return Status::error(ErrorCode::InvalidArgument, "null output");
+    out->clear();
+    std::string item;
+    std::stringstream stream(text);
+    while (std::getline(stream, item, ',')) {
+        item = trim(item);
+        if (item.empty()) {
+            return Status::error(ErrorCode::InvalidArgument, "empty list element");
+        }
+        uint64_t u = 0;
+        if (!parse_u64(item, &u) || u > 0xffffffffull) {
+            return Status::error(ErrorCode::InvalidArgument, "invalid list element: " + item);
+        }
+        out->push_back(static_cast<uint32_t>(u));
+    }
+    if (out->empty()) {
+        return Status::error(ErrorCode::InvalidArgument, "empty list");
+    }
+    return Status::success();
+}
+
 std::string Plan::to_json() const {
     std::string out;
     JsonWriter json(&out);
@@ -134,6 +156,8 @@ std::string Plan::to_json() const {
     json.value(skip_ffn_mask);
     json.key("kv_type");
     json.value(kv_precision_name(kv_type));
+    json.key("attention_top_k");
+    json.value(static_cast<uint64_t>(attention_top_k));
     json.key("dense_fallback");
     json.value(dense_fallback);
     json.key("reasons");
@@ -259,6 +283,11 @@ Status parse_config_file(const std::string& path, Config* out) {
             if (!parse_u64(value, &u)) goto bad_value;
             out->skip_ffn_mask = u;
             out->skip_ffn_overridden = true;
+        } else if (key == "attn_top_k") {
+            if (!parse_u64(value, &u) || u > 0xffffffffull) goto bad_value;
+            out->attn_top_k = static_cast<uint32_t>(u);
+        } else if (key == "attn_top_k_layers") {
+            out->attn_top_k_layers = value;
         } else if (key == "prefix_cache") {
             if (!parse_bool(value, &b)) goto bad_value;
             out->enable_prefix_cache = b;

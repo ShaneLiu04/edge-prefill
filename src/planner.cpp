@@ -148,10 +148,24 @@ Status Planner::make_plan(const PlannerInput& in, const Config& cfg, Plan* out) 
     plan.skip_ffn_mask = skip ? mask : 0;
     plan.dense_fallback = false;
 
+    // Attention-level top-k only applies to the sparse path; dense fallback
+    // plans keep attention_top_k = 0 (their early returns never set it).
+    if (cfg.attn_top_k > 0) {
+        plan.attention_top_k = cfg.attn_top_k;
+        add_reason(&plan, "attn-top-k:" + std::to_string(cfg.attn_top_k));
+        if (!cfg.attn_top_k_layers.empty()) {
+            std::vector<uint32_t> layers;
+            const auto st = parse_u32_list(cfg.attn_top_k_layers, &layers);
+            if (!st.ok()) return st;
+            add_reason(&plan, "attn-top-k-per-layer");
+        }
+    }
+
     plan.passes.push_back("sparse_prefill");
     if (prefix_reuse) plan.passes.push_back("prefix_reuse");
     if (cfg.enable_chunking) plan.passes.push_back("chunked_prefill");
     if (plan.skip_ffn_mask != 0) plan.passes.push_back("ffn_skip");
+    if (plan.attention_top_k > 0) plan.passes.push_back("attn_top_k");
     plan.passes.push_back("kv_precision");
 
     *out = std::move(plan);

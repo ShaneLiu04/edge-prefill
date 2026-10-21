@@ -13,7 +13,7 @@
 |----|---------|------|------|------|
 | T001 | AR001 基线审计与兼容性回归：确认现有块稀疏、前缀缓存、FFN skip、KV 精度在 AR002 开发期间不回归；修复 QA `qa-02` 质量回退与 `test_planner.cpp` balanced FFN skip 语义不一致 | - | passing | 2026-10-20 完成 |
 | T002 | llama.cpp attention 级稀疏最小 patch：实现全局/分层 top-k gather（`ggml_get_rows`）、可审查运行时开关与 `llama_set_prefill_attn_top_k`/`llama_set_prefill_attn_indices` API | T001 | passing | 2026-10-21 完成 |
-| T003 | Draft 模型与分层稀疏选择器集成：真实 GGUF draft 语义打分、块级选择 + attention 级 top-k 候选排序与 `Plan` 新字段 | T002 | pending | 核心创新 |
+| T003 | Draft 模型与分层稀疏选择器集成：真实 GGUF draft 语义打分、块级选择 + attention 级 top-k 候选排序与 `Plan` 新字段 | T002 | passing | 2026-10-21 完成 |
 | T004 | 分层稀疏 prefill 执行路径：位置保持、因果性、dense 回退、审计统计与 benchmark `repeats/warmup` | T003 | pending | 必须真实推理 |
 | T005 | 跨请求与多轮前缀 KV 复用：Radix 树缓存、最长前缀命中、共享 system prompt、多轮追加 | T001 | pending | 真实 state 复用 |
 | T006 | KV 分页与快照管理：state 序列化、LRU、签名校验、内存统计与恢复失败回退 | T005 | pending | 防错误复用 |
@@ -87,6 +87,32 @@
   - CTest 真实模型：1/1 通过（37 个用例全 PASS）
   - `integration_attn_top_k`：API 校验（负值/非升序/越界返回 InvalidArgument）、边界等价（top_k=n 时与 dense argmax 相同）、gather 激活（半数 indices 时 logits 有限且与 dense 不同）、禁用恢复（top_k=0 后与 dense max diff < 1e-5）
   - 全部原有测试无回归（dense 路径在 top_k=0 时完全不经过 gather 代码）
+
+### 2026-10-21 会话记录（2）
+
+- 完成任务：T003 Draft 模型与分层稀疏选择器集成
+- 修改文件：
+  - `include/edge_prefill/draft_scorer.h` + `src/draft_scorer.cpp`（新增）：`DraftScorer` 基类（自 selector.h 拆出）、`DraftScorerOptions`、`LlamaDraftScorer`（真实 GGUF 语义打分）
+  - `include/edge_prefill/attention_sparsity.h` + `src/attention_sparsity.cpp`（新增）：`AttentionSparsityController::build` 从 `Selection` 派生 attention gather indices
+  - `include/edge_prefill/selector.h` + `src/selector.cpp`：`Selection` 新增 `attention_indices`/`attention_top_k`；draft 打分失败回退 lexical-only（reason "draft-disabled"），绝不伪造分数
+  - `include/edge_prefill/config.h` + `src/config.cpp`：`Config.attn_top_k`/`attn_top_k_layers`、`Plan.attention_top_k`、`parse_u32_list`
+  - `src/planner.cpp`：sparse 路径规划 `attention_top_k`，passes 加 "attn_top_k"
+  - `src/main.cpp`：CLI `--draft-model`/`--attn-top-k`/`--attn-top-k-layers`；run_command 加载 draft、构建 indices
+  - `tests/test_draft_scorer.cpp`、`tests/test_attention_sparsity.cpp`（新增，13 个用例）
+- 关键实现决策：
+  - Draft 打分：draft tokenizer 编码 query → 全 token embedding mean-pool 归一化；prompt 单次 chunked forward，块边界取 final hidden state，与 query 向量 cosine，per-block 分数广播到 per-token
+  - llama.cpp 本 commit 语义：decoder 生成模型取 per-token embedding 需 context `embeddings=true` + `LLAMA_POOLING_TYPE_NONE`（qwen2 graph 设 `res->t_embd`）；此时 batch 层强制所有 token 为 outputs，`llama_get_embeddings_ith` 的入参是 **batch 内 token 索引**（经 `output_ids` 映射到输出行），边界提取必须传 chunk-local 行号而非输出计数
+  - vocab 覆盖检查：token id 超出 draft vocab → Unsupported，selector 回退 lexical-only
+  - indices 语义：dense → 空 "dense"；top_k=0 → 空 "attn-disabled"；kept 覆盖全部 selected → 空 "attn-top-k-covers-all"（gather 全量=纯开销）；否则 kept 块 ∩ token_indices 严格升序，mandatory 锚（sink/recent/coverage/best-lex）永不因 cap 牺牲，最后 token 必在内
+  - 执行路径未接入 backend：多 chunk prefill 时 indices 指向尚未写入 KV 的位置非法，per-chunk 调整留 T004
+- 调试修复：
+  - 真实模型 SEGFAULT 根因：`test_attention_sparsity.cpp` `make_selection(256, ...)` 中 `pieces[37*32+5]`（下标 1189）越界写造成 heap corruption 延迟崩溃——加 `needle_pos < n` 守卫
+  - 边界 embedding 索引错误（同上"关键实现决策"第 2 条）：曾按输出计数 `embeddings_ith(o)` 读到 chunk 前 o 个 token 的 embedding
+  - 测试文本 tokenize 不足 64 token：加长文本
+- 测试结果：
+  - CTest 无模型：1/1 通过（真实模型用例 SKIP）
+  - CTest 真实模型：1/1 通过（50 个用例全 PASS、0 SKIP，含 `draft_scorer_load_and_score` 真实 draft 打分与 8 个 attention sparsity 用例）
+
 
 
 ## 阶段门控记录

@@ -42,6 +42,8 @@ add_library(edge_prefill
     src/config.cpp
     src/backend.cpp
     src/selector.cpp
+    src/draft_scorer.cpp
+    src/attention_sparsity.cpp
     src/prefix_cache.cpp
     src/chunk_scheduler.cpp
     src/ffn_skip.cpp
@@ -76,6 +78,8 @@ if(EDGE_PREFILL_BUILD_TESTS)
     add_executable(edge_prefill_tests
         tests/test_main.cpp
         tests/test_selector.cpp
+        tests/test_draft_scorer.cpp
+        tests/test_attention_sparsity.cpp
         tests/test_prefix_cache.cpp
         tests/test_chunk_scheduler.cpp
         tests/test_planner.cpp
