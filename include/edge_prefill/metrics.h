@@ -31,6 +31,10 @@ struct Sample {
     uint32_t selected_tokens = 0;
     std::string mode;
     double budget = 1.0;
+    // Attention gather rows engaged for this sample (0 = disabled/fallback).
+    uint32_t attn_top_k = 0;
+    // Timed repeats behind the reported TTFT (median of `repeats` runs).
+    uint32_t repeats = 1;
 };
 
 class Reporter {

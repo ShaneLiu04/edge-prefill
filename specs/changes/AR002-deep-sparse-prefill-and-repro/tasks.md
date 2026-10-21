@@ -14,7 +14,7 @@
 | T001 | AR001 基线审计与兼容性回归：确认现有块稀疏、前缀缓存、FFN skip、KV 精度在 AR002 开发期间不回归；修复 QA `qa-02` 质量回退与 `test_planner.cpp` balanced FFN skip 语义不一致 | - | passing | 2026-10-20 完成 |
 | T002 | llama.cpp attention 级稀疏最小 patch：实现全局/分层 top-k gather（`ggml_get_rows`）、可审查运行时开关与 `llama_set_prefill_attn_top_k`/`llama_set_prefill_attn_indices` API | T001 | passing | 2026-10-21 完成 |
 | T003 | Draft 模型与分层稀疏选择器集成：真实 GGUF draft 语义打分、块级选择 + attention 级 top-k 候选排序与 `Plan` 新字段 | T002 | passing | 2026-10-21 完成 |
-| T004 | 分层稀疏 prefill 执行路径：位置保持、因果性、dense 回退、审计统计与 benchmark `repeats/warmup` | T003 | pending | 必须真实推理 |
+| T004 | 分层稀疏 prefill 执行路径：位置保持、因果性、dense 回退、审计统计与 benchmark `repeats/warmup` | T003 | passing | 2026-10-21 完成 |
 | T005 | 跨请求与多轮前缀 KV 复用：Radix 树缓存、最长前缀命中、共享 system prompt、多轮追加 | T001 | pending | 真实 state 复用 |
 | T006 | KV 分页与快照管理：state 序列化、LRU、签名校验、内存统计与恢复失败回退 | T005 | pending | 防错误复用 |
 | T007 | 按层 KV 精度与相位感知调度：`llama_set_kv_type_per_layer` patch、首尾层保守策略、prefill/decode 不一致返回 `Unsupported` 并回退 | T004 | pending | 质量门禁约束 |
@@ -112,6 +112,31 @@
 - 测试结果：
   - CTest 无模型：1/1 通过（真实模型用例 SKIP）
   - CTest 真实模型：1/1 通过（50 个用例全 PASS、0 SKIP，含 `draft_scorer_load_and_score` 真实 draft 打分与 8 个 attention sparsity 用例）
+
+### 2026-10-21 会话记录（3）
+
+- 完成任务：T004 分层稀疏 prefill 执行路径
+- 修改文件：
+  - `include/edge_prefill/attention_sparsity.h` + `src/attention_sparsity.cpp`：新增 `validate_indices`（严格升序/范围/⊆token_indices/含最后 token）与 `chunk_indices`（位置前缀语义）
+  - `include/edge_prefill/sparse_prefill.h` + `src/sparse_prefill.cpp`：`Options.enable_attn_sparse`；新增私有 `attn_prefill`——验证→patch 探测（不可用→attn_fallback 降级块级稀疏）→per-chunk 行号 gather→结束恢复 dense；`PrefillModeGuard` 复用
+  - `include/edge_prefill/backend.h`：`PrefillStats` 新增 `attn_indices/attn_top_k/attn_fallback` 审计字段
+  - `include/edge_prefill/chunk_scheduler.h`：`ChunkStats.attn_rows`（逐 chunk 审计）
+  - `include/edge_prefill/benchmark.h` + `src/benchmark.cpp`：`BenchmarkConfig.attn_top_k/attn_top_k_layers`；**repeats/warmup 真正落地**（此前仅解析未参与循环）：warmup 全量 prefill 不计时 → repeats 次 timed prefill → TTFT 取中位数；quality/generation 仅最后一次 timed 后执行（贪心确定性）；E2E 覆盖最后一次 timed 端到端；attention indices 经 AttentionSparsityController 接入 benchmark 执行路径
+  - `include/edge_prefill/metrics.h` + `src/metrics.cpp`：`Sample.attn_top_k/repeats`，raw CSV 与 report.md 新增列
+  - `src/main.cpp`：bench_command 传递 attn 配置；run_command stderr 汇总输出 attn_top_k/attn_fallback
+  - `tests/test_sparse_attn_exec.cpp`（新增，8 用例）
+- 关键实现决策：
+  - **patch 索引语义修正**：llama.cpp gather 的索引是 **KV cell 行号（decode 顺序枚举）**，非绝对位置——T002 稠密测试 row==position 掩盖了该语义；稀疏选择下必须做 位置→行号 映射（`lower_bound` 于 active_positions），行号继承升序
+  - per-chunk 调整：chunk 覆盖行 [begin,end) 执行时仅行 < end 已写入；gather 前缀 = 映射行号 < range.end；空前缀 → 该 chunk top_k=0 禁用 gather（对已写行稠密注意力，因果安全）
+  - dense selection 永不启用 gather；非法 indices 在任何模型状态变更前拒绝（不留半写序列）
+  - graph 每chunk 重建（indices 变化触发 can_reuse 失配），可接受开销
+- 调试修复：
+  - 真实执行 SIGABRT（`GGML_ASSERT(i01 < ne01)` in `ggml_get_rows`）：位置值当行号用导致越界——即上述索引语义修正的根因
+  - 测试场景退化：512 token/budget 0.5 仅 ~8 selected blocks，top_k_blocks=8 触发 covers-all 返回空 indices → 用例静默 SKIP；改为 top_k_blocks=2 且模型在场时空 indices 直接 CHECK 失败（大声失败）
+- 测试结果：
+  - CTest 无模型：1/1 通过（SKIP 行为正常）
+  - CTest 真实模型：1/1 通过（58 用例全 PASS、0 SKIP，8 个新用例全部真实执行：engages 审计字段/非递减 attn_rows/确定性 argmax、late-only 前缀禁用、disabled 等价 <1e-5、非法拒绝、dense 忽略、benchmark repeats 中位数+CSV 审计列）
+
 
 
 

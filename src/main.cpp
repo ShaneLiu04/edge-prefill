@@ -513,6 +513,8 @@ Status run_command(const Args& args) {
     std::cerr << "[edge-prefill] prompt=" << stats.prompt_tokens
               << " selected=" << stats.selected_tokens << " chunks=" << stats.chunks
               << " ttft_ms=" << ttft_ms << " kv_bytes=" << stats.kv_bytes
+              << " attn_top_k=" << stats.attn_top_k
+              << " attn_fallback=" << (stats.attn_fallback ? 1 : 0)
               << " mode=" << mode_name(run_cfg.mode) << " budget=" << sopts.budget << '\n';
     LlamaBackend::shutdown();
     return Status::success();
@@ -568,6 +570,8 @@ Status bench_command(const Args& args) {
     bench.repeats = static_cast<int32_t>(cfg.repeats);
     bench.warmup = cfg.warmup;
     bench.max_new_tokens = cfg.max_new_tokens;
+    bench.attn_top_k = cfg.attn_top_k;
+    bench.attn_top_k_layers = cfg.attn_top_k_layers;
     bench.out_dir = cfg.results_dir;
 
     BenchmarkRunner runner;

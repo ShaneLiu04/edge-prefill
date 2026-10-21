@@ -1,7 +1,9 @@
 #include "edge_prefill/sparse_prefill.h"
 
+#include <algorithm>
 #include <chrono>
 
+#include "edge_prefill/attention_sparsity.h"
 #include "edge_prefill/log.h"
 
 namespace edge_prefill {
@@ -54,6 +56,16 @@ Status SparsePrefiller::prefill(const std::vector<llama_token>& tokens,
         }
     }
 
+    // Validate gather indices before touching any model state so an invalid
+    // request never leaves a partially written sequence behind.
+    const bool attn_requested = opts.enable_attn_sparse && !selection.dense &&
+                                !selection.attention_indices.empty();
+    if (attn_requested) {
+        auto vst = AttentionSparsityController::validate_indices(selection.attention_indices,
+                                                                 selection);
+        if (!vst.ok()) return vst;
+    }
+
     *stats = PrefillStats{};
     stats->prompt_tokens = static_cast<uint32_t>(tokens.size());
     stats->selected_tokens = static_cast<uint32_t>(selection.token_indices.size());
@@ -91,6 +103,22 @@ Status SparsePrefiller::prefill(const std::vector<llama_token>& tokens,
         backend_->set_ffn_skip_mask(0);
     }
 
+    // Probe the gather patch once: a missing llama.cpp patch must degrade to
+    // block-level sparsity instead of failing the request.
+    bool attn_active = false;
+    if (attn_requested) {
+        stats->attn_indices = static_cast<uint32_t>(selection.attention_indices.size());
+        auto probe = backend_->set_attn_top_k(1);
+        if (!probe.ok()) {
+            log_warn("attention top-k unavailable (" + probe.message +
+                     "); falling back to block-level sparsity");
+            stats->attn_fallback = true;
+        } else {
+            attn_active = true;
+            stats->attn_top_k = static_cast<int32_t>(selection.attention_indices.size());
+        }
+    }
+
     std::vector<llama_token> active_tokens;
     std::vector<llama_pos> active_positions;
     active_tokens.reserve(selection.token_indices.size());
@@ -103,8 +131,18 @@ Status SparsePrefiller::prefill(const std::vector<llama_token>& tokens,
 
     if (!active_tokens.empty()) {
         PrefillModeGuard guard(backend_);
-        auto st = backend_->prefill(active_tokens, active_positions,
-                                    opts.enable_chunking ? opts.chunk_size : 0, stats);
+        Status st = Status::success();
+        if (attn_active) {
+            st = attn_prefill(active_tokens, active_positions, selection.attention_indices,
+                              opts, stats);
+        } else {
+            st = backend_->prefill(active_tokens, active_positions,
+                                   opts.enable_chunking ? opts.chunk_size : 0, stats);
+        }
+        // Always restore the dense attention path so decode and subsequent
+        // prefills never inherit stale gather settings.
+        backend_->set_attn_top_k(0);
+        backend_->set_attn_indices({});
         if (!st.ok()) return st;
         stats->prompt_tokens = static_cast<uint32_t>(tokens.size());
         stats->selected_tokens = static_cast<uint32_t>(selection.token_indices.size());
@@ -129,6 +167,68 @@ Status SparsePrefiller::prefill(const std::vector<llama_token>& tokens,
             const KvSignature sig = signature_for(*backend_);
             auto ins = cache_->insert(tokens, sig, std::move(state));
             if (!ins.ok()) log_warn("prefix cache insert failed: " + ins.message);
+        }
+    }
+    return Status::success();
+}
+
+Status SparsePrefiller::attn_prefill(const std::vector<llama_token>& tokens,
+                                     const std::vector<llama_pos>& positions,
+                                     const std::vector<int32_t>& attn_indices,
+                                     const Options& opts,
+                                     PrefillStats* stats) {
+    // The llama.cpp gather patch indexes KV cells in decode order, not by
+    // absolute position: with sparse selection the r-th cell holds the r-th
+    // selected token, so position != row. Map every gather position to its
+    // row up front; rows inherit the ascending order of the positions.
+    std::vector<int32_t> index_rows;
+    index_rows.reserve(attn_indices.size());
+    for (int32_t pos : attn_indices) {
+        auto it = std::lower_bound(positions.begin(), positions.end(), pos);
+        if (it == positions.end() || *it != pos) {
+            return Status::error(ErrorCode::InvalidArgument,
+                                 "attention index has no selected position");
+        }
+        index_rows.push_back(static_cast<int32_t>(it - positions.begin()));
+    }
+
+    // Chunked prefill writes KV cells progressively: when a chunk covering
+    // rows [range.begin, range.end) executes, only rows < range.end exist.
+    // Gathering beyond that reads unwritten cells, so each chunk gathers the
+    // prefix of mapped rows already in the cache (empty prefix -> gather
+    // disabled for the chunk, dense attention over the written rows, which
+    // is causally safe).
+    std::vector<Range> ranges;
+    auto st = ChunkScheduler::plan(static_cast<uint32_t>(tokens.size()),
+                                   opts.enable_chunking ? opts.chunk_size : 0,
+                                   llama_n_ubatch(backend_->context()), &ranges);
+    if (!st.ok()) return st;
+
+    stats->chunks = static_cast<uint32_t>(ranges.size());
+    stats->chunk_stats.clear();
+    std::vector<int32_t> allowed;
+    for (const auto& range : ranges) {
+        std::vector<llama_token> chunk_tokens(tokens.begin() + range.begin,
+                                              tokens.begin() + range.end);
+        std::vector<llama_pos> chunk_positions(positions.begin() + range.begin,
+                                                positions.begin() + range.end);
+        const auto row_end =
+            std::lower_bound(index_rows.begin(), index_rows.end(),
+                             static_cast<int32_t>(range.end));
+        allowed.assign(index_rows.begin(), row_end);
+        st = backend_->set_attn_indices(allowed);
+        if (!st.ok()) return st;
+        st = backend_->set_attn_top_k(static_cast<int32_t>(allowed.size()));
+        if (!st.ok()) return st;
+
+        PrefillStats chunk_stats;
+        chunk_stats.collect_chunk_stats = stats->collect_chunk_stats;
+        st = backend_->prefill(chunk_tokens, chunk_positions, 0, &chunk_stats);
+        if (!st.ok()) return st;
+        for (ChunkStats cs : chunk_stats.chunk_stats) {
+            cs.index = static_cast<uint32_t>(stats->chunk_stats.size());
+            cs.attn_rows = static_cast<uint32_t>(allowed.size());
+            stats->chunk_stats.push_back(cs);
         }
     }
     return Status::success();

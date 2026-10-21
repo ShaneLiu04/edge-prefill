@@ -128,4 +128,45 @@ Status AttentionSparsityController::build(const Selection& selection,
     return Status::success();
 }
 
+Status AttentionSparsityController::validate_indices(const std::vector<int32_t>& indices,
+                                                     const Selection& selection) {
+    if (indices.empty()) {
+        return Status::error(ErrorCode::InvalidArgument, "attention indices are empty");
+    }
+    for (size_t i = 0; i < indices.size(); ++i) {
+        const int32_t idx = indices[i];
+        if (idx < 0 || static_cast<uint32_t>(idx) >= selection.total_tokens) {
+            return Status::error(ErrorCode::InvalidArgument, "attention index out of range");
+        }
+        if (i > 0 && idx <= indices[i - 1]) {
+            return Status::error(ErrorCode::InvalidArgument,
+                                 "attention indices must be strictly ascending");
+        }
+        if (!std::binary_search(selection.token_indices.begin(),
+                                selection.token_indices.end(), static_cast<uint32_t>(idx))) {
+            return Status::error(ErrorCode::InvalidArgument,
+                                 "attention index is not a selected position");
+        }
+    }
+    // The final prompt token produces the first-token logits and needs its
+    // own key row gathered for self-attention.
+    if (indices.back() != static_cast<int32_t>(selection.total_tokens - 1)) {
+        return Status::error(ErrorCode::InvalidArgument,
+                             "attention indices must include the last prompt token");
+    }
+    return Status::success();
+}
+
+void AttentionSparsityController::chunk_indices(const std::vector<int32_t>& indices,
+                                                llama_pos chunk_end_pos,
+                                                std::vector<int32_t>* allowed) {
+    if (!allowed) return;
+    allowed->clear();
+    if (chunk_end_pos < 0) return;
+    // indices are ascending by contract, so the safe set for this chunk is
+    // the prefix of positions already written to the KV cache.
+    const auto end = std::upper_bound(indices.begin(), indices.end(), chunk_end_pos);
+    allowed->assign(indices.begin(), end);
+}
+
 } // namespace edge_prefill

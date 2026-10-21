@@ -9,6 +9,7 @@
 #include <sstream>
 #include <unordered_map>
 
+#include "edge_prefill/attention_sparsity.h"
 #include "edge_prefill/backend.h"
 #include "edge_prefill/log.h"
 #include "edge_prefill/planner.h"
@@ -187,6 +188,8 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
     base.use_chat_template = true;
     base.kv_type = KvPrecision::F16;
     base.results_dir = cfg.out_dir;
+    base.attn_top_k = cfg.attn_top_k;
+    base.attn_top_k_layers = cfg.attn_top_k_layers;
 
     LlamaBackend backend;
     auto st = LlamaBackend::init();
@@ -280,6 +283,31 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
                     st = selector.select(tokens, c.question, pieces, sopts, nullptr, &selection);
                     if (!st.ok()) continue;
 
+                    // Derive attention gather indices for non-dense plans;
+                    // an empty result (covers-all or disabled) keeps the
+                    // block-sparse path untouched.
+                    if (plan.attention_top_k > 0 && !selection.dense) {
+                        AttentionSparsityOptions aopts;
+                        aopts.block_size = run_cfg.block_size;
+                        aopts.top_k_blocks = plan.attention_top_k;
+                        if (!run_cfg.attn_top_k_layers.empty()) {
+                            aopts.per_layer = true;
+                            std::vector<uint32_t> layers;
+                            if (parse_u32_list(run_cfg.attn_top_k_layers, &layers).ok()) {
+                                aopts.layer_top_k = std::move(layers);
+                            }
+                        }
+                        std::vector<int32_t> attn_indices;
+                        std::string attn_reason;
+                        if (AttentionSparsityController::build(selection, aopts, &attn_indices,
+                                                               &attn_reason)
+                                .ok()) {
+                            selection.attention_indices = std::move(attn_indices);
+                            selection.attention_top_k =
+                                static_cast<uint32_t>(selection.attention_indices.size());
+                        }
+                    }
+
                     if (log_level() >= LogLevel::Debug && !selection.dense) {
                         size_t needle_token = tokens.size();
                         std::string acc;
@@ -324,13 +352,43 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
                     popts.enable_ffn_skip = true;
                     popts.ffn_skip_mask = plan.dense_fallback ? 0 : plan.skip_ffn_mask;
 
-                    const auto begin = std::chrono::steady_clock::now();
+                    // Untimed warmup runs stabilize caches and page in model
+                    // weights so the timed repeats measure steady state.
+                    bool prefill_ok = true;
+                    for (uint32_t w = 0; w < base.warmup; ++w) {
+                        PrefillStats warm_stats;
+                        if (!prefilter.prefill(tokens, selection, popts, &warm_stats).ok()) {
+                            prefill_ok = false;
+                            break;
+                        }
+                    }
+                    if (!prefill_ok) {
+                        if (warnings) warnings->push_back("prefill-failed:" + c.id);
+                        continue;
+                    }
+
+                    const uint32_t reps = std::max<uint32_t>(1, base.repeats);
+                    std::vector<double> ttft_samples;
                     PrefillStats stats;
-                    st = prefilter.prefill(tokens, selection, popts, &stats);
-                    if (!st.ok()) continue;
-                    const auto first = std::chrono::steady_clock::now();
-                    const double ttft_ms =
-                        std::chrono::duration<double, std::milli>(first - begin).count();
+                    const auto last_begin = std::chrono::steady_clock::now();
+                    for (uint32_t r = 0; r < reps; ++r) {
+                        const auto begin = std::chrono::steady_clock::now();
+                        st = prefilter.prefill(tokens, selection, popts, &stats);
+                        const auto first = std::chrono::steady_clock::now();
+                        if (!st.ok()) {
+                            prefill_ok = false;
+                            break;
+                        }
+                        ttft_samples.push_back(
+                            std::chrono::duration<double, std::milli>(first - begin).count());
+                    }
+                    if (!prefill_ok) {
+                        if (warnings) warnings->push_back("prefill-failed:" + c.id);
+                        continue;
+                    }
+                    // Median TTFT: robust to scheduler noise on either side.
+                    std::sort(ttft_samples.begin(), ttft_samples.end());
+                    const double ttft_ms = ttft_samples[ttft_samples.size() / 2];
 
                     const float* first_logits = llama_get_logits_ith(backend.context(), -1);
                     std::string generated;
@@ -378,8 +436,10 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
                         quality = f1_score(generated, c.answer);
                     }
                     const auto end = std::chrono::steady_clock::now();
+                    // E2E covers the last timed repeat end to end: its prefill
+                    // plus the greedy generation that follows.
                     const double e2e_ms =
-                        std::chrono::duration<double, std::milli>(end - begin).count();
+                        std::chrono::duration<double, std::milli>(end - last_begin).count();
 
                     Sample sample;
                     sample.task = c.task;
@@ -397,6 +457,8 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
                     sample.selected_tokens = stats.selected_tokens;
                     sample.mode = mode_name(mode);
                     sample.budget = sopts.budget;
+                    sample.attn_top_k = static_cast<uint32_t>(std::max<int32_t>(0, stats.attn_top_k));
+                    sample.repeats = reps;
                     log_info("case=" + sample.case_id + " mode=" + sample.mode +
                              " quality=" + std::to_string(sample.quality) +
                              " generated=" + generated);

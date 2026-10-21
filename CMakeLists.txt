@@ -85,6 +85,7 @@ if(EDGE_PREFILL_BUILD_TESTS)
         tests/test_planner.cpp
         tests/test_ffn_skip.cpp
         tests/test_integration.cpp
+        tests/test_sparse_attn_exec.cpp
     )
     target_link_libraries(edge_prefill_tests PRIVATE edge_prefill)
     target_include_directories(edge_prefill_tests PRIVATE ${llama_SOURCE_DIR}/include ${llama_SOURCE_DIR}/ggml/include)

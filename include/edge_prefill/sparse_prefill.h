@@ -19,6 +19,9 @@ public:
         bool enable_ffn_skip = true;
         uint64_t ffn_skip_mask = 0;
         bool collect_chunk_stats = true;
+        // Honor selection.attention_indices with per-chunk gather
+        // adjustment. False keeps the block-sparse execution untouched.
+        bool enable_attn_sparse = true;
     };
 
     SparsePrefiller(LlamaBackend* backend, PrefixCache* cache);
@@ -32,6 +35,12 @@ public:
                              const KvSignature& sig);
 
 private:
+    Status attn_prefill(const std::vector<llama_token>& tokens,
+                        const std::vector<llama_pos>& positions,
+                        const std::vector<int32_t>& attn_indices,
+                        const Options& opts,
+                        PrefillStats* stats);
+
     LlamaBackend* backend_;
     PrefixCache* cache_;
 };

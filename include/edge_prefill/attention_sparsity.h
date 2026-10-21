@@ -4,6 +4,8 @@
 #include <string>
 #include <vector>
 
+#include <llama.h>
+
 #include "edge_prefill/selector.h"
 #include "edge_prefill/status.h"
 
@@ -34,6 +36,23 @@ public:
                         const AttentionSparsityOptions& opts,
                         std::vector<int32_t>* attention_indices,
                         std::string* reason);
+
+    // Validates gather indices before execution: strictly ascending, within
+    // [0, selection.total_tokens), members of selection.token_indices, and
+    // containing the final prompt token (first-token logits need
+    // self-attention). Returns InvalidArgument with the violated rule.
+    static Status validate_indices(const std::vector<int32_t>& indices,
+                                   const Selection& selection);
+
+    // Per-chunk adjustment for chunked prefill: when a chunk executes, the KV
+    // cache only holds positions <= chunk_end_pos, so gathering anything
+    // beyond that would read unwritten cells. Fills allowed with the
+    // ascending prefix of indices that is safe for this chunk. An empty
+    // result is valid: the caller must disable gathering for that chunk
+    // (dense attention over the written rows is causally safe).
+    static void chunk_indices(const std::vector<int32_t>& indices,
+                              llama_pos chunk_end_pos,
+                              std::vector<int32_t>* allowed);
 };
 
 } // namespace edge_prefill

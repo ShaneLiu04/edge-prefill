@@ -38,6 +38,12 @@ struct PrefillStats {
     std::vector<ChunkStats> chunk_stats;
     uint64_t kv_bytes = 0;
     bool collect_chunk_stats = true;
+    // Attention gather audit: planned row count, effective top-k (0 when the
+    // path is disabled, fell back, or the selection is dense), and whether a
+    // missing llama.cpp patch degraded the run to block-level sparsity only.
+    uint32_t attn_indices = 0;
+    int32_t attn_top_k = 0;
+    bool attn_fallback = false;
 };
 
 struct ModelFingerprint {
