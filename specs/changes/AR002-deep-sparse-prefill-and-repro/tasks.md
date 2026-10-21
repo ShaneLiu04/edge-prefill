@@ -12,7 +12,7 @@
 | ID | 任务描述 | 依赖 | 状态 | 备注 |
 |----|---------|------|------|------|
 | T001 | AR001 基线审计与兼容性回归：确认现有块稀疏、前缀缓存、FFN skip、KV 精度在 AR002 开发期间不回归；修复 QA `qa-02` 质量回退与 `test_planner.cpp` balanced FFN skip 语义不一致 | - | passing | 2026-10-20 完成 |
-| T002 | llama.cpp attention 级稀疏最小 patch：实现全局/分层 top-k gather（`ggml_get_rows`）、可审查运行时开关与 `llama_set_prefill_attn_top_k`/`llama_set_prefill_attn_indices` API | T001 | pending | patch 必须可禁用 |
+| T002 | llama.cpp attention 级稀疏最小 patch：实现全局/分层 top-k gather（`ggml_get_rows`）、可审查运行时开关与 `llama_set_prefill_attn_top_k`/`llama_set_prefill_attn_indices` API | T001 | passing | 2026-10-21 完成 |
 | T003 | Draft 模型与分层稀疏选择器集成：真实 GGUF draft 语义打分、块级选择 + attention 级 top-k 候选排序与 `Plan` 新字段 | T002 | pending | 核心创新 |
 | T004 | 分层稀疏 prefill 执行路径：位置保持、因果性、dense 回退、审计统计与 benchmark `repeats/warmup` | T003 | pending | 必须真实推理 |
 | T005 | 跨请求与多轮前缀 KV 复用：Radix 树缓存、最长前缀命中、共享 system prompt、多轮追加 | T001 | pending | 真实 state 复用 |
@@ -57,6 +57,37 @@
   - 修复 `planner_balanced_8k` 断言与实现的 Balanced FFN skip 语义不一致
   - 修复 selector `best_lex` 被问题后缀自我匹配污染的问题
   - 新增 `selector_query_suffix_does_not_dominate_lexical` 回归用例
+
+### 2026-10-21 会话记录
+
+- 完成任务：T002 llama.cpp attention 级稀疏最小 patch
+- 修改文件：
+  - `patches/llama-prefill-attn-top-k.patch`（新增，268 行）
+  - `scripts/apply_llama_patch.sh`（支持两个 patch 依次应用）
+  - `include/edge_prefill/backend.h`（新增 `set_attn_top_k`/`set_attn_indices` 等 4 个方法）
+  - `src/backend.cpp`（C API 的 Status 包装与错误码转换）
+  - `tests/test_integration.cpp`（新增 `integration_attn_top_k` 测试）
+- patch 内容：
+  - `include/llama.h`：4 个 C API（`llama_set_prefill_attn_top_k`、`llama_get_prefill_attn_top_k`、`llama_set_prefill_attn_indices`、`llama_get_prefill_attn_indices_size`），返回 int32_t 错误码
+  - `src/llama-cparams.h`：`prefill_attn_top_k` + `prefill_attn_indices` 配置
+  - `src/llama-context.cpp`：API 实现与输入校验（严格升序、< n_ctx、负值返回 2）
+  - `src/llama-graph.h/.cpp`：`llm_graph_input_attn_kv` 新增 `self_attn_idx` 输入张量；`build_attn` 在 prefill 模式下对 K/V/KQ mask 执行 `ggml_get_rows` gather；graph `can_reuse` 检查 top-k 一致性
+- 关键实现决策：
+  - gather 方式：K/V/KQ mask 分别 permute 到 n_kv 在 dim1 的布局，用 `ggml_get_rows` 按 indices gather，再 permute 回原布局并 `ggml_cont`
+  - 因果性：直接 gather 原 KQ mask 的行，天然保持因果语义
+  - V 布局：trans-V 和 non-trans V 统一 gather-back 为非 trans 布局，`build_attn_mha` 的 `v_trans` 检测与 `!v_trans` 分支自动处理
+  - `ggml_get_rows` 支持 F16/Q8_0 等量化输入（输出 F32），无需 cast
+  - 限制：首版不支持 flash attention（F16 mask），文档记录
+- 调试修复：
+  - `ggml_permute` 语义：`ne[axis_i] = a->ne[i]`，trans-V 的 permute 参数曾写反
+  - `ggml_soft_max` 要求 mask 连续，gather 后需 `ggml_cont`
+  - `ggml_mul_mat` 要求非 transposed 输入，gather-back 后需 `ggml_cont` 统一为非 trans 布局
+- 测试结果：
+  - CTest 无模型：1/1 通过
+  - CTest 真实模型：1/1 通过（37 个用例全 PASS）
+  - `integration_attn_top_k`：API 校验（负值/非升序/越界返回 InvalidArgument）、边界等价（top_k=n 时与 dense argmax 相同）、gather 激活（半数 indices 时 logits 有限且与 dense 不同）、禁用恢复（top_k=0 后与 dense max diff < 1e-5）
+  - 全部原有测试无回归（dense 路径在 top_k=0 时完全不经过 gather 代码）
+
 
 ## 阶段门控记录
 

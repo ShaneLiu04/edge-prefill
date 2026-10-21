@@ -328,6 +328,37 @@ uint64_t LlamaBackend::ffn_skip_mask() const {
     return ctx_ ? llama_get_prefill_ffn_skip(ctx_) : 0;
 }
 
+Status LlamaBackend::set_attn_top_k(int32_t top_k) {
+    if (!ctx_) return Status::error(ErrorCode::InvalidArgument, "context is not created");
+    const int32_t rc = llama_set_prefill_attn_top_k(ctx_, top_k);
+    if (rc != 0) {
+        return Status::error(ErrorCode::InvalidArgument,
+                             "llama_set_prefill_attn_top_k rejected top_k=" +
+                                 std::to_string(top_k));
+    }
+    return Status::success();
+}
+
+int32_t LlamaBackend::attn_top_k() const {
+    return ctx_ ? llama_get_prefill_attn_top_k(ctx_) : 0;
+}
+
+Status LlamaBackend::set_attn_indices(const std::vector<int32_t>& indices) {
+    if (!ctx_) return Status::error(ErrorCode::InvalidArgument, "context is not created");
+    const int32_t rc = llama_set_prefill_attn_indices(
+            ctx_, indices.empty() ? nullptr : indices.data(), indices.size());
+    if (rc != 0) {
+        return Status::error(ErrorCode::InvalidArgument,
+                             "llama_set_prefill_attn_indices rejected indices (n=" +
+                                 std::to_string(indices.size()) + ")");
+    }
+    return Status::success();
+}
+
+int32_t LlamaBackend::attn_indices_size() const {
+    return ctx_ ? llama_get_prefill_attn_indices_size(ctx_) : 0;
+}
+
 int32_t LlamaBackend::n_vocab() const {
     return vocab_ ? llama_vocab_n_tokens(vocab_) : 0;
 }

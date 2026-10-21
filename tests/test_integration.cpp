@@ -184,6 +184,95 @@ TEST_CASE(integration_sparse_needle) {
     LlamaBackend::shutdown();
 }
 
+TEST_CASE(integration_attn_top_k) {
+    const std::string path = test_model_path();
+    if (path.empty()) {
+        std::cout << "SKIP integration_attn_top_k (EDGE_PREFILL_TEST_MODEL unset)\n";
+        return;
+    }
+    LlamaBackend::init();
+    LlamaBackend backend;
+    CHECK_OK(backend.load_model(path));
+    ContextOptions ctx;
+    ctx.n_ctx = 2048;
+    ctx.n_batch = 512;
+    ctx.n_ubatch = 512;
+    ctx.n_threads = 4;
+    ctx.n_threads_batch = 4;
+    // The attention top-k gather path requires non-flash attention
+    // (ggml_get_rows produces F32 masks; flash attention requires F16).
+    ctx.flash_attn = false;
+    CHECK_OK(backend.create_context(ctx));
+
+    std::string text;
+    for (int i = 0; i < 120; ++i) {
+        text += "The quick brown fox jumps over the lazy dog. Rain falls on the old roof. ";
+    }
+    std::vector<llama_token> tokens;
+    CHECK_OK(backend.tokenize(text, &tokens));
+    if (tokens.size() > 512) tokens.resize(512);
+    CHECK(tokens.size() >= 256);
+
+    // --- API validation ---
+    CHECK(!backend.set_attn_top_k(-1).ok());
+    CHECK_OK(backend.set_attn_top_k(0));
+    CHECK_EQ(backend.attn_top_k(), 0);
+
+    std::vector<int32_t> bad_not_ascending = {5, 3, 7};
+    CHECK(!backend.set_attn_indices(bad_not_ascending).ok());
+    std::vector<int32_t> bad_duplicate = {3, 3, 7};
+    CHECK(!backend.set_attn_indices(bad_duplicate).ok());
+    std::vector<int32_t> bad_out_of_range = {0, 100000};
+    CHECK(!backend.set_attn_indices(bad_out_of_range).ok());
+    CHECK_EQ(backend.attn_indices_size(), 0);
+
+    // --- Boundary: top_k == n_tokens means no reduction -> gather skipped,
+    // logits must be identical to dense (same code path). ---
+    const auto dense = dense_run(&backend, tokens, 512);
+    CHECK(!dense.empty());
+
+    std::vector<int32_t> all_indices(tokens.size());
+    std::iota(all_indices.begin(), all_indices.end(), 0);
+    CHECK_OK(backend.set_attn_indices(all_indices));
+    CHECK_EQ(backend.attn_indices_size(), static_cast<int32_t>(tokens.size()));
+    CHECK_OK(backend.set_attn_top_k(static_cast<int32_t>(tokens.size())));
+
+    const auto full_gather = dense_run(&backend, tokens, 512);
+    CHECK(!full_gather.empty());
+    CHECK_EQ(argmax(dense), argmax(full_gather));
+
+    // --- Functional: top_k < n exercises the real gather path; logits must
+    // remain finite and differ from dense (proving gather is active). ---
+    std::vector<int32_t> subset_indices;
+    // Keep every other position; strictly ascending by construction.
+    for (size_t i = 0; i < tokens.size(); i += 2) {
+        subset_indices.push_back(static_cast<int32_t>(i));
+    }
+    CHECK_OK(backend.set_attn_indices(subset_indices));
+    CHECK_OK(backend.set_attn_top_k(static_cast<int32_t>(subset_indices.size())));
+
+    const auto sparse = dense_run(&backend, tokens, 512);
+    CHECK(!sparse.empty());
+    {
+        double worst = 0.0;
+        for (size_t i = 0; i < sparse.size(); ++i) {
+            CHECK(std::isfinite(sparse[i]));
+            worst = std::max(worst, std::fabs(static_cast<double>(sparse[i])));
+        }
+        CHECK(worst < 1e6);
+    }
+    // Gather with half the positions must change the logits.
+    CHECK(max_abs_diff(dense, sparse) > 1e-6);
+
+    // --- Cleanup: disabling restores the dense path exactly. ---
+    CHECK_OK(backend.set_attn_top_k(0));
+    const auto restored = dense_run(&backend, tokens, 512);
+    CHECK(!restored.empty());
+    CHECK(max_abs_diff(dense, restored) < 1e-5);
+
+    LlamaBackend::shutdown();
+}
+
 TEST_CASE(integration_real_model) {
     Loaded loaded;
     if (!load(&loaded)) {
@@ -192,6 +281,7 @@ TEST_CASE(integration_real_model) {
     }
 
     std::vector<llama_pos> positions(loaded.tokens.size());
+
     std::iota(positions.begin(), positions.end(), 0);
 
     const auto full = dense_run(&loaded.backend, loaded.tokens, 512);

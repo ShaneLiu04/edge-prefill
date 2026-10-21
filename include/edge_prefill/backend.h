@@ -80,6 +80,15 @@ public:
     Status set_ffn_skip_mask(uint64_t mask);
     uint64_t ffn_skip_mask() const;
 
+    // Attention-level top-k sparse prefill (requires the llama.cpp
+    // llama-prefill-attn-top-k patch). top_k == 0 disables gathering and
+    // restores the original dense attention path.
+    Status set_attn_top_k(int32_t top_k);
+    int32_t attn_top_k() const;
+    // indices must be strictly ascending and < n_ctx; empty disables.
+    Status set_attn_indices(const std::vector<int32_t>& indices);
+    int32_t attn_indices_size() const;
+
     const llama_model* model() const { return model_; }
     llama_context* context() const { return ctx_; }
     const llama_vocab* vocab() const { return vocab_; }
