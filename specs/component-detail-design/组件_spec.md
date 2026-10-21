@@ -3,8 +3,8 @@
 | 字段 | 内容 |
 |------|------|
 | 组件名称 | edge-prefill / EdgePrefill |
-| 版本 | 0.2（AR002） |
-| 日期 | 2026-10-20 |
+| 版本 | 0.3（AR003） |
+| 日期 | 2026-10-21 |
 | 语言 | C++17 |
 | 构建 | CMake ≥ 3.20 |
 | 推理后端 | llama.cpp（固定 commit）+ GGUF |
@@ -13,9 +13,10 @@
 
 EdgePrefill 负责端侧 LLM 的 **prefill 阶段优化**：在真实 GGUF 模型上，通过
 **draft 模型语义打分**、**块级上下文选择**、**attention 级全局/分层 top-k**、
-**跨请求/多轮前缀 KV 复用（Radix 树）**、**分块 prefill**、**prefill-only FFN 跳过**、
-**按层与相位感知的 KV 精度规划**、**自动调优与 Pareto 基准**，降低 TTFT 与 KV 写入量，
-同时以真实基准验证质量保持。
+**head 级自适应稀疏（离线 head 分类 + 层×头 top-k 矩阵）**、**在线质量风险
+控制**、**跨请求/多轮前缀 KV 复用（Radix 树）**、**分块 prefill**、
+**prefill-only FFN 跳过**、**按层与相位感知的 KV 精度规划**、**自动调优与
+Pareto 基准**，降低 TTFT 与 KV 写入量，同时以真实基准验证质量保持。
 
 **不负责：** 模型训练/微调、decode 算法优化、GPU/NPU 自定义 kernel、服务化多请求调度。
 
@@ -25,11 +26,13 @@ EdgePrefill 负责端侧 LLM 的 **prefill 阶段优化**：在真实 GGUF 模�
 ┌──────────────────────────────────────────────────────────────┐
 │ CLI / Benchmark Runner / TuneRunner                          │
 ├──────────────────────────────────────────────────────────────┤
-│ Planner（预算/模式/attention top-k/自适应精度/回退）             │
+│ Planner（预算/模式/attention top-k/自适应精度/回退/风险控制）    │
 │   ├─ DraftScorer                                            │
 │   ├─ BlockSelector                                          │
 │   ├─ AttentionSparsityController                            │
-│   └─ AdaptivePrecisionController（策略规划层）                 │
+│   ├─ AdaptivePrecisionController（策略规划层）                 │
+│   ├─ RiskController（三级风险动作）                            │
+│   └─ HeadProfileLoader（离线 profile 校验与加载）              │
 ├──────────────────────────────────────────────────────────────┤
 │ PrefixCache(Radix)   ChunkScheduler                          │
 ├──────────────────────────────────────────────────────────────┤
@@ -38,7 +41,9 @@ EdgePrefill 负责端侧 LLM 的 **prefill 阶段优化**：在真实 GGUF 模�
 │ LlamaBackend（model/context/vocab/KV/state）                  │
 │   ├─ FFNSkipController（patched llama.cpp）                   │
 │   ├─ AttentionTopKController（patched llama.cpp）             │
-│   └─ PerLayerKV（patched llama.cpp）                          │
+│   ├─ PerHeadAttnSparsity（ranked 池 + 层×头矩阵，patched）      │
+│   ├─ PerLayerKV（patched llama.cpp）                          │
+│   └─ HeadClassifier（单 head 消融探测，classify-heads 工具）     │
 ├──────────────────────────────────────────────────────────────┤
 │ llama.cpp / ggml（固定上游 + 最小 patch）                       │
 └──────────────────────────────────────────────────────────────┘
@@ -49,7 +54,7 @@ EdgePrefill 负责端侧 LLM 的 **prefill 阶段优化**：在真实 GGUF 模�
 | 结构 | 作用 | 关键字段 |
 |------|------|----------|
 | `Config` | 运行配置 | model、draft_model、budget、mode、block/chunk、attention_top_k、skip mask、KV 类型/profile、hardware_profile |
-| `Plan` | 规划器输出 | passes、budget、skip mask、dense_fallback、reasons、attention_top_k、kv_profile、ffn_skip_mask、draft_enabled |
+| `Plan` | 规划器输出 | passes、budget、skip mask、dense_fallback、reasons、attention_top_k、kv_profile、ffn_skip_mask、draft_enabled、per_head_top_k（层×头矩阵序列化）、head_adaptive、risk_level |
 | `Selection` | 块选择结果 | block/token indices、signals、mandatory、selected_tokens、attention_indices、attention_top_k |
 | `CacheHit` | 前缀命中 | prefix_len、state blob、age、node_id |
 | `CacheStats` | 缓存统计 | cache_hit_rate、reused_tokens、saved_ttft_ms、saved_kv_bytes |
@@ -57,9 +62,12 @@ EdgePrefill 负责端侧 LLM 的 **prefill 阶段优化**：在真实 GGUF 模�
 | `KvLayerProfile` | 单层 KV 类型 | type_k、type_v |
 | `AdaptiveLayerProfile` | 按层调度结果 | kv_profile、ffn_skip_mask |
 | `HardwareProfile` | 硬件条件 | n_threads、has_cuda、available_memory、n_ctx |
-| `TuneSearchSpace` | 自动调优搜索空间 | budgets、block_sizes、attention_top_ks、kv_types、ffn_masks、chunk_sizes |
+| `TuneSearchSpace` | 自动调优搜索空间 | budgets、block_sizes、attention_top_ks、kv_types、ffn_masks、chunk_sizes、head_adaptive |
 | `ChunkStats` | 分块统计 | tokens、elapsed_us、kv_pos_max |
-| `Sample` | 基准样本 | ttft/e2e、tokens/s、kv_bytes、quality、quality_retention、cache_hit_rate、reused_tokens |
+| `Sample` | 基准样本 | ttft/e2e、tokens/s、kv_bytes、quality、quality_retention、cache_hit_rate、reused_tokens、attention_top_k、repeats、risk_level、head_adaptive、retrieval_heads |
+| `HeadProfile` | 离线 head 分类结果 | model_sha、n_layer、n_head、probe 参数、heads[]（layer/head/echo_score/induction_score/retrieval）|
+| `RiskSignals` / `RiskDecision` | 风险输入与决策 | separation/coverage/anchor_ratio → Ok/Tighten/DenseFallback + reason |
+| `HeadProbeParams` | head 探测参数 | block_len、repeats、sink、recent、probe_k、seed |
 
 ## 4. 关键接口契约
 
@@ -84,6 +92,25 @@ EdgePrefill 负责端侧 LLM 的 **prefill 阶段优化**：在真实 GGUF 模�
   `llama_set_prefill_attn_indices` 控制；C API 返回 `int32_t` 错误码
   （`0=Ok, 2=InvalidArgument, 9=Unsupported`），由 `LlamaBackend` 转换为 `Status`；
   indices 必须升序且在 KV 范围内，patch 缺失时返回 `Unsupported`，其余功能不受影响。
+- Head 级自适应稀疏（AR003）通过 `llama_set_prefill_attn_ranked_rows`（按分数
+  排名的候选行池，不要求升序）与 `llama_set_prefill_attn_head_top_k`（层×头
+  top-k 矩阵，`-1`=该 head 稠密直通）控制；矩阵长度必须等于 n_layer×n_head，
+  元素为 -1 或 ≥1，矩阵非空要求池非空，违反返回 `InvalidArgument`；graph 每层
+  按 distinct top-k 值分组（≤4 组，超限该层安全降级 dense），组内取池前 k、
+  过滤未写行、内部升序 gather；矩阵优先于标量路径，清空矩阵恢复 AR002 行为；
+  patch 缺失返回 `Unsupported` 并回退标量路径，`Plan.reasons` 记录
+  `per-head-unsupported`；flash attention 下矩阵路径禁用（同标量限制）。
+- `HeadClassifier`（classify-heads 子命令）通过 `LlamaBackend` 公共接口做单
+  head 消融探测（单 head 施加 sink+recent 稀疏、其余 dense，真实前向 logits
+  散度），输出确定性 JSON profile；不引入 attention dump，不产生合成分数；
+  探测长度超过 n_ctx 返回 `InvalidArgument` 并给出建议参数。
+- `RiskController` 为纯函数：draft 分数区分度/覆盖率/锚完整率 →
+  `Ok/Tighten/DenseFallback` 三级动作；evaluate 失败按 `Tighten` 保守处理；
+  `Plan.risk_level` 与 metrics `risk_level` 列全程审计；`--risk-guard off` 时
+  决策器旁路（行为与无控制器逐字段一致）。
+- `HeadProfile` 加载时校验 n_layer/n_head 与加载模型一致，不符返回
+  `InvalidArgument`，不静默使用错误 profile；`--head-adaptive off` 时规划与
+  AR002 全局路径逐字段一致。
 - `AdaptivePrecisionController` 输出 `AdaptiveLayerProfile`，同时管理按层 KV 类型
   （`kv_profile`）与按层深/位置的 FFN 跳过（`ffn_skip_mask`）；quality 模式自动回退
   全 F16 且关闭 FFN skip。启用 adaptive 时 `ffn_skip_mask` 覆盖 `ffn_skip.h/cpp` 的
@@ -108,7 +135,7 @@ EdgePrefill 负责端侧 LLM 的 **prefill 阶段优化**：在真实 GGUF 模�
 | `AttentionSparsity` | indices 必须严格升序且小于 KV 长度；`top_k=0` 关闭；C API 返回 `int32_t` 错误码，patch 缺失返回 `Unsupported` |
 | `PerLayerKV` | `type_k/type_v` 数组长度必须等于 `n_layer`；长度不匹配返回 `InvalidArgument` |
 | `TuneRunner` | 单个候选配置失败记录原因但不终止搜索；推荐配置必须满足质量门禁 |
-| CLI 退出码 | 与 ErrorCode 一一对应；`plan/inspect` 不返回 5/6/7/8；未知参数=2 |
+| CLI 退出码 | 与 ErrorCode 一一对应；`plan/inspect` 不返回 5/6/7/8；未知参数=2；`classify-heads` 额外契约：3=ModelLoad、2=参数非法（含探测长度>n_ctx）、11=输出不可写 |
 | 警告出口 | `Plan.reasons`、`Status.message`、CLI stderr 三者之一，测试必须断言具体字符串 |
 
 ## 5. 设计约束
@@ -129,9 +156,10 @@ EdgePrefill 负责端侧 LLM 的 **prefill 阶段优化**：在真实 GGUF 模�
 
 ## 6. 对外交付
 
-- `libedge_prefill.a` + `edge-prefill` CLI。
+- `libedge_prefill.a` + `edge-prefill` CLI（含 `classify-heads`、`tune` 子命令）。
 - 公共头文件 `include/edge_prefill/*.h`。
-- 基准配置、脚本、结果报告。
+- 基准配置、脚本（`setup.sh`/`download_data.sh`/`run_experiments.sh`/
+  `sync_gitee.sh`）、结果报告。
 - `README.md`、`docs/architecture.md`、`docs/experiments.md`、`docs/research.md`。
 
 ## 7. 变更记录
@@ -140,3 +168,4 @@ EdgePrefill 负责端侧 LLM 的 **prefill 阶段优化**：在真实 GGUF 模�
 |------|------|------|
 | 2026-10-20 | 初始组件设计，建立 AR001 架构基线 | AR001 |
 | 2026-10-20 | 升级为 AR002：加入 draft 模型、attention 全局/分层 top-k、Radix 前缀缓存、按层 KV 精度、自动调优与 Pareto 基准 | AR002 |
+| 2026-10-21 | 升级为 AR003：加入 head 级自适应稀疏（ranked 池 + 层×头 top-k 矩阵 patch、消融式 head 分类器）、在线质量风险控制器、TuneSearchSpace 增 head_adaptive 维度、Sample 增 risk_level/head_adaptive/retrieval_heads、classify-heads CLI 契约、sync_gitee.sh 交付 | AR003 |

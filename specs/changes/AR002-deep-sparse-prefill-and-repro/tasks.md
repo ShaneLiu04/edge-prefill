@@ -1,5 +1,10 @@
 # [AR002] 任务跟踪：深度稀疏 Prefill 与自适应复用创新
 
+> **状态：superseded（2026-10-21）** — T001–T004 已交付（见进度记录）；
+> T005–T017 未完成任务已并入 AR003
+> （`specs/changes/AR003-head-level-adaptive-sparse-prefill/tasks.md` T007–T018）。
+> 本 AR 不再单独推进。
+
 | 字段 | 内容 |
 |------|------|
 | AR 编号 | AR002 |
