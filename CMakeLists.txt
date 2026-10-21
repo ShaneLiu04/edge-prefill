@@ -48,6 +48,7 @@ add_library(edge_prefill
     src/chunk_scheduler.cpp
     src/ffn_skip.cpp
     src/precision.cpp
+    src/head_profile.cpp
     src/planner.cpp
     src/sparse_prefill.cpp
     src/metrics.cpp
@@ -84,6 +85,7 @@ if(EDGE_PREFILL_BUILD_TESTS)
         tests/test_chunk_scheduler.cpp
         tests/test_planner.cpp
         tests/test_ffn_skip.cpp
+        tests/test_head_profile.cpp
         tests/test_integration.cpp
         tests/test_sparse_attn_exec.cpp
     )

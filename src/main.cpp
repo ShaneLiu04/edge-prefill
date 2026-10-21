@@ -44,6 +44,7 @@ struct Args {
     std::string skip_ffn;
     std::string draft_model;
     std::string attn_top_k_layers;
+    std::string head_profile;
     uint32_t tokens = 0;
     uint32_t max_new_tokens = 32;
     uint32_t n_ctx = 0;
@@ -52,6 +53,12 @@ struct Args {
     int32_t repeats = 5;
     uint32_t attn_top_k = 0;
     bool attn_top_k_set = false;
+    bool head_adaptive = false;
+    bool head_adaptive_set = false;
+    bool risk_guard = true;
+    bool risk_guard_set = false;
+    double head_retrieval_threshold = 0.10;
+    bool head_retrieval_threshold_set = false;
     double budget = 0.5;
     bool budget_set = false;
     bool chat = false;
@@ -72,6 +79,8 @@ void usage() {
         "  --mode latency|balanced|quality|reuse|dense\n"
         "  --budget <0..1>   --kv-type f16|q8_0|q4_0   --skip-ffn <spec>\n"
         "  --draft-model M   --attn-top-k N  --attn-top-k-layers 4,8,16\n"
+        "  --head-profile P  --head-adaptive on|off  --head-retrieval-threshold F\n"
+        "  --risk-guard on|off\n"
         "  --threads N       --n-ctx N                 --n-ubatch N\n"
         "  --max-new-tokens N  --chat   --dump-plan P  --dump-selection P\n"
         "  --verbose\n";
@@ -157,6 +166,46 @@ Status parse_args(int argc, char** argv, Args* args) {
             }
             args->attn_top_k = static_cast<uint32_t>(parsed);
             args->attn_top_k_set = true;
+        } else if (flag == "--head-profile") {
+            auto st = next(&args->head_profile);
+            if (!st.ok()) return st;
+        } else if (flag == "--head-adaptive") {
+            std::string value;
+            auto st = next(&value);
+            if (!st.ok()) return st;
+            if (value != "on" && value != "off") {
+                return Status::error(ErrorCode::InvalidArgument,
+                                     "invalid --head-adaptive: " + value);
+            }
+            args->head_adaptive = value == "on";
+            args->head_adaptive_set = true;
+        } else if (flag == "--risk-guard") {
+            std::string value;
+            auto st = next(&value);
+            if (!st.ok()) return st;
+            if (value != "on" && value != "off") {
+                return Status::error(ErrorCode::InvalidArgument,
+                                     "invalid --risk-guard: " + value);
+            }
+            args->risk_guard = value == "on";
+            args->risk_guard_set = true;
+        } else if (flag == "--head-retrieval-threshold") {
+            std::string value;
+            auto st = next(&value);
+            if (!st.ok()) return st;
+            try {
+                size_t pos = 0;
+                const double parsed = std::stod(value, &pos);
+                if (pos != value.size() || parsed < 0.0) {
+                    return Status::error(ErrorCode::InvalidArgument,
+                                         "invalid --head-retrieval-threshold: " + value);
+                }
+                args->head_retrieval_threshold = parsed;
+                args->head_retrieval_threshold_set = true;
+            } catch (...) {
+                return Status::error(ErrorCode::InvalidArgument,
+                                     "invalid --head-retrieval-threshold: " + value);
+            }
         } else if (flag == "--tokens") {
             std::string value;
             auto st = next(&value);
@@ -304,6 +353,12 @@ Status apply_common_config(const Args& args, Config* cfg) {
     if (!args.draft_model.empty()) cfg->draft_model_path = args.draft_model;
     if (args.attn_top_k_set) cfg->attn_top_k = args.attn_top_k;
     if (!args.attn_top_k_layers.empty()) cfg->attn_top_k_layers = args.attn_top_k_layers;
+    if (!args.head_profile.empty()) cfg->head_profile_path = args.head_profile;
+    if (args.head_adaptive_set) cfg->head_adaptive = args.head_adaptive;
+    if (args.risk_guard_set) cfg->risk_guard = args.risk_guard;
+    if (args.head_retrieval_threshold_set) {
+        cfg->head_retrieval_threshold = args.head_retrieval_threshold;
+    }
     if (args.max_new_tokens != 32) cfg->max_new_tokens = args.max_new_tokens;
     if (args.n_ctx != 0) cfg->n_ctx = args.n_ctx;
     if (args.n_ubatch != 512) cfg->n_ubatch = args.n_ubatch;

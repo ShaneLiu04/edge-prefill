@@ -62,6 +62,14 @@ struct Config {
     // Comma-separated per-layer top-k override; validated against the model
     // layer count after model load. Empty string disables per-layer control.
     std::string attn_top_k_layers;
+    // AR003: head-level adaptive sparse prefill. Empty profile path or
+    // head_adaptive=false keeps the AR002 scalar path byte-identical.
+    std::string head_profile_path;
+    bool head_adaptive = false;
+    double head_retrieval_threshold = 0.10;
+    bool risk_guard = true;
+    double risk_sep_threshold = 0.5;
+    double risk_cov_threshold = 0.35;
     bool enable_prefix_cache = true;
     uint64_t prefix_cache_bytes = 256ull * 1024 * 1024;
     bool enable_ffn_skip = true;
