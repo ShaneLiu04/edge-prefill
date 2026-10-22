@@ -38,7 +38,9 @@ struct Config {
     int32_t n_gpu_layers = 0;
     uint32_t max_new_tokens = 32;
     uint32_t block_size = 32;
-    uint32_t chunk_size = 512;
+    // 0 = auto: align to n_ubatch so each chunk is a single llama_decode
+    // ubatch (AR004 FR-1). Explicit values are clamped to n_ubatch.
+    uint32_t chunk_size = 0;
     uint32_t min_dense_tokens = 512;
     uint32_t sink_blocks = 1;
     uint32_t recent_blocks = 2;
@@ -67,6 +69,21 @@ struct Config {
     std::string head_profile_path;
     bool head_adaptive = false;
     double head_retrieval_threshold = 0.10;
+    // Rows each non-retrieval head gathers from the ranked pool when
+    // head-adaptive prefill is active. 0 disables head-adaptive mode.
+    uint32_t head_top_k = 0;
+    // AR004 FR-4: MInference-style pattern routing. When true (with a
+    // validated profile and head_top_k > 0), the uniform head matrix is
+    // replaced by per-class budgets: retrieval -> dense, landmark ->
+    // pyramid k_landmark, local -> k_local, normal -> head_top_k.
+    // Default off keeps the AR003 matrix byte-identical.
+    bool head_pattern_routing = false;
+    // AR004 FR-4: PyramidKV-style layer prior when no profile is loaded.
+    // Applies only when head_top_k > 0 and the selection is sparse; the
+    // pool ranking is profile-free. Default off keeps AR003 behavior.
+    bool pyramid_prior = false;
+    uint32_t pyramid_k_min = 48;
+    uint32_t pyramid_k_max = 128;
     bool risk_guard = true;
     double risk_sep_threshold = 0.5;
     double risk_cov_threshold = 0.35;
@@ -89,7 +106,8 @@ struct Plan {
     std::vector<std::string> passes;
     double budget = 1.0;
     uint32_t block_size = 32;
-    uint32_t chunk_size = 512;
+    // 0 = auto (align to n_ubatch); mirrors Config::chunk_size.
+    uint32_t chunk_size = 0;
     uint64_t skip_ffn_mask = 0;
     KvPrecision kv_type = KvPrecision::F16;
     // Attention top-k in blocks (mirrors Config::attn_top_k); 0 in every

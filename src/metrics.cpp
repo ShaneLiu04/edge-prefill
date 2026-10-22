@@ -36,14 +36,14 @@ Status Reporter::write_raw_csv(const std::string& path) {
     std::ofstream out(path);
     if (!out) return Status::error(ErrorCode::Io, "cannot write csv: " + path);
     out << "task,case,ttft_ms,e2e_ms,prefill_tps,kv_bytes,quality,dense,prompt_tokens,"
-           "selected_tokens,mode,budget,attn_top_k,repeats\n";
+           "selected_tokens,mode,budget,attn_top_k,repeats,ppl_dense,ppl_sparse\n";
     out << std::setprecision(10);
     for (const auto& s : samples_) {
         out << s.task << ',' << s.case_id << ',' << s.ttft_ms << ',' << s.e2e_ms << ','
             << s.prefill_tokens_per_s << ',' << s.kv_bytes << ',' << s.quality << ','
             << (s.dense ? 1 : 0) << ',' << s.prompt_tokens << ',' << s.selected_tokens << ','
             << mode_of(s) << ',' << s.budget << ',' << s.attn_top_k << ',' << s.repeats
-            << '\n';
+            << ',' << s.ppl_dense << ',' << s.ppl_sparse << '\n';
     }
     return Status::success();
 }

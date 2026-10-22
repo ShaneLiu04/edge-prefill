@@ -42,6 +42,11 @@ struct HeadProfile {
 // offending field name (never silently ignored).
 Status load_head_profile(const std::string& path, HeadProfile* out);
 
+// Writes a head profile as deterministic JSON (field-for-field symmetric
+// with load_head_profile; the same profile always serializes to the same
+// bytes). Unwritable path -> Io.
+Status save_head_profile(const std::string& path, const HeadProfile& profile);
+
 // Checks that a profile matches the loaded model geometry. Mismatched
 // n_layer/n_head or out-of-range entries -> InvalidArgument; the caller must
 // not use a rejected profile.

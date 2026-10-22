@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <numeric>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -237,4 +238,321 @@ TEST_CASE(attention_sparsity_plan_fields) {
     CHECK_EQ(plan.attention_top_k, 0u);
     const std::string json = plan.to_json();
     CHECK(json.find("attention_top_k") != std::string::npos);
+}
+
+namespace {
+
+HeadProfile make_profile(int32_t n_layer, int32_t n_head, uint32_t retrieval_period) {
+    HeadProfile profile;
+    profile.n_layer = n_layer;
+    profile.n_head = n_head;
+    for (int32_t l = 0; l < n_layer; ++l) {
+        for (int32_t h = 0; h < n_head; ++h) {
+            HeadProfileEntry entry;
+            entry.layer = l;
+            entry.head = h;
+            entry.echo_score = 0.01;
+            entry.induction_score = 0.01;
+            entry.retrieval = (static_cast<uint32_t>(l * n_head + h) % retrieval_period) == 0;
+            profile.heads.push_back(entry);
+        }
+    }
+    return profile;
+}
+
+} // namespace
+
+TEST_CASE(head_adaptive_build_pool_and_matrix) {
+    const Selection sel = make_selection(8192, 0.5);
+    CHECK(!sel.dense);
+    HeadProfile profile = make_profile(4, 4, 3);
+    HeadAdaptiveOptions opts;
+    opts.block_size = 32;
+    opts.top_k_rows = 64;
+    std::vector<int32_t> pool;
+    std::vector<int32_t> matrix;
+    std::string reason;
+    CHECK_OK(AttentionSparsityController::build_head_adaptive(sel, profile, opts, &pool,
+                                                              &matrix, &reason));
+    CHECK(!pool.empty());
+    CHECK(!matrix.empty());
+    CHECK(!reason.empty());
+
+    // Matrix: one entry per layer x head, -1 exactly on retrieval heads.
+    CHECK_EQ(matrix.size(), profile.heads.size());
+    for (size_t i = 0; i < profile.heads.size(); ++i) {
+        CHECK_EQ(matrix[i], profile.heads[i].retrieval ? -1 : 64);
+    }
+    // Exactly two distinct matrix values keeps the graph's group limit.
+    std::vector<int32_t> distinct(matrix);
+    std::sort(distinct.begin(), distinct.end());
+    distinct.erase(std::unique(distinct.begin(), distinct.end()), distinct.end());
+    CHECK_EQ(distinct.size(), 2u);
+
+    // Pool: a permutation of [0, n_selected) — every cache row exactly once.
+    CHECK_EQ(pool.size(), sel.token_indices.size());
+    std::vector<int32_t> sorted_pool(pool);
+    std::sort(sorted_pool.begin(), sorted_pool.end());
+    for (size_t r = 0; r < sorted_pool.size(); ++r) {
+        CHECK_EQ(sorted_pool[r], static_cast<int32_t>(r));
+    }
+
+    // Mandatory block rows come first, in ascending block order.
+    size_t mandatory_rows = 0;
+    for (uint32_t b : sel.mandatory_blocks) {
+        const uint32_t begin = b * 32;
+        const uint32_t end = std::min(sel.total_tokens, begin + 32);
+        for (uint32_t t : sel.token_indices) {
+            if (t >= begin && t < end) ++mandatory_rows;
+        }
+    }
+    CHECK(mandatory_rows > 0);
+    CHECK(mandatory_rows < pool.size());
+    std::set<int32_t> head_rows(pool.begin(), pool.begin() + mandatory_rows);
+    CHECK_EQ(head_rows.size(), mandatory_rows);
+    for (uint32_t b : sel.mandatory_blocks) {
+        const uint32_t begin = b * 32;
+        const uint32_t end = std::min(sel.total_tokens, begin + 32);
+        for (uint32_t t : sel.token_indices) {
+            if (t >= begin && t < end) {
+                const auto it = std::lower_bound(sel.token_indices.begin(),
+                                                 sel.token_indices.end(), t);
+                const int32_t row = static_cast<int32_t>(it - sel.token_indices.begin());
+                CHECK(head_rows.count(row) == 1);
+            }
+        }
+    }
+}
+
+TEST_CASE(head_adaptive_invalid_inputs) {
+    const Selection sel = make_selection();
+    HeadProfile profile = make_profile(2, 2, 2);
+    HeadAdaptiveOptions opts;
+    opts.block_size = 32;
+    opts.top_k_rows = 32;
+    std::vector<int32_t> pool;
+    std::vector<int32_t> matrix;
+    std::string reason;
+
+    CHECK_ERR(AttentionSparsityController::build_head_adaptive(sel, profile, opts, nullptr,
+                                                               &matrix, &reason),
+              ErrorCode::InvalidArgument);
+    auto zero_rows = opts;
+    zero_rows.top_k_rows = 0;
+    CHECK_ERR(AttentionSparsityController::build_head_adaptive(sel, profile, zero_rows, &pool,
+                                                               &matrix, &reason),
+              ErrorCode::InvalidArgument);
+    auto zero_block = opts;
+    zero_block.block_size = 0;
+    CHECK_ERR(AttentionSparsityController::build_head_adaptive(sel, profile, zero_block, &pool,
+                                                               &matrix, &reason),
+              ErrorCode::InvalidArgument);
+    HeadProfile broken = profile;
+    broken.heads.pop_back();
+    CHECK_ERR(AttentionSparsityController::build_head_adaptive(sel, broken, opts, &pool,
+                                                               &matrix, &reason),
+              ErrorCode::InvalidArgument);
+
+    // Dense selection reports "dense" and leaves outputs empty.
+    const Selection dense = make_selection(256, 0.5);
+    CHECK(dense.dense);
+    CHECK_OK(AttentionSparsityController::build_head_adaptive(dense, profile, opts, &pool,
+                                                              &matrix, &reason));
+    CHECK(pool.empty());
+    CHECK(matrix.empty());
+    CHECK_EQ(reason, std::string("dense"));
+}
+
+// AR004 FR-4: pattern routing classifies every head into one of four
+// classes and maps the class to a gather budget.
+TEST_CASE(pattern_matrix_classifies_heads) {
+    HeadProfile profile;
+    profile.n_layer = 1;
+    profile.n_head = 4;
+    HeadProfileEntry e;
+    e.layer = 0;
+    e.head = 0;
+    e.retrieval = true;
+    profile.heads.push_back(e);
+    e = HeadProfileEntry{};
+    e.layer = 0;
+    e.head = 1;
+    e.echo_score = 0.7;
+    profile.heads.push_back(e);
+    e = HeadProfileEntry{};
+    e.layer = 0;
+    e.head = 2;
+    e.induction_score = 0.6;
+    profile.heads.push_back(e);
+    e = HeadProfileEntry{};
+    e.layer = 0;
+    e.head = 3;
+    e.echo_score = 0.2;
+    e.induction_score = 0.1;
+    profile.heads.push_back(e);
+
+    PatternRoutingOptions opts;
+    opts.k_landmark = 32;
+    opts.k_local = 48;
+    opts.k_normal = 96;
+    opts.echo_threshold = 0.5;
+    opts.induction_threshold = 0.5;
+    std::vector<int32_t> matrix;
+    std::string reason;
+    CHECK_OK(AttentionSparsityController::build_pattern_matrix(profile, opts, &matrix,
+                                                               &reason));
+    CHECK_EQ(matrix.size(), static_cast<size_t>(4));
+    // Retrieval wins over every score; echo beats induction.
+    CHECK_EQ(matrix[0], -1);
+    CHECK_EQ(matrix[1], 32);
+    CHECK_EQ(matrix[2], 48);
+    CHECK_EQ(matrix[3], 96);
+    CHECK(!reason.empty());
+    CHECK(reason.find("retrieval=1") != std::string::npos);
+    CHECK(reason.find("landmark=1") != std::string::npos);
+    CHECK(reason.find("local=1") != std::string::npos);
+    CHECK(reason.find("normal=1") != std::string::npos);
+
+    // Boundary: a score exactly at the threshold classifies into the class.
+    HeadProfile boundary = profile;
+    boundary.heads[1].echo_score = 0.5;
+    boundary.heads[2].induction_score = 0.5;
+    CHECK_OK(AttentionSparsityController::build_pattern_matrix(boundary, opts, &matrix,
+                                                               &reason));
+    CHECK_EQ(matrix[1], 32);
+    CHECK_EQ(matrix[2], 48);
+
+    // A head above both thresholds is a landmark (echo subsumes copying).
+    HeadProfile both = profile;
+    both.heads[3].echo_score = 0.9;
+    both.heads[3].induction_score = 0.9;
+    CHECK_OK(AttentionSparsityController::build_pattern_matrix(both, opts, &matrix,
+                                                               &reason));
+    CHECK_EQ(matrix[3], 32);
+}
+
+// AR004 FR-4: pattern routing rejects null outputs, zero budgets and a
+// mismatched profile geometry.
+TEST_CASE(pattern_matrix_rejects_bad_inputs) {
+    HeadProfile profile = make_profile(2, 2, 2);
+    PatternRoutingOptions opts;
+    std::vector<int32_t> matrix;
+    std::string reason;
+    CHECK_ERR(AttentionSparsityController::build_pattern_matrix(profile, opts, nullptr,
+                                                                &reason),
+              ErrorCode::InvalidArgument);
+    auto zero_landmark = opts;
+    zero_landmark.k_landmark = 0;
+    CHECK_ERR(AttentionSparsityController::build_pattern_matrix(profile, zero_landmark,
+                                                                &matrix, &reason),
+              ErrorCode::InvalidArgument);
+    auto zero_normal = opts;
+    zero_normal.k_normal = 0;
+    CHECK_ERR(AttentionSparsityController::build_pattern_matrix(profile, zero_normal,
+                                                                &matrix, &reason),
+              ErrorCode::InvalidArgument);
+    HeadProfile broken = profile;
+    broken.heads.pop_back();
+    CHECK_ERR(AttentionSparsityController::build_pattern_matrix(broken, opts, &matrix,
+                                                                &reason),
+              ErrorCode::InvalidArgument);
+}
+
+// AR004 FR-4: pyramid prior interpolates k_min (middle) to k_max (ends),
+// symmetric and monotone towards the middle.
+TEST_CASE(pyramid_matrix_monotone_and_bounds) {
+    PyramidOptions opts;
+    opts.k_min = 48;
+    opts.k_max = 128;
+    std::vector<int32_t> matrix;
+    CHECK_OK(AttentionSparsityController::build_pyramid_matrix(5, 3, opts, &matrix));
+    CHECK_EQ(matrix.size(), static_cast<size_t>(15));
+    // t = |l - 2| / 2 -> k = [128, 88, 48, 88, 128] per layer.
+    const int32_t expected[5] = {128, 88, 48, 88, 128};
+    for (uint32_t l = 0; l < 5; ++l) {
+        for (uint32_t h = 0; h < 3; ++h) {
+            CHECK_EQ(matrix[l * 3 + h], expected[l]);
+        }
+    }
+
+    // Even layer count: symmetric around the half-integer middle.
+    CHECK_OK(AttentionSparsityController::build_pyramid_matrix(28, 1, opts, &matrix));
+    CHECK_EQ(matrix.size(), static_cast<size_t>(28));
+    CHECK_EQ(matrix[0], 128);
+    for (uint32_t l = 0; l < 28; ++l) {
+        CHECK_EQ(matrix[l], matrix[27 - l]);
+        if (l > 0 && l <= 13) {
+            CHECK(matrix[l] <= matrix[l - 1]);
+        }
+    }
+    // Middle layers are the sparsest and the ends the densest.
+    CHECK(matrix[13] <= matrix[0]);
+    CHECK(matrix[13] <= matrix[27]);
+
+    // A single layer is both first and last -> k_max.
+    CHECK_OK(AttentionSparsityController::build_pyramid_matrix(1, 2, opts, &matrix));
+    CHECK_EQ(matrix.size(), static_cast<size_t>(2));
+    CHECK_EQ(matrix[0], 128);
+    CHECK_EQ(matrix[1], 128);
+}
+
+// AR004 FR-4: pyramid prior rejects invalid geometry and budgets.
+TEST_CASE(pyramid_matrix_rejects_bad_inputs) {
+    PyramidOptions opts;
+    std::vector<int32_t> matrix;
+    CHECK_ERR(AttentionSparsityController::build_pyramid_matrix(0, 4, opts, &matrix),
+              ErrorCode::InvalidArgument);
+    CHECK_ERR(AttentionSparsityController::build_pyramid_matrix(4, 0, opts, &matrix),
+              ErrorCode::InvalidArgument);
+    auto swapped = opts;
+    swapped.k_min = 200;
+    CHECK_ERR(AttentionSparsityController::build_pyramid_matrix(4, 4, swapped, &matrix),
+              ErrorCode::InvalidArgument);
+    auto zero_min = opts;
+    zero_min.k_min = 0;
+    CHECK_ERR(AttentionSparsityController::build_pyramid_matrix(4, 4, zero_min, &matrix),
+              ErrorCode::InvalidArgument);
+}
+
+// AR004 FR-4 refactor guard: the profile-free ranked pool must match the
+// pool build_head_adaptive produces for the same selection.
+TEST_CASE(ranked_pool_matches_head_adaptive) {
+    const Selection sel = make_selection(8192, 0.5);
+    CHECK(!sel.dense);
+    HeadProfile profile = make_profile(2, 2, 3);
+    HeadAdaptiveOptions hopts;
+    hopts.block_size = 32;
+    hopts.top_k_rows = 64;
+    std::vector<int32_t> adaptive_pool;
+    std::vector<int32_t> matrix;
+    std::string reason;
+    CHECK_OK(AttentionSparsityController::build_head_adaptive(sel, profile, hopts,
+                                                              &adaptive_pool, &matrix,
+                                                              &reason));
+    std::vector<int32_t> ranked;
+    size_t ranked_rows = 0;
+    CHECK_OK(AttentionSparsityController::build_ranked_pool(sel, 32, &ranked,
+                                                            &ranked_rows));
+    CHECK_EQ(ranked.size(), adaptive_pool.size());
+    CHECK_EQ(ranked_rows, ranked.size());
+    for (size_t i = 0; i < ranked.size(); ++i) {
+        CHECK_EQ(ranked[i], adaptive_pool[i]);
+    }
+
+    // Dense selections produce an empty pool by contract.
+    const Selection dense = make_selection(256, 0.5);
+    CHECK(dense.dense);
+    ranked.clear();
+    CHECK_OK(AttentionSparsityController::build_ranked_pool(dense, 32, &ranked));
+    CHECK(ranked.empty());
+}
+
+// AR004 FR-4 zero-regression guard: both new switches default to off so a
+// default-config Plan matches AR003 field for field.
+TEST_CASE(fr4_switches_default_off) {
+    Config cfg;
+    CHECK(!cfg.head_pattern_routing);
+    CHECK(!cfg.pyramid_prior);
+    CHECK_EQ(cfg.pyramid_k_min, 48u);
+    CHECK_EQ(cfg.pyramid_k_max, 128u);
 }

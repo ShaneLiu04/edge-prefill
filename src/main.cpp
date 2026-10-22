@@ -18,6 +18,7 @@
 #include "edge_prefill/config.h"
 #include "edge_prefill/draft_scorer.h"
 #include "edge_prefill/ffn_skip.h"
+#include "edge_prefill/head_classifier.h"
 #include "edge_prefill/json_writer.h"
 #include "edge_prefill/log.h"
 #include "edge_prefill/metrics.h"
@@ -45,11 +46,16 @@ struct Args {
     std::string draft_model;
     std::string attn_top_k_layers;
     std::string head_profile;
+    std::string output;
+    uint32_t probe_block_len = 32;
+    uint32_t probe_repeats = 8;
+    uint32_t probe_k = 8;
     uint32_t tokens = 0;
     uint32_t max_new_tokens = 32;
     uint32_t n_ctx = 0;
     uint32_t n_ubatch = 512;
     int32_t threads = 0;
+    int32_t n_gpu_layers = 0;
     int32_t repeats = 5;
     uint32_t attn_top_k = 0;
     bool attn_top_k_set = false;
@@ -59,6 +65,16 @@ struct Args {
     bool risk_guard_set = false;
     double head_retrieval_threshold = 0.10;
     bool head_retrieval_threshold_set = false;
+    uint32_t head_top_k = 0;
+    bool head_top_k_set = false;
+    bool head_pattern_routing = false;
+    bool head_pattern_routing_set = false;
+    bool pyramid_prior = false;
+    bool pyramid_prior_set = false;
+    uint32_t pyramid_k_min = 48;
+    bool pyramid_k_min_set = false;
+    uint32_t pyramid_k_max = 128;
+    bool pyramid_k_max_set = false;
     double budget = 0.5;
     bool budget_set = false;
     bool chat = false;
@@ -74,13 +90,17 @@ void usage() {
         "  edge-prefill plan   --tokens N [--mode balanced] [--budget 0.5] [--json]\n"
         "  edge-prefill bench  --config C [--model M] [--out DIR]\n"
         "  edge-prefill eval   --config C [--model M] [--out DIR]\n"
+        "  edge-prefill classify-heads --model M --output profile.json [options]\n"
         "  edge-prefill inspect --model M [--json]\n\n"
         "Common options:\n"
         "  --mode latency|balanced|quality|reuse|dense\n"
         "  --budget <0..1>   --kv-type f16|q8_0|q4_0   --skip-ffn <spec>\n"
         "  --draft-model M   --attn-top-k N  --attn-top-k-layers 4,8,16\n"
         "  --head-profile P  --head-adaptive on|off  --head-retrieval-threshold F\n"
+        "  --head-pattern-routing on|off  --pyramid-prior on|off\n"
+        "  --pyramid-k-min N  --pyramid-k-max N\n"
         "  --risk-guard on|off\n"
+        "  --probe-block-len N  --probe-repeats N  --probe-k N  --output F\n"
         "  --threads N       --n-ctx N                 --n-ubatch N\n"
         "  --max-new-tokens N  --chat   --dump-plan P  --dump-selection P\n"
         "  --verbose\n";
@@ -206,6 +226,92 @@ Status parse_args(int argc, char** argv, Args* args) {
                 return Status::error(ErrorCode::InvalidArgument,
                                      "invalid --head-retrieval-threshold: " + value);
             }
+        } else if (flag == "--head-top-k") {
+            std::string value;
+            auto st = next(&value);
+            if (!st.ok()) return st;
+            int64_t parsed = 0;
+            if (!parse_i64_strict(value, &parsed) || parsed < 0 || parsed > 0xffffffffll) {
+                return Status::error(ErrorCode::InvalidArgument,
+                                     "invalid --head-top-k: " + value);
+            }
+            args->head_top_k = static_cast<uint32_t>(parsed);
+            args->head_top_k_set = true;
+        } else if (flag == "--head-pattern-routing") {
+            std::string value;
+            auto st = next(&value);
+            if (!st.ok()) return st;
+            if (value != "on" && value != "off") {
+                return Status::error(ErrorCode::InvalidArgument,
+                                     "invalid --head-pattern-routing: " + value);
+            }
+            args->head_pattern_routing = value == "on";
+            args->head_pattern_routing_set = true;
+        } else if (flag == "--pyramid-prior") {
+            std::string value;
+            auto st = next(&value);
+            if (!st.ok()) return st;
+            if (value != "on" && value != "off") {
+                return Status::error(ErrorCode::InvalidArgument,
+                                     "invalid --pyramid-prior: " + value);
+            }
+            args->pyramid_prior = value == "on";
+            args->pyramid_prior_set = true;
+        } else if (flag == "--pyramid-k-min") {
+            std::string value;
+            auto st = next(&value);
+            if (!st.ok()) return st;
+            int64_t parsed = 0;
+            if (!parse_i64_strict(value, &parsed) || parsed < 1 || parsed > 0xffffffffll) {
+                return Status::error(ErrorCode::InvalidArgument,
+                                     "invalid --pyramid-k-min: " + value);
+            }
+            args->pyramid_k_min = static_cast<uint32_t>(parsed);
+            args->pyramid_k_min_set = true;
+        } else if (flag == "--pyramid-k-max") {
+            std::string value;
+            auto st = next(&value);
+            if (!st.ok()) return st;
+            int64_t parsed = 0;
+            if (!parse_i64_strict(value, &parsed) || parsed < 1 || parsed > 0xffffffffll) {
+                return Status::error(ErrorCode::InvalidArgument,
+                                     "invalid --pyramid-k-max: " + value);
+            }
+            args->pyramid_k_max = static_cast<uint32_t>(parsed);
+            args->pyramid_k_max_set = true;
+        } else if (flag == "--output") {
+            auto st = next(&args->output);
+            if (!st.ok()) return st;
+        } else if (flag == "--probe-block-len") {
+            std::string value;
+            auto st = next(&value);
+            if (!st.ok()) return st;
+            int64_t parsed = 0;
+            if (!parse_i64_strict(value, &parsed) || parsed < 1 || parsed > 0xffffffffll) {
+                return Status::error(ErrorCode::InvalidArgument,
+                                     "invalid --probe-block-len: " + value);
+            }
+            args->probe_block_len = static_cast<uint32_t>(parsed);
+        } else if (flag == "--probe-repeats") {
+            std::string value;
+            auto st = next(&value);
+            if (!st.ok()) return st;
+            int64_t parsed = 0;
+            if (!parse_i64_strict(value, &parsed) || parsed < 2 || parsed > 0xffffffffll) {
+                return Status::error(ErrorCode::InvalidArgument,
+                                     "invalid --probe-repeats: " + value);
+            }
+            args->probe_repeats = static_cast<uint32_t>(parsed);
+        } else if (flag == "--probe-k") {
+            std::string value;
+            auto st = next(&value);
+            if (!st.ok()) return st;
+            int64_t parsed = 0;
+            if (!parse_i64_strict(value, &parsed) || parsed < 1 || parsed > 0xffffffffll) {
+                return Status::error(ErrorCode::InvalidArgument,
+                                     "invalid --probe-k: " + value);
+            }
+            args->probe_k = static_cast<uint32_t>(parsed);
         } else if (flag == "--tokens") {
             std::string value;
             auto st = next(&value);
@@ -231,6 +337,11 @@ Status parse_args(int argc, char** argv, Args* args) {
             auto st = next(&value);
             if (!st.ok()) return st;
             args->threads = static_cast<int32_t>(std::stol(value));
+        } else if (flag == "--ngl" || flag == "--n-gpu-layers") {
+            std::string value;
+            auto st = next(&value);
+            if (!st.ok()) return st;
+            args->n_gpu_layers = static_cast<int32_t>(std::stol(value));
         } else if (flag == "--repeats") {
             std::string value;
             auto st = next(&value);
@@ -355,6 +466,15 @@ Status apply_common_config(const Args& args, Config* cfg) {
     if (!args.attn_top_k_layers.empty()) cfg->attn_top_k_layers = args.attn_top_k_layers;
     if (!args.head_profile.empty()) cfg->head_profile_path = args.head_profile;
     if (args.head_adaptive_set) cfg->head_adaptive = args.head_adaptive;
+    if (args.head_top_k_set) cfg->head_top_k = args.head_top_k;
+    if (args.head_pattern_routing_set) cfg->head_pattern_routing = args.head_pattern_routing;
+    if (args.pyramid_prior_set) cfg->pyramid_prior = args.pyramid_prior;
+    if (args.pyramid_k_min_set) cfg->pyramid_k_min = args.pyramid_k_min;
+    if (args.pyramid_k_max_set) cfg->pyramid_k_max = args.pyramid_k_max;
+    if (cfg->pyramid_k_min > cfg->pyramid_k_max) {
+        return Status::error(ErrorCode::InvalidArgument,
+                             "pyramid-k-min must be <= pyramid-k-max");
+    }
     if (args.risk_guard_set) cfg->risk_guard = args.risk_guard;
     if (args.head_retrieval_threshold_set) {
         cfg->head_retrieval_threshold = args.head_retrieval_threshold;
@@ -388,6 +508,7 @@ Status run_command(const Args& args) {
     st = LlamaBackend::init();
     if (!st.ok()) return st;
     LlamaBackend backend;
+    backend.set_n_gpu_layers(cfg.n_gpu_layers);
     st = backend.load_model(cfg.model_path);
     if (!st.ok()) {
         LlamaBackend::shutdown();
@@ -452,7 +573,14 @@ Status run_command(const Args& args) {
     opts.n_threads_batch = run_cfg.n_threads_batch;
     opts.type_k = run_cfg.kv_type;
     opts.type_v = run_cfg.kv_type;
-    opts.n_gpu_layers = run_cfg.n_gpu_layers;
+    // GPU offload is a model-level parameter applied at load time (see
+    // run_command's set_n_gpu_layers call), not a context option.
+    // The gather patch only hooks the non-flash attention layout; disable
+    // flash whenever attention sparsity can engage so the CLI never
+    // silently degrades to dense attention.
+    if (run_cfg.attn_top_k > 0 || run_cfg.head_adaptive) {
+        opts.flash_attn = false;
+    }
     st = backend.create_context(opts);
     if (!st.ok()) {
         LlamaBackend::shutdown();
@@ -530,11 +658,99 @@ Status run_command(const Args& args) {
     }
     SparsePrefiller prefilter(&backend, cache.get());
     SparsePrefiller::Options popts;
-    popts.chunk_size = plan.dense_fallback ? 512 : plan.chunk_size;
+    // 0 = auto (align to n_ubatch) for both sparse and dense-fallback
+    // plans (AR004 FR-1).
+    popts.chunk_size = plan.chunk_size;
     popts.enable_prefix_cache = run_cfg.enable_prefix_cache;
     popts.enable_chunking = run_cfg.enable_chunking;
     popts.enable_ffn_skip = run_cfg.enable_ffn_skip;
     popts.ffn_skip_mask = plan.dense_fallback ? 0 : plan.skip_ffn_mask;
+
+    // AR003/AR004 FR-4: per-head adaptive gather. The ranked pool is
+    // profile-free; the matrix comes from the profile (uniform or pattern
+    // routed) or, without a profile, from the pyramid layer prior.
+    if (run_cfg.head_adaptive && run_cfg.head_top_k > 0 && !selection.dense) {
+        HeadProfile head_profile;
+        bool profile_ok = false;
+        if (!run_cfg.head_profile_path.empty()) {
+            auto hst = load_head_profile(run_cfg.head_profile_path, &head_profile);
+            if (!hst.ok()) {
+                log_warn("head profile load failed (" + hst.message +
+                         "); using fallback path");
+            } else {
+                hst = validate_head_profile(head_profile, backend.n_layer(),
+                                            backend.n_head());
+                if (!hst.ok()) {
+                    log_warn("head profile rejected (" + hst.message +
+                             "); using fallback path");
+                } else {
+                    profile_ok = true;
+                }
+            }
+        }
+
+        if (profile_ok) {
+            HeadAdaptiveOptions hopts;
+            hopts.block_size = run_cfg.block_size;
+            hopts.top_k_rows = run_cfg.head_top_k;
+            std::vector<int32_t> pool;
+            std::vector<int32_t> matrix;
+            std::string head_reason;
+            bool built = AttentionSparsityController::build_head_adaptive(
+                             selection, head_profile, hopts, &pool, &matrix,
+                             &head_reason).ok() &&
+                         !pool.empty() && !matrix.empty();
+            // AR004 FR-4: pattern routing replaces only the matrix; the
+            // pool ranking is shared.
+            if (built && run_cfg.head_pattern_routing) {
+                PatternRoutingOptions popts_routing;
+                popts_routing.k_normal = run_cfg.head_top_k;
+                matrix.clear();
+                built = AttentionSparsityController::build_pattern_matrix(
+                            head_profile, popts_routing, &matrix,
+                            &head_reason).ok() &&
+                        !matrix.empty();
+            }
+            if (built) {
+                popts.enable_head_adaptive = true;
+                popts.head_pool = std::move(pool);
+                popts.head_matrix = std::move(matrix);
+                log_info("head adaptive: " + head_reason);
+            } else {
+                log_warn("head-adaptive build failed (" + head_reason +
+                         "); using scalar path");
+            }
+        } else if (run_cfg.pyramid_prior) {
+            // AR004 FR-4: no profile — pyramid layer prior over the
+            // profile-free ranked pool.
+            std::vector<int32_t> pool;
+            std::vector<int32_t> matrix;
+            PyramidOptions pyopts;
+            pyopts.k_min = run_cfg.pyramid_k_min;
+            pyopts.k_max = run_cfg.pyramid_k_max;
+            if (AttentionSparsityController::build_ranked_pool(
+                        selection, run_cfg.block_size, &pool).ok() &&
+                !pool.empty() &&
+                AttentionSparsityController::build_pyramid_matrix(
+                        static_cast<uint32_t>(backend.n_layer()),
+                        static_cast<uint32_t>(backend.n_head()),
+                        pyopts, &matrix).ok() &&
+                !matrix.empty()) {
+                popts.enable_head_adaptive = true;
+                const size_t pool_size = pool.size();
+                popts.head_pool = std::move(pool);
+                popts.head_matrix = std::move(matrix);
+                log_info("pyramid prior: pool=" + std::to_string(pool_size) +
+                         " k(min/max)=" + std::to_string(pyopts.k_min) + "/" +
+                         std::to_string(pyopts.k_max));
+            } else {
+                log_warn("pyramid-prior build failed; using scalar path");
+            }
+        } else {
+            log_warn("head-adaptive requires --head-profile (or --pyramid-prior "
+                     "without one); using scalar path");
+        }
+    }
     PrefillStats stats;
     const auto begin = std::chrono::steady_clock::now();
     st = prefilter.prefill(tokens, selection, popts, &stats);
@@ -627,6 +843,10 @@ Status bench_command(const Args& args) {
     bench.max_new_tokens = cfg.max_new_tokens;
     bench.attn_top_k = cfg.attn_top_k;
     bench.attn_top_k_layers = cfg.attn_top_k_layers;
+    bench.head_adaptive = cfg.head_adaptive;
+    bench.head_top_k = cfg.head_top_k;
+    bench.head_profile = cfg.head_profile_path;
+    bench.n_gpu_layers = cfg.n_gpu_layers;
     bench.out_dir = cfg.results_dir;
 
     BenchmarkRunner runner;
@@ -656,11 +876,75 @@ Status bench_command(const Args& args) {
     return Status::success();
 }
 
+Status classify_heads_command(const Args& args) {
+    if (args.model.empty()) {
+        return Status::error(ErrorCode::InvalidArgument,
+                             "classify-heads requires --model");
+    }
+    if (args.output.empty()) {
+        return Status::error(ErrorCode::InvalidArgument,
+                             "classify-heads requires --output");
+    }
+    auto st = LlamaBackend::init();
+    if (!st.ok()) return st;
+    LlamaBackend backend;
+    backend.set_n_gpu_layers(args.n_gpu_layers);
+    st = backend.load_model(args.model);
+    if (!st.ok()) {
+        LlamaBackend::shutdown();
+        return st;
+    }
+    ContextOptions opts;
+    // n_ctx 0 lets llama.cpp pick its default; the probe-length check inside
+    // classify() still rejects oversized probes with a param suggestion.
+    opts.n_ctx = args.n_ctx;
+    opts.n_ubatch = args.n_ubatch;
+    opts.n_threads = args.threads;
+    opts.n_threads_batch = args.threads;
+    // The per-head ablation probe gathers rows via the non-flash path.
+    opts.flash_attn = false;
+    st = backend.create_context(opts);
+    if (!st.ok()) {
+        LlamaBackend::shutdown();
+        return st;
+    }
+
+    HeadProbeParams params;
+    params.block_len = args.probe_block_len;
+    params.repeats = args.probe_repeats;
+    params.probe_k = args.probe_k;
+
+    const auto fp = backend.fingerprint();
+    HeadClassifier classifier(args.head_retrieval_threshold);
+    HeadProfile profile;
+    st = classifier.classify(&backend, params, fp.head_hash, &profile);
+    if (!st.ok()) {
+        LlamaBackend::shutdown();
+        return st;
+    }
+    st = save_head_profile(args.output, profile);
+    if (!st.ok()) {
+        LlamaBackend::shutdown();
+        return st;
+    }
+
+    uint32_t retrieval = 0;
+    for (const HeadProfileEntry& entry : profile.heads) {
+        if (entry.retrieval) ++retrieval;
+    }
+    std::cout << "heads=" << profile.heads.size() << " retrieval=" << retrieval
+              << " n_layer=" << profile.n_layer << " n_head=" << profile.n_head
+              << " out=" << args.output << "\n";
+    LlamaBackend::shutdown();
+    return Status::success();
+}
+
 Status inspect_command(const Args& args) {
     if (args.model.empty()) return Status::error(ErrorCode::InvalidArgument, "missing --model");
     auto st = LlamaBackend::init();
     if (!st.ok()) return st;
     LlamaBackend backend;
+    backend.set_n_gpu_layers(args.n_gpu_layers);
     st = backend.load_model(args.model);
     if (!st.ok()) {
         LlamaBackend::shutdown();
@@ -690,6 +974,7 @@ int main(int argc, char** argv) {
     if (args.command == "run") st = run_command(args);
     else if (args.command == "plan") st = plan_command(args);
     else if (args.command == "bench" || args.command == "eval") st = bench_command(args);
+    else if (args.command == "classify-heads") st = classify_heads_command(args);
     else if (args.command == "inspect") st = inspect_command(args);
     else if (args.command == "help" || args.command == "--help") {
         usage();

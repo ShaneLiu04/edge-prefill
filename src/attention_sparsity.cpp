@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <map>
 #include <numeric>
 #include <set>
 
@@ -167,6 +168,264 @@ void AttentionSparsityController::chunk_indices(const std::vector<int32_t>& indi
     // the prefix of positions already written to the KV cache.
     const auto end = std::upper_bound(indices.begin(), indices.end(), chunk_end_pos);
     allowed->assign(indices.begin(), end);
+}
+
+Status AttentionSparsityController::build_ranked_pool(const Selection& selection,
+                                                      uint32_t block_size,
+                                                      std::vector<int32_t>* pool,
+                                                      size_t* pool_rows) {
+    if (!pool) {
+        return Status::error(ErrorCode::InvalidArgument, "null pool output");
+    }
+    if (block_size == 0) {
+        return Status::error(ErrorCode::InvalidArgument, "block size must be > 0");
+    }
+    pool->clear();
+    if (pool_rows) *pool_rows = 0;
+
+    if (selection.dense) {
+        // Dense prefill gathers nothing; an empty pool is the contract.
+        return Status::success();
+    }
+    if (selection.token_indices.empty()) {
+        return Status::error(ErrorCode::InvalidArgument,
+                             "non-dense selection has no token indices");
+    }
+    const uint32_t n_tokens = selection.total_tokens;
+    if (n_tokens == 0) {
+        return Status::error(ErrorCode::InvalidArgument, "selection has no tokens");
+    }
+    const uint32_t n_blocks = (n_tokens + block_size - 1) / block_size;
+    if (selection.signals.size() != n_blocks) {
+        return Status::error(ErrorCode::InvalidArgument, "selection signals size mismatch");
+    }
+
+    // Map every selected token to its future cache row: the r-th selected
+    // token (ascending positions) lands in KV row r.
+    std::vector<int32_t> row_of_token(n_tokens, -1);
+    for (size_t r = 0; r < selection.token_indices.size(); ++r) {
+        const uint32_t t = selection.token_indices[r];
+        if (t >= n_tokens) {
+            return Status::error(ErrorCode::InvalidArgument, "token index out of range");
+        }
+        row_of_token[t] = static_cast<int32_t>(r);
+    }
+
+    // Rank blocks: mandatory first (ascending), then remaining selected
+    // blocks by fused signal descending, stable on block index.
+    std::vector<uint32_t> mandatory(selection.mandatory_blocks.begin(),
+                                    selection.mandatory_blocks.end());
+    std::sort(mandatory.begin(), mandatory.end());
+    mandatory.erase(std::unique(mandatory.begin(), mandatory.end()), mandatory.end());
+    for (uint32_t b : mandatory) {
+        if (b >= n_blocks) {
+            return Status::error(ErrorCode::InvalidArgument, "mandatory block out of range");
+        }
+    }
+    std::vector<uint32_t> rest(selection.block_indices.begin(),
+                               selection.block_indices.end());
+    std::sort(rest.begin(), rest.end());
+    rest.erase(std::unique(rest.begin(), rest.end()), rest.end());
+    for (uint32_t b : rest) {
+        if (b >= n_blocks) {
+            return Status::error(ErrorCode::InvalidArgument, "selected block out of range");
+        }
+    }
+    std::vector<uint32_t> ranked(mandatory);
+    std::vector<uint32_t> non_mandatory;
+    for (uint32_t b : rest) {
+        if (!std::binary_search(mandatory.begin(), mandatory.end(), b)) {
+            non_mandatory.push_back(b);
+        }
+    }
+    std::sort(non_mandatory.begin(), non_mandatory.end(),
+              [&](uint32_t a, uint32_t b) {
+                  if (std::abs(selection.signals[a].fused -
+                               selection.signals[b].fused) > 1e-12) {
+                      return selection.signals[a].fused > selection.signals[b].fused;
+                  }
+                  return a < b;
+              });
+    ranked.insert(ranked.end(), non_mandatory.begin(), non_mandatory.end());
+
+    // Emit pool rows block by block in rank order; tokens inside a block
+    // keep ascending order. Blocks are bucketed first because the rank
+    // order is not ascending by block index.
+    std::map<uint32_t, std::vector<int32_t>> rows_of_block;
+    for (uint32_t t : selection.token_indices) {
+        rows_of_block[t / block_size].push_back(row_of_token[t]);
+    }
+    pool->reserve(selection.token_indices.size());
+    for (uint32_t b : ranked) {
+        auto it = rows_of_block.find(b);
+        if (it == rows_of_block.end()) continue;
+        pool->insert(pool->end(), it->second.begin(), it->second.end());
+    }
+    if (pool->size() != selection.token_indices.size()) {
+        // A selected block with no tokens (fully trimmed by the selector)
+        // must not silently shrink the pool contract.
+        return Status::error(ErrorCode::InvalidArgument,
+                             "selection blocks and token indices disagree");
+    }
+    if (pool_rows) *pool_rows = pool->size();
+    return Status::success();
+}
+
+Status AttentionSparsityController::build_head_adaptive(const Selection& selection,
+                                                        const HeadProfile& profile,
+                                                        const HeadAdaptiveOptions& opts,
+                                                        std::vector<int32_t>* pool,
+                                                        std::vector<int32_t>* matrix,
+                                                        std::string* reason) {
+    if (!pool || !matrix) {
+        return Status::error(ErrorCode::InvalidArgument, "null pool/matrix output");
+    }
+    if (opts.block_size == 0) {
+        return Status::error(ErrorCode::InvalidArgument, "block size must be > 0");
+    }
+    if (opts.top_k_rows == 0) {
+        return Status::error(ErrorCode::InvalidArgument, "head top_k_rows must be > 0");
+    }
+    if (profile.n_layer <= 0 || profile.n_head <= 0 ||
+        profile.heads.size() != static_cast<size_t>(profile.n_layer) *
+                                       static_cast<size_t>(profile.n_head)) {
+        return Status::error(ErrorCode::InvalidArgument, "head profile geometry mismatch");
+    }
+    pool->clear();
+    matrix->clear();
+    if (reason) reason->clear();
+
+    if (selection.dense) {
+        // Dense prefill computes full attention; the matrix would be pure
+        // overhead. Report and let the caller keep the dense path.
+        if (reason) *reason = "dense";
+        return Status::success();
+    }
+
+    // AR004 FR-4: the pool is profile-free; pattern routing and the
+    // pyramid prior reuse the exact same ranking.
+    auto pst = build_ranked_pool(selection, opts.block_size, pool);
+    if (!pst.ok()) {
+        return pst;
+    }
+    if (pool->empty()) {
+        return Status::error(ErrorCode::InvalidArgument,
+                             "non-dense selection produced an empty pool");
+    }
+
+    // Matrix: retrieval heads dense (-1), everything else gathers
+    // top_k_rows from the pool.
+    matrix->reserve(profile.heads.size());
+    uint32_t retrieval = 0;
+    for (const HeadProfileEntry& entry : profile.heads) {
+        if (entry.retrieval) {
+            ++retrieval;
+            matrix->push_back(-1);
+        } else {
+            matrix->push_back(static_cast<int32_t>(opts.top_k_rows));
+        }
+    }
+
+    if (reason) {
+        *reason = "head-adaptive: pool=" + std::to_string(pool->size()) +
+                  " rows, retrieval=" + std::to_string(retrieval) + "/" +
+                  std::to_string(profile.heads.size()) + " heads dense, k=" +
+                  std::to_string(opts.top_k_rows);
+    }
+    return Status::success();
+}
+
+Status AttentionSparsityController::build_pattern_matrix(const HeadProfile& profile,
+                                                         const PatternRoutingOptions& opts,
+                                                         std::vector<int32_t>* matrix,
+                                                         std::string* reason) {
+    if (!matrix) {
+        return Status::error(ErrorCode::InvalidArgument, "null matrix output");
+    }
+    if (opts.k_landmark == 0 || opts.k_local == 0 || opts.k_normal == 0) {
+        return Status::error(ErrorCode::InvalidArgument,
+                             "pattern k values must be > 0");
+    }
+    if (profile.n_layer <= 0 || profile.n_head <= 0 ||
+        profile.heads.size() != static_cast<size_t>(profile.n_layer) *
+                                       static_cast<size_t>(profile.n_head)) {
+        return Status::error(ErrorCode::InvalidArgument, "head profile geometry mismatch");
+    }
+    matrix->clear();
+    if (reason) reason->clear();
+
+    matrix->reserve(profile.heads.size());
+    uint32_t n_retrieval = 0;
+    uint32_t n_landmark = 0;
+    uint32_t n_local = 0;
+    uint32_t n_normal = 0;
+    for (const HeadProfileEntry& entry : profile.heads) {
+        // Classification order is part of the contract: the retrieval flag
+        // wins over every score, echo beats induction. A head at both
+        // thresholds is a landmark (echo subsumes local copying).
+        if (entry.retrieval) {
+            ++n_retrieval;
+            matrix->push_back(-1);
+        } else if (entry.echo_score >= opts.echo_threshold) {
+            ++n_landmark;
+            matrix->push_back(static_cast<int32_t>(opts.k_landmark));
+        } else if (entry.induction_score >= opts.induction_threshold) {
+            ++n_local;
+            matrix->push_back(static_cast<int32_t>(opts.k_local));
+        } else {
+            ++n_normal;
+            matrix->push_back(static_cast<int32_t>(opts.k_normal));
+        }
+    }
+
+    if (reason) {
+        *reason = "pattern-routing: retrieval=" + std::to_string(n_retrieval) +
+                  " landmark=" + std::to_string(n_landmark) +
+                  " local=" + std::to_string(n_local) +
+                  " normal=" + std::to_string(n_normal) +
+                  " k(l/loc/norm)=" + std::to_string(opts.k_landmark) + "/" +
+                  std::to_string(opts.k_local) + "/" + std::to_string(opts.k_normal);
+    }
+    return Status::success();
+}
+
+Status AttentionSparsityController::build_pyramid_matrix(uint32_t n_layer,
+                                                         uint32_t n_head,
+                                                         const PyramidOptions& opts,
+                                                         std::vector<int32_t>* matrix) {
+    if (!matrix) {
+        return Status::error(ErrorCode::InvalidArgument, "null matrix output");
+    }
+    if (n_layer == 0 || n_head == 0) {
+        return Status::error(ErrorCode::InvalidArgument,
+                             "pyramid requires n_layer > 0 and n_head > 0");
+    }
+    if (opts.k_min == 0 || opts.k_max == 0) {
+        return Status::error(ErrorCode::InvalidArgument, "pyramid k values must be > 0");
+    }
+    if (opts.k_min > opts.k_max) {
+        return Status::error(ErrorCode::InvalidArgument,
+                             "pyramid k_min must be <= k_max");
+    }
+    matrix->clear();
+    matrix->reserve(static_cast<size_t>(n_layer) * n_head);
+    for (uint32_t l = 0; l < n_layer; ++l) {
+        // Distance from the middle layer, normalized to [0, 1]: the ends
+        // are densest. A single layer is both first and last -> k_max.
+        double t = 1.0;
+        if (n_layer > 1) {
+            t = 2.0 * std::fabs(static_cast<double>(l) -
+                                static_cast<double>(n_layer - 1) / 2.0) /
+                static_cast<double>(n_layer - 1);
+        }
+        const double k = static_cast<double>(opts.k_min) +
+                         (static_cast<double>(opts.k_max) - opts.k_min) * t;
+        const int32_t k_layer = static_cast<int32_t>(std::lround(k));
+        for (uint32_t h = 0; h < n_head; ++h) {
+            matrix->push_back(k_layer);
+        }
+    }
+    return Status::success();
 }
 
 } // namespace edge_prefill

@@ -36,7 +36,10 @@ struct Loaded {
     std::vector<llama_token> tokens;
 };
 
-bool load(Loaded* out) {
+bool load(Loaded* out, uint32_t n_ubatch);
+bool load(Loaded* out) { return load(out, 128); }
+
+bool load(Loaded* out, uint32_t n_ubatch) {
     const std::string path = test_model_path();
     if (path.empty()) return false;
     if (!LlamaBackend::init().ok()) return false;
@@ -44,7 +47,7 @@ bool load(Loaded* out) {
     ContextOptions opts;
     opts.n_ctx = 2048;
     opts.n_batch = 512;
-    opts.n_ubatch = 128;
+    opts.n_ubatch = n_ubatch;
     opts.n_threads = 4;
     opts.n_threads_batch = 4;
     // The attention top-k gather path requires non-flash attention
@@ -572,6 +575,214 @@ TEST_CASE(benchmark_repeats_median_and_audit) {
     std::getline(csv_in, header);
     CHECK(header.find("attn_top_k") != std::string::npos);
     CHECK(header.find("repeats") != std::string::npos);
+}
+
+// ---------------------------------------------------------------------------
+// AR004 T001: large-chunk scalar gather regression (UT-C15).
+//
+// The scalar gather indices are scoped to the outer chunk, so the backend
+// must decode each outer chunk in a single llama_decode call. The pre-fix
+// binary passed chunk_size=0 to the backend, whose 512 fallback re-split a
+// 1024-token outer chunk into two sub-batches; the second sub-batch's K
+// view was narrower than the chunk's indices and the gather read unwritten
+// cells (out-of-bounds assert in get_rows). This regression reproduces the
+// geometry (auto chunk aligned to a 1024 n_ubatch, indices spanning the
+// whole active span) and asserts one internal decode record per outer
+// chunk, i.e. no re-chunking.
+// ---------------------------------------------------------------------------
+
+TEST_CASE(scalar_large_chunk_single_decode_regression) {
+    const std::string path = test_model_path();
+    if (path.empty()) {
+        std::cout << "SKIP scalar_large_chunk_single_decode_regression (EDGE_PREFILL_TEST_MODEL unset)\n";
+        return;
+    }
+    if (!LlamaBackend::init().ok()) return;
+    LlamaBackend backend;
+    if (!backend.load_model(path).ok()) return;
+    ContextOptions copts;
+    copts.n_ctx = 2048;
+    copts.n_batch = 2048;
+    copts.n_ubatch = 1024;
+    copts.n_threads = 4;
+    copts.n_threads_batch = 4;
+    copts.flash_attn = false;
+    CHECK_OK(backend.create_context(copts));
+
+    // ~1200 tokens: with n_ubatch 1024 the outer plan yields two chunks
+    // (1024 + remainder), each of which must be a single llama_decode.
+    std::string text;
+    for (int i = 0; i < 300; ++i) {
+        text += "The quick brown fox jumps over the lazy dog. Rain falls on the old roof. ";
+    }
+    std::vector<llama_token> tokens;
+    CHECK_OK(backend.tokenize(text, &tokens));
+    if (tokens.size() > 1500) tokens.resize(1500);
+    CHECK(tokens.size() > 1024);
+
+    std::vector<std::string> pieces(tokens.size());
+    for (size_t i = 0; i < tokens.size(); ++i) {
+        CHECK_OK(backend.token_to_piece(tokens[i], &pieces[i]));
+    }
+    SelectionOptions sopts;
+    sopts.block_size = 32;
+    sopts.budget = 0.5;
+    sopts.min_dense_tokens = 256;
+    Selection selection;
+    BlockSelector selector;
+    CHECK_OK(selector.select(tokens, "fox rain roof", pieces, sopts, nullptr,
+                             &selection));
+    CHECK(!selection.dense);
+    // The active span must exceed the old 512 fallback so a re-chunking
+    // backend would inevitably split the first outer chunk.
+    CHECK(selection.token_indices.size() > 512);
+
+    AttentionSparsityOptions aopts;
+    aopts.block_size = 32;
+    aopts.top_k_blocks = 8;
+    std::string reason;
+    std::vector<int32_t> indices;
+    CHECK_OK(AttentionSparsityController::build(selection, aopts, &indices,
+                                                &reason));
+    CHECK(!indices.empty());
+    selection.attention_indices = indices;
+    selection.attention_top_k = static_cast<uint32_t>(indices.size());
+
+    std::unique_ptr<PrefixCache> cache;
+    SparsePrefiller prefiller(&backend, cache.get());
+    SparsePrefiller::Options popts;
+    popts.chunk_size = 0;  // AR004 FR-1: auto = align to n_ubatch (1024)
+    popts.enable_attn_sparse = true;
+    popts.enable_prefix_cache = false;
+    popts.enable_ffn_skip = false;
+
+    PrefillStats stats;
+    CHECK_OK(prefiller.prefill(tokens, selection, popts, &stats));
+    // The active span fits one auto chunk (n_ubatch 1024): exactly one
+    // outer chunk, decoded exactly once (no backend re-chunking at the old
+    // 512 fallback — the pre-fix binary split it into 512+313 and the
+    // second sub-batch gathered rows beyond its K view).
+    const uint32_t active = static_cast<uint32_t>(selection.token_indices.size());
+    CHECK(active > 512);
+    CHECK(active <= 1024);
+    CHECK_EQ(stats.chunks, 1u);
+    CHECK_EQ(stats.chunk_stats.size(), stats.chunks);
+    CHECK_EQ(stats.chunk_stats.back().attn_rows,
+             static_cast<uint32_t>(indices.size()));
+
+    const std::vector<float> logits = logits_of(backend);
+    CHECK(!logits.empty());
+    CHECK(all_finite(logits));
+
+    LlamaBackend::shutdown();
+}
+
+// ---------------------------------------------------------------------------
+// AR004 T003: ppl quality is a retention ratio against a dense reference,
+// not the raw geometric-mean answer probability (which lands near 0 and
+// reads as "broken metric"). Also covers EX-8: an unusable ppl answer must
+// be reported as a warning and skipped, never silently scored as 0.
+// ---------------------------------------------------------------------------
+
+TEST_CASE(benchmark_ppl_quality_retention) {
+    const std::string model = test_model_path();
+    if (model.empty()) {
+        std::cout << "SKIP benchmark_ppl_quality_retention (EDGE_PREFILL_TEST_MODEL unset)\n";
+        return;
+    }
+
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    const fs::path dir = fs::temp_directory_path() / "edge_prefill_t003_ppl";
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir, ec);
+
+    std::string context_text = "The magic word is banana. ";
+    for (int i = 0; i < 50; ++i) {
+        context_text += "The quick brown fox jumps over the lazy dog. Rain falls on the old roof. ";
+    }
+    {
+        std::ofstream ctx_file((dir / "ctx.txt").string(), std::ios::binary);
+        ctx_file << context_text;
+        std::ofstream index_file((dir / "index.tsv").string(), std::ios::binary);
+        index_file << "id\ttask\tcontext_path\tquestion\tanswer\n";
+        index_file << "ppl1\tppl\tctx.txt\tContinue the passage.\t"
+                      "The quick brown fox jumps over the lazy dog.\n";
+        index_file << "pplbad\tppl\tctx.txt\tContinue the passage.\t\n";
+        index_file << "qa1\tqa\tctx.txt\tWhat is the magic word?\tbanana\n";
+    }
+
+    // Dense reference run: the sparse config IS dense, so retention against
+    // the dense reference must be exactly 1.
+    BenchmarkConfig bcfg;
+    bcfg.model = model;
+    bcfg.data_dir = dir.string();
+    bcfg.modes = {Mode::Dense};
+    bcfg.budgets = {1.0};
+    bcfg.lengths = {0};
+    bcfg.repeats = 1;
+    bcfg.warmup = 0;
+    bcfg.max_new_tokens = 4;
+    bcfg.out_dir = dir.string();
+    std::vector<Sample> dense_samples;
+    std::vector<std::string> warnings;
+    CHECK_OK(BenchmarkRunner().run(bcfg, &dense_samples, &warnings));
+    // qa1 + ppl1 run; pplbad must be skipped with an explicit warning.
+    CHECK_EQ(dense_samples.size(), 2u);
+    bool warned = false;
+    for (const auto& w : warnings) warned |= w.find("ppl-answer-invalid") != std::string::npos;
+    CHECK(warned);
+
+    const Sample* dense_ppl = nullptr;
+    const Sample* qa = nullptr;
+    for (const auto& s : dense_samples) {
+        if (s.task == "ppl") dense_ppl = &s;
+        if (s.task == "qa") qa = &s;
+    }
+    CHECK(dense_ppl != nullptr);
+    if (dense_ppl) {
+        // case_id is "<id>@<effective length>" where the effective length
+        // is the real context token count (lengths={0} keeps everything).
+        CHECK(dense_ppl->case_id.rfind("ppl1@", 0) == 0);
+        CHECK_GT(dense_ppl->quality, 0.0);
+        CHECK_NEAR(dense_ppl->quality, 1.0, 1e-6);
+        CHECK_GT(dense_ppl->ppl_dense, 0.0);
+        CHECK_NEAR(dense_ppl->ppl_sparse, dense_ppl->ppl_dense, 1e-6);
+    }
+    // The qa task must be unaffected by the ppl change: token-overlap F1
+    // against the gold answer, finite and positive when the needle is hit.
+    CHECK(qa != nullptr);
+    if (qa) CHECK(qa->quality >= 0.0 && qa->quality <= 1.0);
+
+    // Sparse run: retention may drop below 1 but must stay in (0, 1] and
+    // never read as the old broken ~0 quality.
+    bcfg.modes = {Mode::Latency};
+    bcfg.budgets = {0.5};
+    bcfg.attn_top_k = 4;
+    std::vector<Sample> sparse_samples;
+    CHECK_OK(BenchmarkRunner().run(bcfg, &sparse_samples, &warnings));
+    const Sample* sparse_ppl = nullptr;
+    for (const auto& s : sparse_samples) {
+        if (s.task == "ppl") sparse_ppl = &s;
+    }
+    CHECK(sparse_ppl != nullptr);
+    if (sparse_ppl) {
+        CHECK_GT(sparse_ppl->quality, 0.0);
+        CHECK(sparse_ppl->quality <= 1.0 + 1e-9);
+        CHECK_GT(sparse_ppl->ppl_sparse, 0.0);
+        CHECK_GT(sparse_ppl->ppl_dense, 0.0);
+    }
+
+    // CSV audit columns for traceability (FR-5: raw values land in the CSV).
+    Reporter reporter;
+    for (const auto& s : sparse_samples) CHECK_OK(reporter.write_sample(s));
+    const fs::path csv_path = dir / "raw.csv";
+    CHECK_OK(reporter.write_raw_csv(csv_path.string()));
+    std::ifstream csv_in(csv_path.string());
+    std::string header;
+    std::getline(csv_in, header);
+    CHECK(header.find("ppl_dense") != std::string::npos);
+    CHECK(header.find("ppl_sparse") != std::string::npos);
 }
 
 // ---------------------------------------------------------------------------

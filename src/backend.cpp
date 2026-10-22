@@ -73,6 +73,7 @@ Status LlamaBackend::load_model(const std::string& path, bool use_mmap) {
     }
     llama_model_params params = llama_model_default_params();
     params.load_mode = use_mmap ? LLAMA_LOAD_MODE_MMAP : LLAMA_LOAD_MODE_NONE;
+    params.n_gpu_layers = n_gpu_layers_;
     model_ = llama_model_load_from_file(path.c_str(), params);
     if (!model_) {
         return Status::error(ErrorCode::ModelLoad, "failed to load model: " + path);
@@ -81,6 +82,8 @@ Status LlamaBackend::load_model(const std::string& path, bool use_mmap) {
     model_path_ = path;
     return Status::success();
 }
+
+void LlamaBackend::set_n_gpu_layers(int32_t n) { n_gpu_layers_ = n; }
 
 Status LlamaBackend::create_context(const ContextOptions& opts) {
     if (!model_) {
@@ -272,6 +275,75 @@ Status LlamaBackend::decode(llama_token token, llama_pos pos, std::vector<float>
     return Status::success();
 }
 
+Status LlamaBackend::probe_argmax(const std::vector<llama_token>& tokens,
+                                  std::vector<int32_t>* top1) {
+    if (!ctx_) return Status::error(ErrorCode::InvalidArgument, "context is not created");
+    if (!top1) return Status::error(ErrorCode::InvalidArgument, "null top1 output");
+    if (tokens.empty()) return Status::error(ErrorCode::InvalidArgument, "empty tokens");
+    if (!vocab_) return Status::error(ErrorCode::InvalidArgument, "vocab is not loaded");
+    const uint32_t n_ctx = llama_n_ctx(ctx_);
+    if (tokens.size() > static_cast<size_t>(n_ctx)) {
+        return Status::error(ErrorCode::InvalidArgument, "tokens exceed n_ctx");
+    }
+
+    const int32_t n_vocab = llama_vocab_n_tokens(vocab_);
+    top1->clear();
+    top1->resize(tokens.size(), -1);
+
+    // One logits row is n_vocab floats; chunking bounds the output buffer
+    // the runtime must reserve for a probe pass. The chunk must also stay
+    // within n_batch: llama_context::decode asserts n_tokens_all <=
+    // n_batch, and contexts created with a small n_ctx (padded up by the
+    // runtime) can still carry a small n_batch.
+    constexpr uint32_t kProbeChunk = 128;
+    const uint32_t chunk_cap =
+            std::min<uint32_t>(kProbeChunk, llama_n_batch(ctx_));
+    if (chunk_cap == 0) {
+        set_prefill_mode(false);
+        return Status::error(ErrorCode::Internal, "n_batch is zero");
+    }
+    set_prefill_mode(true);
+    for (size_t offset = 0; offset < tokens.size(); offset += chunk_cap) {
+        const int32_t chunk =
+                static_cast<int32_t>(std::min<size_t>(chunk_cap, tokens.size() - offset));
+        llama_batch batch = llama_batch_init(chunk, 0, 1);
+        if (!batch.token) {
+            set_prefill_mode(false);
+            return Status::error(ErrorCode::OutOfMemory, "failed to allocate llama batch");
+        }
+        for (int32_t j = 0; j < chunk; ++j) {
+            batch.token[j] = tokens[offset + static_cast<size_t>(j)];
+            batch.pos[j] = static_cast<llama_pos>(offset + static_cast<size_t>(j));
+            batch.n_seq_id[j] = 1;
+            batch.seq_id[j][0] = 0;
+            // Every position needs its logits: the classifier compares
+            // per-position argmax against the dense baseline.
+            batch.logits[j] = 1;
+        }
+        batch.n_tokens = chunk;
+        const int32_t ret = llama_decode(ctx_, batch);
+        llama_batch_free(batch);
+        if (ret != 0) {
+            set_prefill_mode(false);
+            return Status::error(ErrorCode::Prefill, "llama_decode failed in probe forward");
+        }
+        for (int32_t j = 0; j < chunk; ++j) {
+            const float* row = llama_get_logits_ith(ctx_, j);
+            if (!row) {
+                set_prefill_mode(false);
+                return Status::error(ErrorCode::Prefill, "missing probe logits");
+            }
+            int32_t best = 0;
+            for (int32_t t = 1; t < n_vocab; ++t) {
+                if (row[t] > row[best]) best = t;
+            }
+            (*top1)[offset + static_cast<size_t>(j)] = best;
+        }
+    }
+    set_prefill_mode(false);
+    return Status::success();
+}
+
 Status LlamaBackend::save_state(std::vector<uint8_t>* out) const {
     if (!out) return Status::error(ErrorCode::InvalidArgument, "null state output");
     if (!ctx_) return Status::error(ErrorCode::Cache, "context is not created");
@@ -408,6 +480,10 @@ uint32_t LlamaBackend::n_ctx() const {
 
 int32_t LlamaBackend::n_layer() const {
     return model_ ? llama_model_n_layer(model_) : 0;
+}
+
+int32_t LlamaBackend::n_head() const {
+    return model_ ? llama_model_n_head(model_) : 0;
 }
 
 std::string LlamaBackend::arch() const {

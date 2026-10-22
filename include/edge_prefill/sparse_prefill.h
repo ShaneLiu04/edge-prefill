@@ -13,7 +13,8 @@ namespace edge_prefill {
 class SparsePrefiller {
 public:
     struct Options {
-        uint32_t chunk_size = 512;
+        // 0 = auto: align to n_ubatch (AR004 FR-1).
+        uint32_t chunk_size = 0;
         bool enable_prefix_cache = true;
         bool enable_chunking = true;
         bool enable_ffn_skip = true;
@@ -22,6 +23,14 @@ public:
         // Honor selection.attention_indices with per-chunk gather
         // adjustment. False keeps the block-sparse execution untouched.
         bool enable_attn_sparse = true;
+        // AR003 head-adaptive prefill: when enabled and both vectors are
+        // non-empty, the backend receives the ranked row pool plus the
+        // layer x head top-k matrix before prefill and the per-head gather
+        // path replaces the scalar top-k path. On any backend rejection the
+        // prefill falls back to the scalar path with a warning.
+        bool enable_head_adaptive = false;
+        std::vector<int32_t> head_pool;    // ranked cache rows
+        std::vector<int32_t> head_matrix;  // n_layer * n_head, -1 dense / k sparse
     };
 
     SparsePrefiller(LlamaBackend* backend, PrefixCache* cache);

@@ -4,13 +4,17 @@
 #include <cctype>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <limits>
+#include <numeric>
 #include <sstream>
 #include <unordered_map>
 
 #include "edge_prefill/attention_sparsity.h"
 #include "edge_prefill/backend.h"
+#include "edge_prefill/head_profile.h"
 #include "edge_prefill/log.h"
 #include "edge_prefill/planner.h"
 #include "edge_prefill/selector.h"
@@ -147,6 +151,33 @@ double log_softmax_at(const std::vector<float>& logits, llama_token token) {
     return static_cast<double>(logits[static_cast<size_t>(idx)]) - log_z;
 }
 
+// AR004 FR-5: mean answer log-probability after a prefill. The caller
+// supplies the first-token logits of the prefilled context; each further
+// answer token consumes one decode step. Returns false when the answer
+// cannot be scored end to end (decode failure) so callers can skip the
+// sample instead of publishing a fabricated quality number.
+bool score_answer_mean_logprob(LlamaBackend& backend, const float* first_logits,
+                               size_t prompt_tokens,
+                               const std::vector<llama_token>& answer_tokens,
+                               double* mean_lp) {
+    if (!first_logits || answer_tokens.empty() || !mean_lp) return false;
+    std::vector<float> logits(first_logits, first_logits + backend.n_vocab());
+    double logprob_sum = 0.0;
+    for (size_t i = 0; i < answer_tokens.size(); ++i) {
+        logprob_sum += log_softmax_at(logits, answer_tokens[i]);
+        if (i + 1 == answer_tokens.size()) break;
+        std::vector<float> step_logits;
+        if (!backend.decode(answer_tokens[i],
+                            static_cast<llama_pos>(prompt_tokens + i), &step_logits)
+                 .ok()) {
+            return false;
+        }
+        logits = std::move(step_logits);
+    }
+    *mean_lp = logprob_sum / static_cast<double>(answer_tokens.size());
+    return true;
+}
+
 } // namespace
 
 Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out,
@@ -194,6 +225,7 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
     LlamaBackend backend;
     auto st = LlamaBackend::init();
     if (!st.ok()) return st;
+    backend.set_n_gpu_layers(cfg.n_gpu_layers);
     st = backend.load_model(base.model_path);
     if (!st.ok()) {
         LlamaBackend::shutdown();
@@ -206,10 +238,38 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
     ctx_opts.n_threads_batch = 0;
     ctx_opts.type_k = KvPrecision::F16;
     ctx_opts.type_v = KvPrecision::F16;
+    // The attention gather paths (scalar top-k and per-head matrix) require
+    // the non-flash layout; keep every mode on the same graph family so
+    // dense-vs-sparse timings stay internally comparable.
+    ctx_opts.flash_attn = false;
     st = backend.create_context(ctx_opts);
     if (!st.ok()) {
         LlamaBackend::shutdown();
         return st;
+    }
+
+    // AR003: load and validate the offline head profile once. A missing or
+    // mismatched profile downgrades the run to the scalar path with a
+    // warning instead of failing.
+    HeadProfile head_profile;
+    bool head_ok = false;
+    if (cfg.head_adaptive) {
+        if (cfg.head_profile.empty()) {
+            if (warnings) warnings->push_back("head-adaptive-no-profile");
+        } else {
+            auto pst = load_head_profile(cfg.head_profile, &head_profile);
+            if (!pst.ok()) {
+                if (warnings) warnings->push_back("head-profile-load:" + pst.message);
+            } else {
+                auto vst = validate_head_profile(head_profile, backend.n_layer(),
+                                                 backend.n_head());
+                if (!vst.ok()) {
+                    if (warnings) warnings->push_back("head-profile-invalid:" + vst.message);
+                } else {
+                    head_ok = true;
+                }
+            }
+        }
     }
 
     std::unique_ptr<PrefixCache> cache;
@@ -219,6 +279,10 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
     SparsePrefiller prefilter(&backend, cache.get());
 
     const auto wall_begin = std::chrono::steady_clock::now();
+    // AR004 FR-5: dense ppl reference per (case, length). Computed once and
+    // reused across modes/budgets so every ppl sample's quality is a
+    // retention ratio against the same dense number.
+    std::unordered_map<std::string, double> ppl_dense_ref;
     for (const auto& c : cases) {
         const std::string context_path =
             (std::filesystem::path(cfg.data_dir) / c.context_path).string();
@@ -250,6 +314,53 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
             std::vector<std::string> pieces(tokens.size());
             for (size_t i = 0; i < tokens.size(); ++i) {
                 backend.token_to_piece(tokens[i], &pieces[i]);
+            }
+
+            // AR004 FR-5: for ppl cases, establish the dense reference
+            // (mean answer log-prob over a fully dense prefill) before the
+            // sparse configs run. NaN marks an unusable reference (bad
+            // answer text, prefill or scoring failure); the sample is
+            // skipped with an explicit warning, never scored with 0.
+            double ppl_lp_dense = std::numeric_limits<double>::quiet_NaN();
+            if (c.task == "ppl") {
+                const std::string ref_key = c.id + "@" + std::to_string(length);
+                const auto cached = ppl_dense_ref.find(ref_key);
+                if (cached != ppl_dense_ref.end()) {
+                    ppl_lp_dense = cached->second;
+                } else {
+                    std::vector<llama_token> answer_tokens;
+                    if (!backend.tokenize(c.answer, &answer_tokens, false, false).ok() ||
+                        answer_tokens.empty()) {
+                        if (warnings) warnings->push_back("ppl-answer-invalid:" + c.id);
+                    } else {
+                        Selection dense_sel;
+                        dense_sel.dense = true;
+                        dense_sel.total_tokens = static_cast<uint32_t>(tokens.size());
+                        dense_sel.token_indices.resize(tokens.size());
+                        std::iota(dense_sel.token_indices.begin(),
+                                  dense_sel.token_indices.end(), 0u);
+                        SparsePrefiller::Options ref_opts;
+                        ref_opts.enable_prefix_cache = false;
+                        ref_opts.enable_ffn_skip = false;
+                        PrefillStats ref_stats;
+                        if (!prefilter.prefill(tokens, dense_sel, ref_opts, &ref_stats).ok()) {
+                            if (warnings) warnings->push_back("ppl-dense-ref-failed:" + c.id);
+                        } else {
+                            const float* ref_logits = llama_get_logits_ith(backend.context(), -1);
+                            double lp = 0.0;
+                            if (!score_answer_mean_logprob(backend, ref_logits, tokens.size(),
+                                                           answer_tokens, &lp)) {
+                                if (warnings) {
+                                    warnings->push_back("ppl-dense-ref-failed:" + c.id);
+                                }
+                            } else {
+                                ppl_lp_dense = lp;
+                            }
+                        }
+                    }
+                    ppl_dense_ref[ref_key] = ppl_lp_dense;
+                }
+                if (std::isnan(ppl_lp_dense)) continue;
             }
 
             for (Mode mode : cfg.modes) {
@@ -308,6 +419,19 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
                         }
                     }
 
+                    // Interpretability hook: EDGE_PREFILL_DUMP_SELECTION=DIR
+                    // writes the full selection JSON (per-block signals,
+                    // kept blocks, gather indices) per case for offline
+                    // analysis and plotting. Off by default.
+                    if (const char* dump_dir = std::getenv("EDGE_PREFILL_DUMP_SELECTION")) {
+                        std::error_code ec;
+                        std::filesystem::create_directories(dump_dir, ec);
+                        const std::string path = std::string(dump_dir) + "/" + c.id + "@" +
+                                                 std::to_string(length) + ".json";
+                        std::ofstream out(path);
+                        out << selection.to_json() << '\n';
+                    }
+
                     if (log_level() >= LogLevel::Debug && !selection.dense) {
                         size_t needle_token = tokens.size();
                         std::string acc;
@@ -346,11 +470,71 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
                     }
 
                     SparsePrefiller::Options popts;
-                    popts.chunk_size = plan.dense_fallback ? 512 : plan.chunk_size;
+                    // 0 = auto (align to n_ubatch) for both sparse and
+                    // dense-fallback plans (AR004 FR-1).
+                    popts.chunk_size = plan.chunk_size;
                     popts.enable_prefix_cache = false;
                     popts.enable_chunking = true;
                     popts.enable_ffn_skip = true;
                     popts.ffn_skip_mask = plan.dense_fallback ? 0 : plan.skip_ffn_mask;
+
+                    // AR003/AR004 FR-4: per-head adaptive gather. Pattern
+                    // routing replaces only the matrix; without a profile
+                    // the pyramid prior supplies one over the same pool.
+                    if (cfg.head_adaptive && head_ok && cfg.head_top_k > 0 &&
+                        !selection.dense) {
+                        HeadAdaptiveOptions hopts;
+                        hopts.block_size = run_cfg.block_size;
+                        hopts.top_k_rows = cfg.head_top_k;
+                        std::vector<int32_t> pool;
+                        std::vector<int32_t> matrix;
+                        std::string head_reason;
+                        bool built = AttentionSparsityController::build_head_adaptive(
+                                         selection, head_profile, hopts, &pool, &matrix,
+                                         &head_reason).ok() &&
+                                     !pool.empty() && !matrix.empty();
+                        if (built && cfg.head_pattern_routing) {
+                            PatternRoutingOptions routing;
+                            routing.k_normal = cfg.head_top_k;
+                            matrix.clear();
+                            built = AttentionSparsityController::build_pattern_matrix(
+                                        head_profile, routing, &matrix,
+                                        &head_reason).ok() &&
+                                    !matrix.empty();
+                        }
+                        if (built) {
+                            popts.enable_head_adaptive = true;
+                            popts.head_pool = std::move(pool);
+                            popts.head_matrix = std::move(matrix);
+                            log_debug(head_reason);
+                        } else if (!head_reason.empty()) {
+                            log_warn("head-adaptive build failed: " + head_reason);
+                        }
+                    } else if (cfg.head_adaptive && !head_ok && cfg.pyramid_prior &&
+                               cfg.head_top_k > 0 && !selection.dense) {
+                        std::vector<int32_t> pool;
+                        std::vector<int32_t> matrix;
+                        PyramidOptions pyopts;
+                        pyopts.k_min = cfg.pyramid_k_min;
+                        pyopts.k_max = cfg.pyramid_k_max;
+                        if (AttentionSparsityController::build_ranked_pool(
+                                    selection, run_cfg.block_size, &pool).ok() &&
+                            !pool.empty() &&
+                            AttentionSparsityController::build_pyramid_matrix(
+                                    static_cast<uint32_t>(backend.n_layer()),
+                                    static_cast<uint32_t>(backend.n_head()),
+                                    pyopts, &matrix).ok() &&
+                            !matrix.empty()) {
+                            popts.enable_head_adaptive = true;
+                            popts.head_pool = std::move(pool);
+                            popts.head_matrix = std::move(matrix);
+                            log_debug("pyramid prior: k(min/max)=" +
+                                      std::to_string(pyopts.k_min) + "/" +
+                                      std::to_string(pyopts.k_max));
+                        } else {
+                            log_warn("pyramid-prior build failed; scalar path");
+                        }
+                    }
 
                     // Untimed warmup runs stabilize caches and page in model
                     // weights so the timed repeats measure steady state.
@@ -393,31 +577,27 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
                     const float* first_logits = llama_get_logits_ith(backend.context(), -1);
                     std::string generated;
                     double quality = 0.0;
-                    if (first_logits && c.task == "ppl") {
+                    double sample_ppl_dense = 0.0;
+                    double sample_ppl_sparse = 0.0;
+                    if (c.task == "ppl") {
+                        // AR004 FR-5: quality is the retention ratio
+                        // min(1, ppl_dense/ppl_sparse) =
+                        // min(1, exp(lp_sparse - lp_dense)). The raw
+                        // geometric-mean probability is ~1e-2..1e-4 and
+                        // unusable as a quality number; the raw perplexities
+                        // land in the CSV audit columns.
                         std::vector<llama_token> answer_tokens;
+                        double lp_sparse = 0.0;
                         if (!backend.tokenize(c.answer, &answer_tokens, false, false).ok() ||
-                            answer_tokens.empty()) {
-                            quality = 0.0;
-                        } else {
-                            std::vector<float> logits(first_logits,
-                                                      first_logits + backend.n_vocab());
-                            double logprob_sum = 0.0;
-                            for (size_t i = 0; i < answer_tokens.size(); ++i) {
-                                logprob_sum += log_softmax_at(logits, answer_tokens[i]);
-                                if (i + 1 == answer_tokens.size()) break;
-                                std::vector<float> step_logits;
-                                if (!backend
-                                         .decode(answer_tokens[i],
-                                                 static_cast<llama_pos>(tokens.size() + i),
-                                                 &step_logits)
-                                         .ok()) {
-                                    break;
-                                }
-                                logits = std::move(step_logits);
-                            }
-                            quality = std::exp(logprob_sum /
-                                               static_cast<double>(answer_tokens.size()));
+                            answer_tokens.empty() ||
+                            !score_answer_mean_logprob(backend, first_logits, tokens.size(),
+                                                       answer_tokens, &lp_sparse)) {
+                            if (warnings) warnings->push_back("ppl-score-failed:" + c.id);
+                            continue;
                         }
+                        quality = std::min(1.0, std::exp(lp_sparse - ppl_lp_dense));
+                        sample_ppl_dense = std::exp(-ppl_lp_dense);
+                        sample_ppl_sparse = std::exp(-lp_sparse);
                     } else if (first_logits) {
                         std::vector<float> logits(first_logits,
                                                   first_logits + backend.n_vocab());
@@ -459,6 +639,8 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
                     sample.budget = sopts.budget;
                     sample.attn_top_k = static_cast<uint32_t>(std::max<int32_t>(0, stats.attn_top_k));
                     sample.repeats = reps;
+                    sample.ppl_dense = sample_ppl_dense;
+                    sample.ppl_sparse = sample_ppl_sparse;
                     log_info("case=" + sample.case_id + " mode=" + sample.mode +
                              " quality=" + std::to_string(sample.quality) +
                              " generated=" + generated);

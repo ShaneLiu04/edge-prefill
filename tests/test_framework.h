@@ -49,14 +49,24 @@ inline void fail(const char* file, int line, const std::string& message) {
         }                                                                      \
     } while (0)
 
-#define CHECK_NEAR(a, b, eps)                                                  \
-    do {                                                                       \
-        const double va = static_cast<double>(a);                              \
-        const double vb = static_cast<double>(b);                              \
-        if (std::fabs(va - vb) > (eps)) {                                      \
+#define CHECK_NEAR(a, b, eps)                                                   \
+    do {                                                                        \
+        const double va = static_cast<double>(a);                               \
+        const double vb = static_cast<double>(b);                               \
+        if (std::fabs(va - vb) > (eps)) {                                       \
             ::edge_test::fail(__FILE__, __LINE__,                              \
                               std::string("CHECK_NEAR failed: ") + #a + " vs " + #b); \
-        }                                                                      \
+        }                                                                       \
+    } while (0)
+
+#define CHECK_GT(a, b)                                                          \
+    do {                                                                        \
+        const auto va = (a);                                                    \
+        const auto vb = (b);                                                    \
+        if (!(va > vb)) {                                                       \
+            ::edge_test::fail(__FILE__, __LINE__,                              \
+                              std::string("CHECK_GT failed: ") + #a + " <= " + #b); \
+        }                                                                       \
     } while (0)
 
 #define CHECK_OK(expr)                                                         \

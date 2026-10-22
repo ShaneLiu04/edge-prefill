@@ -288,6 +288,14 @@ Status parse_config_file(const std::string& path, Config* out) {
             out->attn_top_k = static_cast<uint32_t>(u);
         } else if (key == "attn_top_k_layers") {
             out->attn_top_k_layers = value;
+        } else if (key == "head_profile") {
+            out->head_profile_path = value;
+        } else if (key == "head_adaptive") {
+            if (!parse_bool(value, &b)) goto bad_value;
+            out->head_adaptive = b;
+        } else if (key == "head_top_k") {
+            if (!parse_u64(value, &u) || u > 0xffffffffull) goto bad_value;
+            out->head_top_k = static_cast<uint32_t>(u);
         } else if (key == "prefix_cache") {
             if (!parse_bool(value, &b)) goto bad_value;
             out->enable_prefix_cache = b;

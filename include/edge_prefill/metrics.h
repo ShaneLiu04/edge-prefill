@@ -35,6 +35,10 @@ struct Sample {
     uint32_t attn_top_k = 0;
     // Timed repeats behind the reported TTFT (median of `repeats` runs).
     uint32_t repeats = 1;
+    // AR004 FR-5: raw answer perplexities behind the ppl quality
+    // retention (0 for non-ppl tasks). quality = min(1, ppl_dense/ppl_sparse).
+    double ppl_dense = 0.0;
+    double ppl_sparse = 0.0;
 };
 
 class Reporter {

@@ -67,6 +67,9 @@ public:
     static void shutdown();
 
     Status load_model(const std::string& path, bool use_mmap = true);
+    // Must be called before load_model; applied to llama_model_params so all
+    // layers above the threshold are offloaded to the GPU backend.
+    void set_n_gpu_layers(int32_t n);
     Status create_context(const ContextOptions& opts);
     Status tokenize(const std::string& text, std::vector<llama_token>* out,
                     bool add_special = true, bool parse_special = true) const;
@@ -77,6 +80,12 @@ public:
                    uint32_t chunk_size,
                    PrefillStats* stats);
     Status decode(llama_token token, llama_pos pos, std::vector<float>* logits);
+    // Batched probe forward for the offline head classifier: positions are
+    // 0..n-1, prefill mode is on, logits are enabled on every position, and
+    // the per-position argmax token id is returned. Chunked internally to
+    // bound the logits buffer. Not a generation path.
+    Status probe_argmax(const std::vector<llama_token>& tokens,
+                        std::vector<int32_t>* top1);
     Status save_state(std::vector<uint8_t>* out) const;
     Status load_state(const std::vector<uint8_t>& in);
     Status reset_sequence();
@@ -110,6 +119,7 @@ public:
     int32_t n_vocab() const;
     uint32_t n_ctx() const;
     int32_t n_layer() const;
+    int32_t n_head() const;
     std::string arch() const;
     ModelFingerprint fingerprint() const;
     const ContextOptions& context_options() const { return context_options_; }
@@ -121,6 +131,7 @@ private:
     const llama_vocab* vocab_ = nullptr;
     std::string model_path_;
     ContextOptions context_options_;
+    int32_t n_gpu_layers_ = 0;
 };
 
 } // namespace edge_prefill

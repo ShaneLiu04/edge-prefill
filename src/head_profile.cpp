@@ -5,6 +5,8 @@
 #include <fstream>
 #include <sstream>
 
+#include "edge_prefill/json_writer.h"
+
 namespace edge_prefill {
 namespace {
 
@@ -390,6 +392,63 @@ Status load_head_profile(const std::string& path, HeadProfile* out) {
     }
 
     *out = std::move(profile);
+    return Status::success();
+}
+
+Status save_head_profile(const std::string& path, const HeadProfile& profile) {
+    std::string text;
+    JsonWriter writer(&text);
+    writer.begin_object();
+    writer.key("model_sha");
+    writer.value(profile.model_sha);
+    writer.key("n_layer");
+    writer.value(static_cast<uint64_t>(profile.n_layer));
+    writer.key("n_head");
+    writer.value(static_cast<uint64_t>(profile.n_head));
+    writer.key("probe_params");
+    writer.begin_object();
+    writer.key("block_len");
+    writer.value(static_cast<uint64_t>(profile.probe.block_len));
+    writer.key("repeats");
+    writer.value(static_cast<uint64_t>(profile.probe.repeats));
+    writer.key("sink");
+    writer.value(static_cast<uint64_t>(profile.probe.sink));
+    writer.key("recent");
+    writer.value(static_cast<uint64_t>(profile.probe.recent));
+    writer.key("probe_k");
+    writer.value(static_cast<uint64_t>(profile.probe.probe_k));
+    writer.key("seed");
+    writer.value(profile.probe.seed);
+    writer.end_object();
+    writer.key("heads");
+    writer.begin_array();
+    for (const HeadProfileEntry& entry : profile.heads) {
+        writer.begin_object();
+        writer.key("layer");
+        writer.value(static_cast<uint64_t>(entry.layer));
+        writer.key("head");
+        writer.value(static_cast<uint64_t>(entry.head));
+        writer.key("echo_score");
+        writer.value(entry.echo_score);
+        writer.key("induction_score");
+        writer.value(entry.induction_score);
+        writer.key("class");
+        writer.value(std::string(entry.retrieval ? "retrieval" : "normal"));
+        writer.end_object();
+    }
+    writer.end_array();
+    writer.end_object();
+    text.push_back('\n');
+
+    std::ofstream file(path, std::ios::binary | std::ios::trunc);
+    if (!file) {
+        return Status::error(ErrorCode::Io, "cannot write head profile: " + path);
+    }
+    file.write(text.data(), static_cast<std::streamsize>(text.size()));
+    file.flush();
+    if (!file) {
+        return Status::error(ErrorCode::Io, "failed writing head profile: " + path);
+    }
     return Status::success();
 }
 

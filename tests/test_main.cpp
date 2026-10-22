@@ -1,5 +1,7 @@
 #include "test_framework.h"
 
+#include <string>
+
 namespace edge_test {
 
 std::vector<Case>& registry() {
@@ -14,8 +16,14 @@ int& failures() {
 
 } // namespace edge_test
 
-int main() {
+int main(int argc, char** argv) {
+    // Optional substring filter (argv[1]) so a single case can be run or
+    // timed in isolation; without arguments every case runs as before.
+    const std::string filter = argc > 1 ? argv[1] : "";
     for (const auto& c : edge_test::registry()) {
+        if (!filter.empty() && std::string(c.name).find(filter) == std::string::npos) {
+            continue;
+        }
         const int before = edge_test::failures();
         try {
             c.fn();

@@ -58,8 +58,10 @@ Status SparsePrefiller::prefill(const std::vector<llama_token>& tokens,
 
     // Validate gather indices before touching any model state so an invalid
     // request never leaves a partially written sequence behind.
+    const bool head_requested = opts.enable_head_adaptive && !opts.head_matrix.empty() &&
+                                !opts.head_pool.empty();
     const bool attn_requested = opts.enable_attn_sparse && !selection.dense &&
-                                !selection.attention_indices.empty();
+                                !selection.attention_indices.empty() && !head_requested;
     if (attn_requested) {
         auto vst = AttentionSparsityController::validate_indices(selection.attention_indices,
                                                                  selection);
@@ -106,7 +108,24 @@ Status SparsePrefiller::prefill(const std::vector<llama_token>& tokens,
     // Probe the gather patch once: a missing llama.cpp patch must degrade to
     // block-level sparsity instead of failing the request.
     bool attn_active = false;
-    if (attn_requested) {
+    bool head_active = false;
+    if (head_requested) {
+        auto st_pool = backend_->set_attn_ranked_rows(opts.head_pool);
+        if (!st_pool.ok()) {
+            log_warn("head-adaptive pool rejected (" + st_pool.message +
+                     "); falling back to scalar path");
+        } else {
+            auto st_matrix = backend_->set_attn_head_top_k(opts.head_matrix);
+            if (!st_matrix.ok()) {
+                backend_->set_attn_ranked_rows({});
+                log_warn("head-adaptive matrix rejected (" + st_matrix.message +
+                         "); falling back to scalar path");
+            } else {
+                head_active = true;
+            }
+        }
+    }
+    if (!head_active && attn_requested) {
         stats->attn_indices = static_cast<uint32_t>(selection.attention_indices.size());
         auto probe = backend_->set_attn_top_k(1);
         if (!probe.ok()) {
@@ -136,11 +155,22 @@ Status SparsePrefiller::prefill(const std::vector<llama_token>& tokens,
             st = attn_prefill(active_tokens, active_positions, selection.attention_indices,
                               opts, stats);
         } else {
+            // enable_chunking=false passes the whole active span: the
+            // scheduler emits one range and llama_decode splits internally
+            // at n_ubatch, which is safe here because the dense path has no
+            // chunk-scoped gather indices.
             st = backend_->prefill(active_tokens, active_positions,
-                                   opts.enable_chunking ? opts.chunk_size : 0, stats);
+                                   opts.enable_chunking
+                                       ? opts.chunk_size
+                                       : static_cast<uint32_t>(active_tokens.size()),
+                                   stats);
         }
         // Always restore the dense attention path so decode and subsequent
         // prefills never inherit stale gather settings.
+        if (head_active) {
+            backend_->set_attn_head_top_k({});
+            backend_->set_attn_ranked_rows({});
+        }
         backend_->set_attn_top_k(0);
         backend_->set_attn_indices({});
         if (!st.ok()) return st;
@@ -199,9 +229,21 @@ Status SparsePrefiller::attn_prefill(const std::vector<llama_token>& tokens,
     // disabled for the chunk, dense attention over the written rows, which
     // is causally safe).
     std::vector<Range> ranges;
+    // Gather indices are scoped to the outer chunk, so the outer plan must
+    // never bypass the n_ubatch cap (a larger chunk would make llama_decode
+    // split internally and produce sub-batch K views narrower than the
+    // chunk's indices — the pre-AR004 crash geometry). Explicit oversize
+    // chunks are clamped here; chunk_size 0 is the auto n_ubatch alignment.
+    const uint32_t n_ubatch = llama_n_ubatch(backend_->context());
+    uint32_t attn_chunk = opts.enable_chunking ? opts.chunk_size : 0;
+    if (attn_chunk > n_ubatch) {
+        log_warn("attn chunk_size " + std::to_string(attn_chunk) +
+                 " exceeds n_ubatch " + std::to_string(n_ubatch) +
+                 "; clamping to n_ubatch (gather indices are chunk-scoped)");
+        attn_chunk = n_ubatch;
+    }
     auto st = ChunkScheduler::plan(static_cast<uint32_t>(tokens.size()),
-                                   opts.enable_chunking ? opts.chunk_size : 0,
-                                   llama_n_ubatch(backend_->context()), &ranges);
+                                   attn_chunk, n_ubatch, &ranges);
     if (!st.ok()) return st;
 
     stats->chunks = static_cast<uint32_t>(ranges.size());
@@ -216,6 +258,12 @@ Status SparsePrefiller::attn_prefill(const std::vector<llama_token>& tokens,
             std::lower_bound(index_rows.begin(), index_rows.end(),
                              static_cast<int32_t>(range.end));
         allowed.assign(index_rows.begin(), row_end);
+        // Per-chunk gather geometry: rows must stay below the K view width
+        // (n_kv == range.end after this chunk's decode), which holds because
+        // the backend decodes the chunk in a single llama_decode call.
+        log_debug("chunk [" + std::to_string(range.begin) + "," +
+                  std::to_string(range.end) + ") allowed=" +
+                  std::to_string(allowed.size()));
         st = backend_->set_attn_indices(allowed);
         if (!st.ok()) return st;
         st = backend_->set_attn_top_k(static_cast<int32_t>(allowed.size()));
@@ -223,7 +271,16 @@ Status SparsePrefiller::attn_prefill(const std::vector<llama_token>& tokens,
 
         PrefillStats chunk_stats;
         chunk_stats.collect_chunk_stats = stats->collect_chunk_stats;
-        st = backend_->prefill(chunk_tokens, chunk_positions, 0, &chunk_stats);
+        // The gather indices are scoped to this outer chunk, so the backend
+        // must decode it in a single llama_decode call: passing 0 would make
+        // the backend re-chunk at its 512 fallback and the sub-batches'
+        // K views (n_kv grows by 512 per sub-batch) would be narrower than
+        // this chunk's indices, causing out-of-bounds gathers. The outer
+        // plan already caps ranges at n_ubatch, so llama performs no
+        // further split.
+        st = backend_->prefill(chunk_tokens, chunk_positions,
+                               static_cast<uint32_t>(chunk_tokens.size()),
+                               &chunk_stats);
         if (!st.ok()) return st;
         for (ChunkStats cs : chunk_stats.chunk_stats) {
             cs.index = static_cast<uint32_t>(stats->chunk_stats.size());
