@@ -95,6 +95,15 @@ public:
     Status set_attn_indices(const std::vector<int32_t>& indices);
     int32_t attn_indices_size() const;
 
+    // Per-head adaptive sparse prefill (AR003): ranked candidate row pool
+    // plus layer x head top-k matrix. A non-empty pool and matrix take
+    // precedence over the scalar path; clearing either restores it.
+    Status set_attn_ranked_rows(const std::vector<int32_t>& rows);
+    int32_t attn_ranked_rows_size() const;
+    Status set_attn_head_top_k(const std::vector<int32_t>& matrix);
+    int32_t attn_head_top_k_size() const;
+    bool attn_per_head_supported() const;
+
     const llama_model* model() const { return model_; }
     llama_context* context() const { return ctx_; }
     const llama_vocab* vocab() const { return vocab_; }

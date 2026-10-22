@@ -14,7 +14,7 @@
 |----|---------|------|------|------|
 | T001 | head profile 数据结构与加载：JSON 解析、模型结构校验、planner 集成点与 `--head-profile`/`--head-adaptive` CLI | - | passing | 2026-10-21 完成 |
 | T002 | 离线 head 分类器 `classify-heads`：真实模型重复序列探测（echo/induction 检测）、JSON 输出、确定性保证 | T001 | pending | 无模型 SKIP |
-| T003 | per-head gather patch：llama.cpp patch 扩展（per-head indices 张量 + C API + 校验）与 backend 包装、Unsupported 回退全局 top-k | T001 | pending | 最小可审查 patch |
+| T003 | per-head gather patch：llama.cpp patch 扩展（per-head indices 张量 + C API + 校验）与 backend 包装、Unsupported 回退全局 top-k | T001 | passing | 2026-10-22 完成 |
 | T004 | per-head 执行路径：sparse_prefill per-chunk per-head 行号映射、retrieval head 稠密直通、审计字段与回归用例 | T003 | pending | dense 等价 <1e-5 |
 | T005 | 层-头二维自适应规划：budget → 层×头 top-k 矩阵、draft 深层信号融合、mandatory 锚逐 head 保留、消融开关 | T002, T004 | pending | off=AR002 行为 |
 | T006 | 在线质量风险控制器：draft 区分度/覆盖率统计、ok/tighten/dense-fallback 三级动作、审计与 metrics 列 | T005 | pending | 失败按 tighten |
@@ -62,6 +62,28 @@
   矩阵降级核验）；-Werror 零警告
 - 备注：CLI 参数在 main.cpp static parse_args 内，校验用例由后续 T002
   classify-heads 集成用例与 ST 覆盖；probe_params 六字段全量解析验证
+
+### 2026-10-22 会话记录（T003）
+
+- 完成任务：T003 per-head gather patch 与 backend 包装
+- 修改文件：patches/llama-prefill-attn-top-k.patch（重生成 814 行，pristine
+  apply 验证逐字节一致）、include/edge_prefill/backend.h、src/backend.cpp、
+  tests/test_sparse_attn_exec.cpp（+9 用例，Red 子代理编写）
+- patch 核心设计：每层按 distinct top-k 值分组（≤4 组，超限/非均匀 GQA/
+  kq_b/sinks/v_mla/flash 该层回退 dense）；q/k/v 按 head 分组置换
+  （identity 置换走零拷贝捷径）；每组独立 build_attn_mha（dense 组全宽、
+  稀疏组 gather 池前 k 行过滤 live n_kv）；组输出 concat 后逆置换回原
+  head 序再过 wo 投影；sink 行 0 强制纳入保证每个 token 可见集非空
+  （杜绝全 -inf mask → softmax NaN）；can_reuse 用 matrix/pool/n_kv 快照
+  比较判重建
+- 测试：80 PASS / 0 FAIL / 0 SKIP（真实模型全量，71 旧用例零回归）
+- 覆盖率：C API 校验全分支（NULL/长度/0/<-1/半写防护/清空恢复）、
+  backend 错误码转换、全 -1 矩阵 dense 等价 <1e-5、单组退化与标量路径
+  逐 token argmax 一致、首 chunk 空前缀有限且确定、distinct=4/5 组边界；
+  -Werror 零警告
+- 备注：GQA（n_head != n_head_kv）模型矩阵路径暂回退 dense（MHA 全速，
+  文档记录）；设计"过滤未写行"细化为"过滤 live n_kv + 强制 sink 行"，
+  与 AR002 标量路径前缀语义一致（因果安全）
 
 ## 阶段门控记录
 

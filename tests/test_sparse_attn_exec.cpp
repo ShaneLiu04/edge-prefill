@@ -573,3 +573,562 @@ TEST_CASE(benchmark_repeats_median_and_audit) {
     CHECK(header.find("attn_top_k") != std::string::npos);
     CHECK(header.find("repeats") != std::string::npos);
 }
+
+// ---------------------------------------------------------------------------
+// AR003 T003: per-head gather patch C API + backend wrapper.
+//
+// The symbols llama_set_prefill_attn_ranked_rows /
+// llama_set_prefill_attn_head_top_k / llama_get_prefill_attn_ranked_rows_size
+// and the LlamaBackend wrapper methods (set_attn_ranked_rows,
+// set_attn_head_top_k, attn_head_top_k_size, attn_per_head_supported) do not
+// exist yet, so this translation unit fails to compile until T003 lands
+// (Red). Every case below drives the real model (explicit SKIP when
+// EDGE_PREFILL_TEST_MODEL is unset) and reuses the AR002 fixture helpers.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+int32_t model_n_head(const LlamaBackend& backend) {
+    return llama_model_n_head(backend.model());
+}
+
+std::vector<int32_t> ascending_rows(int32_t begin, int32_t end) {
+    std::vector<int32_t> rows(static_cast<size_t>(end - begin));
+    std::iota(rows.begin(), rows.end(), begin);
+    return rows;
+}
+
+std::vector<llama_pos> absolute_positions(size_t begin, size_t end) {
+    std::vector<llama_pos> pos(end - begin);
+    std::iota(pos.begin(), pos.end(), static_cast<llama_pos>(begin));
+    return pos;
+}
+
+// n == 0 clears both settings; a NULL pointer with n == 0 is the documented
+// clear form (same contract as the AR002 indices API).
+void clear_per_head_attn(llama_context* ctx) {
+    llama_set_prefill_attn_head_top_k(ctx, nullptr, 0);
+    llama_set_prefill_attn_ranked_rows(ctx, nullptr, 0);
+}
+
+std::vector<int32_t> uniform_head_matrix(int32_t n_layer, int32_t n_head,
+                                         int32_t value) {
+    return std::vector<int32_t>(static_cast<size_t>(n_layer) *
+                                    static_cast<size_t>(n_head),
+                                value);
+}
+
+std::vector<float> dense_prefill_logits(LlamaBackend& backend,
+                                        const std::vector<llama_token>& tokens,
+                                        uint32_t chunk) {
+    clear_per_head_attn(backend.context());
+    CHECK_OK(backend.reset_sequence());
+    PrefillStats stats;
+    CHECK_OK(backend.prefill(tokens, absolute_positions(0, tokens.size()),
+                             chunk, &stats));
+    return logits_of(backend);
+}
+
+std::vector<float> matrix_prefill_logits(
+        LlamaBackend& backend, const std::vector<llama_token>& tokens,
+        const std::vector<int32_t>& pool, const std::vector<int32_t>& matrix,
+        uint32_t chunk) {
+    clear_per_head_attn(backend.context());
+    CHECK_OK(backend.reset_sequence());
+    CHECK_EQ(llama_set_prefill_attn_ranked_rows(backend.context(), pool.data(),
+                                                pool.size()),
+             0);
+    CHECK_EQ(llama_set_prefill_attn_head_top_k(backend.context(),
+                                               matrix.data(), matrix.size()),
+             0);
+    PrefillStats stats;
+    CHECK_OK(backend.prefill(tokens, absolute_positions(0, tokens.size()),
+                             chunk, &stats));
+    return logits_of(backend);
+}
+
+// AR002 scalar path driven exactly like SparsePrefiller::attn_prefill: per
+// chunk, gather the ascending prefix of rows already written. Only the
+// matrix is cleared up front (the ranked pool must not affect the scalar
+// path); the pool is left untouched on purpose.
+std::vector<float> scalar_prefill_logits(
+        LlamaBackend& backend, const std::vector<llama_token>& tokens,
+        const std::vector<int32_t>& rows, uint32_t chunk) {
+    llama_set_prefill_attn_head_top_k(backend.context(), nullptr, 0);
+    CHECK_OK(backend.reset_sequence());
+    for (size_t begin = 0; begin < tokens.size(); begin += chunk) {
+        const size_t end =
+                std::min(begin + static_cast<size_t>(chunk), tokens.size());
+        std::vector<int32_t> allowed;
+        for (int32_t row : rows) {
+            if (row >= static_cast<int32_t>(end)) break;
+            allowed.push_back(row);
+        }
+        CHECK_OK(backend.set_attn_indices(allowed));
+        CHECK_OK(backend.set_attn_top_k(static_cast<int32_t>(allowed.size())));
+        PrefillStats stats;
+        CHECK_OK(backend.prefill(
+                std::vector<llama_token>(tokens.begin() + begin,
+                                         tokens.begin() + end),
+                absolute_positions(begin, end), 0, &stats));
+    }
+    backend.set_attn_top_k(0);
+    backend.set_attn_indices({});
+    return logits_of(backend);
+}
+
+} // namespace
+
+TEST_CASE(per_head_ranked_rows_c_api_validation) {
+    Loaded loaded;
+    if (!load(&loaded)) {
+        std::cout << "SKIP per_head_ranked_rows_c_api_validation (EDGE_PREFILL_TEST_MODEL unset)\n";
+        return;
+    }
+    llama_context* ctx = loaded.backend.context();
+    const int32_t n_ctx = static_cast<int32_t>(loaded.backend.n_ctx());
+
+    // NULL context is rejected outright.
+    CHECK_EQ(llama_set_prefill_attn_ranked_rows(nullptr, nullptr, 0), 2);
+
+    // Fresh context: empty pool, and n == 0 with NULL rows clears legally.
+    CHECK_EQ(llama_get_prefill_attn_ranked_rows_size(ctx), 0);
+    CHECK_EQ(llama_set_prefill_attn_ranked_rows(ctx, nullptr, 0), 0);
+
+    // NULL rows with n > 0 is invalid.
+    CHECK_EQ(llama_set_prefill_attn_ranked_rows(ctx, nullptr, 3), 2);
+
+    // Out-of-range rows (>= n_ctx, negative) are rejected and leave the
+    // pool unchanged (no half-written state).
+    const std::vector<int32_t> too_large = {0, n_ctx};
+    CHECK_EQ(llama_set_prefill_attn_ranked_rows(ctx, too_large.data(),
+                                                too_large.size()),
+             2);
+    const std::vector<int32_t> negative = {-1};
+    CHECK_EQ(llama_set_prefill_attn_ranked_rows(ctx, negative.data(),
+                                                negative.size()),
+             2);
+    CHECK_EQ(llama_get_prefill_attn_ranked_rows_size(ctx), 0);
+
+    // Duplicate rows are legal: the pool is a ranked order, not a set.
+    const std::vector<int32_t> ranked = {7, 3, 7, 1};
+    CHECK_EQ(llama_set_prefill_attn_ranked_rows(ctx, ranked.data(),
+                                                ranked.size()),
+             0);
+    CHECK_EQ(llama_get_prefill_attn_ranked_rows_size(ctx), 4);
+
+    // Max boundary: n == n_ctx is a legal full pool.
+    const std::vector<int32_t> full_pool = ascending_rows(0, n_ctx);
+    CHECK_EQ(llama_set_prefill_attn_ranked_rows(ctx, full_pool.data(),
+                                                full_pool.size()),
+             0);
+    CHECK_EQ(llama_get_prefill_attn_ranked_rows_size(ctx), n_ctx);
+
+    // n == 0 clears and restores the original path.
+    CHECK_EQ(llama_set_prefill_attn_ranked_rows(ctx, nullptr, 0), 0);
+    CHECK_EQ(llama_get_prefill_attn_ranked_rows_size(ctx), 0);
+
+    LlamaBackend::shutdown();
+}
+
+TEST_CASE(per_head_ranked_rows_full_pool_dense_equivalence) {
+    Loaded loaded;
+    if (!load(&loaded)) {
+        std::cout << "SKIP per_head_ranked_rows_full_pool_dense_equivalence (EDGE_PREFILL_TEST_MODEL unset)\n";
+        return;
+    }
+    LlamaBackend& backend = loaded.backend;
+    llama_context* ctx = backend.context();
+    const int32_t n_ctx = static_cast<int32_t>(backend.n_ctx());
+    const int32_t n_layer = backend.n_layer();
+    const int32_t n_head = model_n_head(backend);
+    CHECK(n_head > 0);
+
+    // The max boundary n == n_ctx must be accepted (checked in the API
+    // validation case too; re-checked here to fail close to the execution).
+    const std::vector<int32_t> full_pool = ascending_rows(0, n_ctx);
+    CHECK_EQ(llama_set_prefill_attn_ranked_rows(ctx, full_pool.data(),
+                                                full_pool.size()),
+             0);
+    CHECK_EQ(llama_get_prefill_attn_ranked_rows_size(ctx), n_ctx);
+
+    // k == pool length: every group gathers the whole (live-filtered) pool,
+    // i.e. all written rows in ascending order, which is exactly dense.
+    const std::vector<int32_t> matrix =
+            uniform_head_matrix(n_layer, n_head, n_ctx);
+    const std::vector<float> dense =
+            dense_prefill_logits(backend, loaded.tokens, 128);
+    const std::vector<float> gathered = matrix_prefill_logits(
+            backend, loaded.tokens, full_pool, matrix, 128);
+    CHECK(!dense.empty());
+    CHECK(!gathered.empty());
+    CHECK(max_abs_diff(dense, gathered) < 1e-5);
+    CHECK_EQ(argmax(dense), argmax(gathered));
+
+    LlamaBackend::shutdown();
+}
+
+TEST_CASE(per_head_head_top_k_c_api_validation) {
+    Loaded loaded;
+    if (!load(&loaded)) {
+        std::cout << "SKIP per_head_head_top_k_c_api_validation (EDGE_PREFILL_TEST_MODEL unset)\n";
+        return;
+    }
+    LlamaBackend& backend = loaded.backend;
+    llama_context* ctx = backend.context();
+    const int32_t n_layer = backend.n_layer();
+    const int32_t n_head = model_n_head(backend);
+    CHECK(n_head > 0);
+    const size_t matrix_len =
+            static_cast<size_t>(n_layer) * static_cast<size_t>(n_head);
+    CHECK(matrix_len > 0);
+
+    // Half-write guard: a non-empty matrix with an empty pool is rejected.
+    CHECK_EQ(llama_set_prefill_attn_ranked_rows(ctx, nullptr, 0), 0);
+    const std::vector<int32_t> dense_matrix(matrix_len, -1);
+    CHECK_EQ(llama_set_prefill_attn_head_top_k(ctx, dense_matrix.data(),
+                                               matrix_len),
+             2);
+
+    // With a pool set, length must be exactly n_layer * n_head.
+    const std::vector<int32_t> pool = {0, 1, 2};
+    CHECK_EQ(llama_set_prefill_attn_ranked_rows(ctx, pool.data(), pool.size()),
+             0);
+    const std::vector<int32_t> short_matrix(matrix_len - 1, -1);
+    CHECK_EQ(llama_set_prefill_attn_head_top_k(ctx, short_matrix.data(),
+                                               matrix_len - 1),
+             2);
+    const std::vector<int32_t> long_matrix(matrix_len + 1, -1);
+    CHECK_EQ(llama_set_prefill_attn_head_top_k(ctx, long_matrix.data(),
+                                               matrix_len + 1),
+             2);
+
+    // Element rules: 0 and < -1 are invalid; a failed set leaves the matrix
+    // unset (state unchanged).
+    std::vector<int32_t> zero_matrix(matrix_len, -1);
+    zero_matrix[0] = 0;
+    CHECK_EQ(llama_set_prefill_attn_head_top_k(ctx, zero_matrix.data(),
+                                               matrix_len),
+             2);
+    std::vector<int32_t> neg_matrix(matrix_len, -1);
+    neg_matrix[0] = -2;
+    CHECK_EQ(llama_set_prefill_attn_head_top_k(ctx, neg_matrix.data(),
+                                               matrix_len),
+             2);
+    CHECK_EQ(backend.attn_head_top_k_size(), 0);
+
+    // A legal all-dense matrix sets and the size query is consistent.
+    CHECK_EQ(llama_set_prefill_attn_head_top_k(ctx, dense_matrix.data(),
+                                               matrix_len),
+             0);
+    CHECK_EQ(backend.attn_head_top_k_size(),
+             static_cast<int32_t>(matrix_len));
+
+    // Minimal legal value: k == 1 per head.
+    const std::vector<int32_t> one_matrix(matrix_len, 1);
+    CHECK_EQ(llama_set_prefill_attn_head_top_k(ctx, one_matrix.data(),
+                                               matrix_len),
+             0);
+    CHECK_EQ(backend.attn_head_top_k_size(),
+             static_cast<int32_t>(matrix_len));
+
+    // n == 0 clears the matrix and restores the AR002 scalar path; the
+    // ranked pool survives the matrix clear.
+    CHECK_EQ(llama_get_prefill_attn_ranked_rows_size(ctx),
+             static_cast<int32_t>(pool.size()));
+    CHECK_EQ(llama_set_prefill_attn_head_top_k(ctx, nullptr, 0), 0);
+    CHECK_EQ(backend.attn_head_top_k_size(), 0);
+    CHECK_EQ(llama_get_prefill_attn_ranked_rows_size(ctx),
+             static_cast<int32_t>(pool.size()));
+
+    CHECK_EQ(llama_set_prefill_attn_ranked_rows(ctx, nullptr, 0), 0);
+    LlamaBackend::shutdown();
+}
+
+TEST_CASE(per_head_backend_wrapper_status_mapping) {
+    Loaded loaded;
+    if (!load(&loaded)) {
+        std::cout << "SKIP per_head_backend_wrapper_status_mapping (EDGE_PREFILL_TEST_MODEL unset)\n";
+        return;
+    }
+    LlamaBackend& backend = loaded.backend;
+    // The patch is applied in this test environment, so symbol probing
+    // must report the per-head path as supported.
+    CHECK(backend.attn_per_head_supported());
+
+    // C API return 2 maps to Status::InvalidArgument.
+    const std::vector<int32_t> negative_row = {-1};
+    CHECK_ERR(backend.set_attn_ranked_rows(negative_row),
+              ErrorCode::InvalidArgument);
+    const std::vector<int32_t> out_of_range_row = {
+            static_cast<int32_t>(backend.n_ctx())};
+    CHECK_ERR(backend.set_attn_ranked_rows(out_of_range_row),
+              ErrorCode::InvalidArgument);
+
+    // Legal ranked pool (duplicates allowed, ranked order) sets fine.
+    const std::vector<int32_t> pool = {5, 3, 5, 0};
+    CHECK_OK(backend.set_attn_ranked_rows(pool));
+    CHECK_EQ(llama_get_prefill_attn_ranked_rows_size(backend.context()),
+             static_cast<int32_t>(pool.size()));
+
+    const int32_t n_layer = backend.n_layer();
+    const int32_t n_head = model_n_head(backend);
+    const size_t matrix_len =
+            static_cast<size_t>(n_layer) * static_cast<size_t>(n_head);
+
+    CHECK_EQ(backend.attn_head_top_k_size(), 0);
+    const std::vector<int32_t> wrong_len(matrix_len - 1, -1);
+    CHECK_ERR(backend.set_attn_head_top_k(wrong_len),
+              ErrorCode::InvalidArgument);
+    std::vector<int32_t> zero_elem(matrix_len, 1);
+    zero_elem[0] = 0;
+    CHECK_ERR(backend.set_attn_head_top_k(zero_elem),
+              ErrorCode::InvalidArgument);
+    std::vector<int32_t> neg_elem(matrix_len, 1);
+    neg_elem[0] = -2;
+    CHECK_ERR(backend.set_attn_head_top_k(neg_elem),
+              ErrorCode::InvalidArgument);
+
+    // Legal matrix sets fine and the size query matches.
+    const std::vector<int32_t> matrix(matrix_len, -1);
+    CHECK_OK(backend.set_attn_head_top_k(matrix));
+    CHECK_EQ(backend.attn_head_top_k_size(),
+             static_cast<int32_t>(matrix_len));
+
+    // Clearing through the wrapper keeps Status::Ok.
+    CHECK_OK(backend.set_attn_head_top_k({}));
+    CHECK_EQ(backend.attn_head_top_k_size(), 0);
+    CHECK_OK(backend.set_attn_ranked_rows({}));
+    CHECK_EQ(llama_get_prefill_attn_ranked_rows_size(backend.context()), 0);
+
+    LlamaBackend::shutdown();
+}
+
+TEST_CASE(per_head_matrix_clear_restores_scalar_path) {
+    Loaded loaded;
+    if (!load(&loaded)) {
+        std::cout << "SKIP per_head_matrix_clear_restores_scalar_path (EDGE_PREFILL_TEST_MODEL unset)\n";
+        return;
+    }
+    LlamaBackend& backend = loaded.backend;
+    llama_context* ctx = backend.context();
+    const int32_t n = static_cast<int32_t>(loaded.tokens.size());
+    const int32_t k = 64;
+    const int32_t n_layer = backend.n_layer();
+    const int32_t n_head = model_n_head(backend);
+    CHECK(n_head > 0);
+
+    // The same gather rows for both paths: the matrix pool is ascending, so
+    // the per-group "pool prefix k, live-filtered, ascending" set equals the
+    // scalar "first k ascending rows" set on every chunk.
+    const std::vector<int32_t> pool = ascending_rows(0, n);
+    const std::vector<int32_t> scalar_rows = ascending_rows(0, k);
+    const std::vector<int32_t> matrix =
+            uniform_head_matrix(n_layer, n_head, k);
+
+    // Scalar baseline before the matrix ever engages.
+    clear_per_head_attn(ctx);
+    const std::vector<float> scalar_before =
+            scalar_prefill_logits(backend, loaded.tokens, scalar_rows, 128);
+    CHECK(!scalar_before.empty());
+
+    // Engage the matrix path end to end.
+    clear_per_head_attn(ctx);
+    CHECK_OK(backend.reset_sequence());
+    CHECK_EQ(llama_set_prefill_attn_ranked_rows(ctx, pool.data(), pool.size()),
+             0);
+    CHECK_EQ(llama_get_prefill_attn_ranked_rows_size(ctx), n);
+    CHECK_EQ(llama_set_prefill_attn_head_top_k(ctx, matrix.data(),
+                                               matrix.size()),
+             0);
+    CHECK_EQ(backend.attn_head_top_k_size(),
+             static_cast<int32_t>(matrix.size()));
+    PrefillStats stats;
+    CHECK_OK(backend.prefill(loaded.tokens, absolute_positions(0, loaded.tokens.size()), 128, &stats));
+
+    // n == 0 on the matrix restores the AR002 scalar path; the pool itself
+    // must survive the clear untouched.
+    CHECK_EQ(llama_set_prefill_attn_head_top_k(ctx, nullptr, 0), 0);
+    CHECK_EQ(backend.attn_head_top_k_size(), 0);
+    CHECK_EQ(llama_get_prefill_attn_ranked_rows_size(ctx), n);
+
+    // The scalar path must ignore the still-set pool and reproduce the
+    // baseline logits (FR-1 AC4: cleared matrix == scalar semantics).
+    const std::vector<float> scalar_after =
+            scalar_prefill_logits(backend, loaded.tokens, scalar_rows, 128);
+    CHECK(!scalar_after.empty());
+    CHECK(max_abs_diff(scalar_before, scalar_after) < 1e-5);
+    CHECK_EQ(argmax(scalar_before), argmax(scalar_after));
+
+    clear_per_head_attn(ctx);
+    LlamaBackend::shutdown();
+}
+
+TEST_CASE(per_head_all_dense_matrix_equals_dense) {
+    Loaded loaded;
+    if (!load(&loaded)) {
+        std::cout << "SKIP per_head_all_dense_matrix_equals_dense (EDGE_PREFILL_TEST_MODEL unset)\n";
+        return;
+    }
+    LlamaBackend& backend = loaded.backend;
+    const int32_t n_layer = backend.n_layer();
+    const int32_t n_head = model_n_head(backend);
+    CHECK(n_head > 0);
+    const int32_t n = static_cast<int32_t>(loaded.tokens.size());
+    const std::vector<int32_t> pool = ascending_rows(0, n);
+
+    const std::vector<float> dense =
+            dense_prefill_logits(backend, loaded.tokens, 128);
+    CHECK(!dense.empty());
+
+    // All -1: every head is a retrieval head, direct pass-through with zero
+    // gather overhead, so the run is dense-equivalent.
+    const std::vector<int32_t> all_dense =
+            uniform_head_matrix(n_layer, n_head, -1);
+    const std::vector<float> run_all_dense = matrix_prefill_logits(
+            backend, loaded.tokens, pool, all_dense, 128);
+    CHECK(!run_all_dense.empty());
+    CHECK(max_abs_diff(dense, run_all_dense) < 1e-5);
+
+    // Single all-dense layer, remaining layers sparse with k == pool length:
+    // the sparse groups gather the whole live-filtered pool, so the overall
+    // run stays dense-equivalent while splitting dense/sparse layers.
+    std::vector<int32_t> one_layer_dense =
+            uniform_head_matrix(n_layer, n_head, n);
+    for (int32_t h = 0; h < n_head; ++h) one_layer_dense[h] = -1;
+    const std::vector<float> run_one_layer = matrix_prefill_logits(
+            backend, loaded.tokens, pool, one_layer_dense, 128);
+    CHECK(!run_one_layer.empty());
+    CHECK(max_abs_diff(dense, run_one_layer) < 1e-5);
+
+    // Dense/sparse mixed inside one layer: dense heads pass through while
+    // same-k sparse heads gather the full pool; the head-dim concat of the
+    // group outputs must remain dense-equivalent.
+    std::vector<int32_t> mixed = uniform_head_matrix(n_layer, n_head, -1);
+    for (int32_t h = 1; h < n_head; h += 2) mixed[h] = n;
+    const std::vector<float> run_mixed = matrix_prefill_logits(
+            backend, loaded.tokens, pool, mixed, 128);
+    CHECK(!run_mixed.empty());
+    CHECK(max_abs_diff(dense, run_mixed) < 1e-5);
+
+    LlamaBackend::shutdown();
+}
+
+TEST_CASE(per_head_single_group_matches_scalar) {
+    Loaded loaded;
+    if (!load(&loaded)) {
+        std::cout << "SKIP per_head_single_group_matches_scalar (EDGE_PREFILL_TEST_MODEL unset)\n";
+        return;
+    }
+    LlamaBackend& backend = loaded.backend;
+    const int32_t n_layer = backend.n_layer();
+    const int32_t n_head = model_n_head(backend);
+    CHECK(n_head > 0);
+    const int32_t n = static_cast<int32_t>(loaded.tokens.size());
+    const int32_t k = 64;
+
+    // Degenerate single-group case: every head sparse with the same k. With
+    // an ascending pool, "pool prefix k, live-filtered, ascending" equals
+    // the AR002 scalar "first k ascending rows" gather on every chunk, so
+    // both paths must agree (design 4.5: all-sparse same-value == scalar).
+    const std::vector<int32_t> pool = ascending_rows(0, n);
+    const std::vector<int32_t> scalar_rows = ascending_rows(0, k);
+    const std::vector<int32_t> matrix = uniform_head_matrix(n_layer, n_head, k);
+
+    const std::vector<float> scalar =
+            scalar_prefill_logits(backend, loaded.tokens, scalar_rows, 128);
+    const std::vector<float> grouped = matrix_prefill_logits(
+            backend, loaded.tokens, pool, matrix, 128);
+    CHECK(!scalar.empty());
+    CHECK(!grouped.empty());
+    CHECK(max_abs_diff(scalar, grouped) < 1e-5);
+    CHECK_EQ(argmax(scalar), argmax(grouped));
+
+    LlamaBackend::shutdown();
+}
+
+TEST_CASE(per_head_first_chunk_empty_prefix) {
+    Loaded loaded;
+    if (!load(&loaded)) {
+        std::cout << "SKIP per_head_first_chunk_empty_prefix (EDGE_PREFILL_TEST_MODEL unset)\n";
+        return;
+    }
+    LlamaBackend& backend = loaded.backend;
+    const int32_t n_layer = backend.n_layer();
+    const int32_t n_head = model_n_head(backend);
+    CHECK(n_head > 0);
+
+    // A short prompt keeps live n_kv tiny; the only pool row sits at the far
+    // end of the context, so every group filters to an empty prefix on every
+    // chunk and must fall back to dense attention over the written rows.
+    std::vector<llama_token> short_tokens(loaded.tokens.begin(),
+                                          loaded.tokens.begin() + 16);
+    const std::vector<int32_t> pool = {
+            static_cast<int32_t>(backend.n_ctx()) - 1};
+    const std::vector<int32_t> matrix = uniform_head_matrix(n_layer, n_head, 1);
+
+    const std::vector<float> first = matrix_prefill_logits(
+            backend, short_tokens, pool, matrix, 8);
+    CHECK(!first.empty());
+    CHECK(all_finite(first));
+
+    // Greedy prefill is deterministic: an identical rerun picks the same
+    // first token even though every group ran the empty-prefix fallback.
+    const std::vector<float> second = matrix_prefill_logits(
+            backend, short_tokens, pool, matrix, 8);
+    CHECK(!second.empty());
+    CHECK(all_finite(second));
+    CHECK_EQ(argmax(first), argmax(second));
+
+    LlamaBackend::shutdown();
+}
+
+TEST_CASE(per_head_group_limit_degrades_layer_to_dense) {
+    Loaded loaded;
+    if (!load(&loaded)) {
+        std::cout << "SKIP per_head_group_limit_degrades_layer_to_dense (EDGE_PREFILL_TEST_MODEL unset)\n";
+        return;
+    }
+    LlamaBackend& backend = loaded.backend;
+    const int32_t n_layer = backend.n_layer();
+    const int32_t n_head = model_n_head(backend);
+    if (n_head < 5) {
+        // 5 distinct top-k values within one layer are impossible with
+        // fewer than 5 heads; the boundary is untestable on this model.
+        std::cout << "SKIP per_head_group_limit_degrades_layer_to_dense (n_head < 5)\n";
+        return;
+    }
+    const int32_t n = static_cast<int32_t>(loaded.tokens.size());
+    const std::vector<int32_t> pool = ascending_rows(0, n);
+
+    // Layer 0 carries 5 distinct values -> the layer safely degrades to
+    // dense; every other layer is all-dense (-1), so the whole run must be
+    // dense-equivalent (a wrong degradation cannot hide behind sparse
+    // layers here).
+    std::vector<int32_t> five_distinct =
+            uniform_head_matrix(n_layer, n_head, -1);
+    for (int32_t h = 0; h < n_head; ++h) five_distinct[h] = 1 + h % 5;
+    const std::vector<float> dense =
+            dense_prefill_logits(backend, loaded.tokens, 128);
+    const std::vector<float> degraded = matrix_prefill_logits(
+            backend, loaded.tokens, pool, five_distinct, 128);
+    CHECK(!degraded.empty());
+    CHECK(all_finite(degraded));
+    CHECK(max_abs_diff(dense, degraded) < 1e-5);
+
+    // Contrast: exactly 4 distinct values stays within the group limit and
+    // executes the normal grouped gather path.
+    std::vector<int32_t> four_distinct =
+            uniform_head_matrix(n_layer, n_head, -1);
+    for (int32_t h = 0; h < n_head; ++h) four_distinct[h] = 1 + h % 4;
+    const std::vector<float> grouped = matrix_prefill_logits(
+            backend, loaded.tokens, pool, four_distinct, 128);
+    const std::vector<float> grouped_again = matrix_prefill_logits(
+            backend, loaded.tokens, pool, four_distinct, 128);
+    CHECK(!grouped.empty());
+    CHECK(all_finite(grouped));
+    CHECK(all_finite(grouped_again));
+    CHECK_EQ(argmax(grouped), argmax(grouped_again));
+
+    LlamaBackend::shutdown();
+}

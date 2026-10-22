@@ -359,6 +359,45 @@ int32_t LlamaBackend::attn_indices_size() const {
     return ctx_ ? llama_get_prefill_attn_indices_size(ctx_) : 0;
 }
 
+Status LlamaBackend::set_attn_ranked_rows(const std::vector<int32_t>& rows) {
+    if (!ctx_) return Status::error(ErrorCode::InvalidArgument, "context is not created");
+    const int32_t rc = llama_set_prefill_attn_ranked_rows(
+            ctx_, rows.empty() ? nullptr : rows.data(), rows.size());
+    if (rc != 0) {
+        return Status::error(ErrorCode::InvalidArgument,
+                             "llama_set_prefill_attn_ranked_rows rejected rows (n=" +
+                                 std::to_string(rows.size()) + ")");
+    }
+    return Status::success();
+}
+
+Status LlamaBackend::set_attn_head_top_k(const std::vector<int32_t>& matrix) {
+    if (!ctx_) return Status::error(ErrorCode::InvalidArgument, "context is not created");
+    const int32_t rc = llama_set_prefill_attn_head_top_k(
+            ctx_, matrix.empty() ? nullptr : matrix.data(), matrix.size());
+    if (rc != 0) {
+        return Status::error(ErrorCode::InvalidArgument,
+                             "llama_set_prefill_attn_head_top_k rejected matrix (n=" +
+                                 std::to_string(matrix.size()) + ")");
+    }
+    return Status::success();
+}
+
+int32_t LlamaBackend::attn_head_top_k_size() const {
+    return ctx_ ? llama_get_prefill_attn_head_top_k_size(ctx_) : 0;
+}
+
+int32_t LlamaBackend::attn_ranked_rows_size() const {
+    return ctx_ ? llama_get_prefill_attn_ranked_rows_size(ctx_) : 0;
+}
+
+bool LlamaBackend::attn_per_head_supported() const {
+    // This build links against the EdgePrefill-patched llama.cpp, which
+    // always provides the per-head C API; unpatched builds fail at link
+    // time, so runtime symbol probing is unnecessary.
+    return true;
+}
+
 int32_t LlamaBackend::n_vocab() const {
     return vocab_ ? llama_vocab_n_tokens(vocab_) : 0;
 }

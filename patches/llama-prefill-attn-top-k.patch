@@ -1,9 +1,23 @@
---- a/include/llama.h	2026-10-21 01:25:05.910819552 +0000
-+++ b/include/llama.h	2026-10-21 01:16:32.317327600 +0000
-@@ -760,6 +760,27 @@
-     // Returns whether prefill mode is currently enabled.
-     LLAMA_API bool llama_get_prefill_mode(const struct llama_context * ctx);
+--- a/include/llama.h
++++ b/include/llama.h
+@@ -746,6 +746,68 @@
+                          int32_t   il_start,
+                          int32_t   il_end);
  
++    // EdgePrefill extension: phase-asymmetric prefill FFN skipping.
++    // Sets whether the current decode call is a prefill pass.
++    LLAMA_API void llama_set_prefill_mode(struct llama_context * ctx, bool prefill);
++
++    // Sets a bitmask of layer indices whose FFN is skipped while prefill mode is on.
++    // Bits >= llama_model_n_layer(model) are ignored.
++    LLAMA_API void llama_set_prefill_ffn_skip(struct llama_context * ctx, uint64_t layer_mask);
++
++    // Returns the effective FFN skip mask.
++    LLAMA_API uint64_t llama_get_prefill_ffn_skip(const struct llama_context * ctx);
++
++    // Returns whether prefill mode is currently enabled.
++    LLAMA_API bool llama_get_prefill_mode(const struct llama_context * ctx);
++
 +    // EdgePrefill extension: attention-level top-k sparse prefill.
 +    // Sets the number of top-k KV positions gathered per attention layer
 +    // during prefill mode. 0 disables attention sparsity (dense path).
@@ -25,44 +39,121 @@
 +    // Returns the number of currently set attention indices, or 0.
 +    LLAMA_API int32_t llama_get_prefill_attn_indices_size(const struct llama_context * ctx);
 +
++    // EdgePrefill extension: per-head adaptive sparse prefill.
++    // Sets the ranked candidate KV row pool in rank order (duplicates are
++    // legal; ascending order is not required — the graph sorts each group's
++    // gathered rows). n == 0 clears the pool. Returns 0 on success, 2 on
++    // invalid argument (NULL, out-of-range rows).
++    LLAMA_API int32_t llama_set_prefill_attn_ranked_rows(
++            struct llama_context * ctx,
++            const int32_t        * rows,
++                     size_t        n);
++
++    // Returns the number of currently set ranked rows, or 0.
++    LLAMA_API int32_t llama_get_prefill_attn_ranked_rows_size(const struct llama_context * ctx);
++
++    // Sets the layer x head top-k matrix (n must equal n_layer * n_head).
++    // An element of -1 marks a dense head (no gathering); >= 1 gathers the
++    // top-k ranked rows for that head. n == 0 clears the matrix and restores
++    // the scalar top-k path. Returns 0 on success, 2 on invalid argument
++    // (NULL, wrong length, element 0 or < -1, or a non-empty matrix without
++    // a ranked pool).
++    LLAMA_API int32_t llama_set_prefill_attn_head_top_k(
++            struct llama_context * ctx,
++            const int32_t        * top_k,
++                     size_t        n);
++
++    // Returns the current matrix length (n_layer * n_head), or 0 when unset.
++    LLAMA_API int32_t llama_get_prefill_attn_head_top_k_size(const struct llama_context * ctx);
++
      //
      // Memory
      //
---- a/src/llama-cparams.h	2026-10-21 01:25:05.912335120 +0000
-+++ b/src/llama-cparams.h	2026-10-21 01:16:51.905514500 +0000
-@@ -59,6 +59,12 @@
-     bool     prefill_mode = false;
-     uint64_t prefill_ffn_skip_mask = 0;
+--- a/src/llama-cparams.h
++++ b/src/llama-cparams.h
+@@ -55,6 +55,23 @@
+     bool pipeline_parallel;
+     bool training;           // set by llama_opt_init()
  
++    // EdgePrefill extension
++    bool     prefill_mode = false;
++    uint64_t prefill_ffn_skip_mask = 0;
++
 +    // EdgePrefill extension: attention-level top-k sparse prefill.
 +    // top_k > 0 with non-empty indices enables K/V row gathering via
 +    // ggml_get_rows; otherwise the original dense attention path runs.
 +    int32_t prefill_attn_top_k = 0;
 +    std::vector<int32_t> prefill_attn_indices;
 +
++    // EdgePrefill extension: per-head adaptive sparse prefill. A non-empty
++    // ranked_rows pool plus head_top_k matrix activates grouped per-head
++    // gathering in the attention graph (takes precedence over the scalar
++    // path); empty values keep the scalar top-k path untouched.
++    std::vector<int32_t> prefill_attn_ranked_rows;
++    std::vector<int32_t> prefill_attn_head_top_k;
++
      size_t moe_cache_size;
  
      std::vector<bool> embeddings_layer_inp; // [n_layer()] extract input embeddings for layer
---- a/src/llama-context.h	2026-10-21 01:25:05.912239397 +0000
-+++ b/src/llama-context.h	2026-10-21 01:17:21.688690200 +0000
-@@ -68,6 +68,11 @@
-     uint64_t get_prefill_ffn_skip() const { return cparams.prefill_ffn_skip_mask; }
-     bool get_prefill_mode() const { return cparams.prefill_mode; }
+--- a/src/llama-context.h
++++ b/src/llama-context.h
+@@ -63,6 +63,21 @@
+     const llama_model   & get_model()   const;
+     const llama_cparams & get_cparams() const;
  
++    void set_prefill_mode(bool prefill) { cparams.prefill_mode = prefill; }
++    void set_prefill_ffn_skip(uint64_t mask) { cparams.prefill_ffn_skip_mask = mask; }
++    uint64_t get_prefill_ffn_skip() const { return cparams.prefill_ffn_skip_mask; }
++    bool get_prefill_mode() const { return cparams.prefill_mode; }
++
 +    int32_t get_prefill_attn_top_k() const { return cparams.prefill_attn_top_k; }
 +    void set_prefill_attn_top_k(int32_t top_k) { cparams.prefill_attn_top_k = top_k; }
 +    const std::vector<int32_t> & get_prefill_attn_indices() const { return cparams.prefill_attn_indices; }
 +    void set_prefill_attn_indices(std::vector<int32_t> indices) { cparams.prefill_attn_indices = std::move(indices); }
 +
++    const std::vector<int32_t> & get_prefill_attn_ranked_rows() const { return cparams.prefill_attn_ranked_rows; }
++    void set_prefill_attn_ranked_rows(std::vector<int32_t> rows) { cparams.prefill_attn_ranked_rows = std::move(rows); }
++    const std::vector<int32_t> & get_prefill_attn_head_top_k() const { return cparams.prefill_attn_head_top_k; }
++    void set_prefill_attn_head_top_k(std::vector<int32_t> top_k) { cparams.prefill_attn_head_top_k = std::move(top_k); }
++
      ggml_backend_sched_t get_sched() const;
  
      uint32_t n_ctx()     const;
---- a/src/llama-context.cpp	2026-10-21 01:25:05.911385457 +0000
-+++ b/src/llama-context.cpp	2026-10-21 01:18:22.057152300 +0000
-@@ -4407,6 +4407,55 @@
-     return ctx ? ctx->get_prefill_mode() : false;
+--- a/src/llama-context.cpp
++++ b/src/llama-context.cpp
+@@ -4378,6 +4378,158 @@
+     return res ? 0 : -1;
  }
  
++// EdgePrefill extension
++void llama_set_prefill_mode(llama_context * ctx, bool prefill) {
++    if (!ctx) {
++        return;
++    }
++    ctx->set_prefill_mode(prefill);
++}
++
++void llama_set_prefill_ffn_skip(llama_context * ctx, uint64_t layer_mask) {
++    if (!ctx) {
++        return;
++    }
++    const int32_t n_layer = llama_model_n_layer(llama_get_model(ctx));
++    if (n_layer > 0 && n_layer < 64) {
++        layer_mask &= ((uint64_t(1) << n_layer) - 1);
++    } else if (n_layer >= 64) {
++        layer_mask = 0;
++    }
++    ctx->set_prefill_ffn_skip(layer_mask);
++}
++
++uint64_t llama_get_prefill_ffn_skip(const llama_context * ctx) {
++    return ctx ? ctx->get_prefill_ffn_skip() : 0;
++}
++
++bool llama_get_prefill_mode(const llama_context * ctx) {
++    return ctx ? ctx->get_prefill_mode() : false;
++}
++
 +// EdgePrefill extension: attention-level top-k sparse prefill.
 +int32_t llama_set_prefill_attn_top_k(llama_context * ctx, int32_t top_k) {
 +    if (!ctx || top_k < 0) {
@@ -112,12 +203,94 @@
 +    return indices.size() > INT32_MAX ? INT32_MAX : static_cast<int32_t>(indices.size());
 +}
 +
++// EdgePrefill extension: per-head adaptive sparse prefill.
++int32_t llama_set_prefill_attn_ranked_rows(llama_context * ctx, const int32_t * rows, size_t n) {
++    if (!ctx) {
++        return 2; // InvalidArgument
++    }
++    if (n == 0) {
++        // Clearing the pool leaves an already-set matrix inert (the graph
++        // requires a non-empty pool) and restores the scalar path.
++        ctx->set_prefill_attn_ranked_rows({});
++        return 0;
++    }
++    if (!rows) {
++        return 2; // InvalidArgument
++    }
++    // Rows address KV cache cells, which can never exceed the context
++    // capacity. Rank order is preserved; duplicates are legal and deduped
++    // per group when the graph builds its gathered row sets.
++    const uint32_t bound = ctx->n_ctx();
++    for (size_t i = 0; i < n; ++i) {
++        if (rows[i] < 0 || static_cast<uint32_t>(rows[i]) >= bound) {
++            return 2; // InvalidArgument
++        }
++    }
++    ctx->set_prefill_attn_ranked_rows(std::vector<int32_t>(rows, rows + n));
++    return 0;
++}
++
++int32_t llama_get_prefill_attn_ranked_rows_size(const llama_context * ctx) {
++    if (!ctx) {
++        return 0;
++    }
++    const auto & rows = ctx->get_prefill_attn_ranked_rows();
++    return rows.size() > INT32_MAX ? INT32_MAX : static_cast<int32_t>(rows.size());
++}
++
++int32_t llama_set_prefill_attn_head_top_k(llama_context * ctx, const int32_t * top_k, size_t n) {
++    if (!ctx) {
++        return 2; // InvalidArgument
++    }
++    if (n == 0) {
++        // Clearing restores the AR002 scalar top-k path.
++        ctx->set_prefill_attn_head_top_k({});
++        return 0;
++    }
++    if (!top_k) {
++        return 2; // InvalidArgument
++    }
++    // A non-empty matrix without a ranked pool could never execute; reject
++    // the half-configured state instead of silently ignoring the matrix.
++    if (ctx->get_prefill_attn_ranked_rows().empty()) {
++        return 2; // InvalidArgument
++    }
++    const auto & hparams = ctx->get_model().hparams;
++    const int64_t expected = static_cast<int64_t>(hparams.n_layer()) * static_cast<int64_t>(hparams.n_head(0));
++    if (static_cast<int64_t>(n) != expected) {
++        return 2; // InvalidArgument
++    }
++    for (size_t i = 0; i < n; ++i) {
++        if (top_k[i] == 0 || top_k[i] < -1) {
++            return 2; // InvalidArgument
++        }
++    }
++    ctx->set_prefill_attn_head_top_k(std::vector<int32_t>(top_k, top_k + n));
++    return 0;
++}
++
++int32_t llama_get_prefill_attn_head_top_k_size(const llama_context * ctx) {
++    if (!ctx) {
++        return 0;
++    }
++    const auto & matrix = ctx->get_prefill_attn_head_top_k();
++    return matrix.size() > INT32_MAX ? INT32_MAX : static_cast<int32_t>(matrix.size());
++}
++
  //
  // memory
  //
---- a/src/llama-graph.h	2026-10-19 23:47:21.000000000 +0000
-+++ b/src/llama-graph.h	2026-10-21 01:29:24.152579700 +0000
-@@ -357,12 +357,19 @@
+@@ -4605,6 +4757,7 @@
+ 
+ int llama_context::decode(const llama_batch & batch_inp) {
+     llama_batch_compat compat(this, batch_inp);
++    compat.batch_ext->allow_position_gaps = cparams.prefill_mode;
+     return decode(*compat.batch_ext);
+ }
+ 
+--- a/src/llama-graph.h
++++ b/src/llama-graph.h
+@@ -357,12 +357,45 @@
  
      ggml_tensor * get_kq_mask() const { return self_kq_mask_cnv; }
  
@@ -134,12 +307,38 @@
 +    // in set_input. Allocated only when prefill_attn_top_k > 0.
 +    ggml_tensor * self_attn_idx = nullptr;
 +
++    // EdgePrefill per-head adaptive path: per-layer group plans computed by
++    // build_attn (which knows the layer index) and filled by set_input. The
++    // attn_kv input object is shared across layers, so the plans are stored
++    // per layer here.
++    struct edge_group {
++        bool dense = true;             // -1 heads or degenerate width: full-width attention
++        int64_t n_idx = 0;             // gathered width (sparse groups only)
++        std::vector<int32_t> rows;     // ascending deduped gathered rows (sparse groups only)
++    };
++    struct edge_layer {
++        bool active = false;
++        std::vector<edge_group> groups;
++        std::vector<int32_t> head_perm;     // original head -> grouped slot
++        std::vector<int32_t> head_perm_inv; // grouped slot -> original head
++        ggml_tensor * perm_idx = nullptr;     // I32 [n_head, n_tok, n_stream, 1]
++        ggml_tensor * kv_perm_idx = nullptr;  // I32 [n_head_kv, n_kv, n_stream, 1]
++        ggml_tensor * out_perm_idx = nullptr; // I32 [n_head, n_tok*n_stream, 1, 1]
++        std::vector<ggml_tensor *> group_idx; // parallel to groups; nullptr for dense
++    };
++    std::vector<edge_layer> edge_layers;
++    // Build snapshot for can_reuse: identical matrix/pool/n_kv imply an
++    // identical group structure without recomputing it.
++    std::vector<int32_t> edge_matrix;
++    std::vector<int32_t> edge_pool;
++    int64_t edge_n_kv = -1;
++
      // note: assumes v_rot^2 == I
      ggml_tensor * self_k_rot = nullptr;
      ggml_tensor * self_v_rot = nullptr;
---- a/src/llama-graph.cpp	2026-10-21 01:25:05.913431274 +0000
-+++ b/src/llama-graph.cpp	2026-10-21 02:29:09.610059600 +0000
-@@ -558,6 +558,22 @@
+--- a/src/llama-graph.cpp
++++ b/src/llama-graph.cpp
+@@ -558,6 +558,88 @@
      if (self_v_rot && self_v_rot->buffer) {
          mctx->set_input_v_rot(self_v_rot);
      }
@@ -159,10 +358,76 @@
 +            }
 +        }
 +    }
++
++    // EdgePrefill per-head path: fill the per-layer head permutations and
++    // group gather indices computed by build_attn. The permutations are
++    // constant across the token/stream dims; the gather rows are replicated
++    // across GQA heads and streams exactly like the scalar path above.
++    for (auto & layer : edge_layers) {
++        if (!layer.active) {
++            continue;
++        }
++        if (layer.perm_idx && layer.perm_idx->buffer) {
++            const int64_t n_head = layer.perm_idx->ne[0];
++            const int64_t n_tok  = layer.perm_idx->ne[1];
++            const int64_t n_str  = layer.perm_idx->ne[2];
++            int32_t * dst = reinterpret_cast<int32_t *>(layer.perm_idx->data);
++            for (int64_t s = 0; s < n_str; ++s) {
++                for (int64_t t = 0; t < n_tok; ++t) {
++                    int32_t * row = dst + (s * n_tok + t) * n_head;
++                    for (int64_t h = 0; h < n_head; ++h) {
++                        row[h] = layer.head_perm_inv[h];
++                    }
++                }
++            }
++        }
++        if (layer.out_perm_idx && layer.out_perm_idx->buffer) {
++            const int64_t n_head = layer.out_perm_idx->ne[0];
++            const int64_t n_tok  = layer.out_perm_idx->ne[1];
++            int32_t * dst = reinterpret_cast<int32_t *>(layer.out_perm_idx->data);
++            for (int64_t t = 0; t < n_tok; ++t) {
++                int32_t * row = dst + t * n_head;
++                for (int64_t h = 0; h < n_head; ++h) {
++                    row[h] = layer.head_perm[h];
++                }
++            }
++        }
++        if (layer.kv_perm_idx && layer.kv_perm_idx->buffer) {
++            const int64_t n_heads = layer.kv_perm_idx->ne[0];
++            const int64_t n_kv    = layer.kv_perm_idx->ne[1];
++            const int64_t n_str   = layer.kv_perm_idx->ne[2];
++            int32_t * dst = reinterpret_cast<int32_t *>(layer.kv_perm_idx->data);
++            for (int64_t s = 0; s < n_str; ++s) {
++                for (int64_t t = 0; t < n_kv; ++t) {
++                    int32_t * row = dst + (s * n_kv + t) * n_heads;
++                    for (int64_t j = 0; j < n_heads; ++j) {
++                        row[j] = layer.head_perm_inv[j];
++                    }
++                }
++            }
++        }
++        for (size_t g = 0; g < layer.group_idx.size(); ++g) {
++            ggml_tensor * idx = layer.group_idx[g];
++            if (!idx || !idx->buffer) {
++                continue;
++            }
++            const auto & rows = layer.groups[g].rows;
++            const int64_t n_idx = idx->ne[0];
++            GGML_ASSERT(static_cast<int64_t>(rows.size()) == n_idx);
++            int32_t * dst = reinterpret_cast<int32_t *>(idx->data);
++            for (int64_t s = 0; s < idx->ne[2]; ++s) {
++                for (int64_t h = 0; h < idx->ne[1]; ++h) {
++                    for (int64_t i = 0; i < n_idx; ++i) {
++                        dst[(s * idx->ne[1] + h) * n_idx + i] = rows[i];
++                    }
++                }
++            }
++        }
++    }
  }
  
  bool llm_graph_input_attn_kv::can_reuse(const llm_graph_params & params) {
-@@ -572,6 +588,19 @@
+@@ -572,6 +654,34 @@
  
      res &= can_reuse_kq_mask(self_kq_mask, mctx, params.ubatch, params.cparams);
  
@@ -179,10 +444,39 @@
 +                static_cast<int64_t>(params.cparams.prefill_attn_indices.size()));
 +    }
 +
++    // EdgePrefill per-head path: identical matrix/pool/n_kv reproduce the
++    // exact group structure, so a snapshot comparison suffices. Any change
++    // (including a growing n_kv across prefill chunks) forces a rebuild.
++    const bool want_per_head = params.cparams.prefill_mode &&
++                               !params.cparams.prefill_attn_head_top_k.empty() &&
++                               !params.cparams.prefill_attn_ranked_rows.empty();
++    if (want_per_head != (edge_n_kv >= 0)) {
++        return false;
++    }
++    if (want_per_head) {
++        res &= edge_matrix == params.cparams.prefill_attn_head_top_k;
++        res &= edge_pool   == params.cparams.prefill_attn_ranked_rows;
++        res &= edge_n_kv   == static_cast<int64_t>(mctx->get_n_kv());
++    }
++
      return res;
  }
  
-@@ -3148,6 +3177,25 @@
+@@ -1897,6 +2007,13 @@
+      llm_ffn_op_type   type_op,
+    llm_ffn_gate_type   type_gate,
+                  int   il) const {
++    // EdgePrefill: phase-asymmetric prefill FFN skip.
++    // Returning a zero tensor preserves the caller's residual connection.
++    if (cparams.prefill_mode && il >= 0 && il < 64 &&
++        (cparams.prefill_ffn_skip_mask & (uint64_t(1) << il))) {
++        return ggml_scale(ctx0, cur, 0.0f);
++    }
++
+     // NVFP4 support is currently restricted to
+     // 1) LORA absence (*_s would be applied after LORA residual, which is incorrect)
+     // 2) bias absense (*_s would be applied after bias addition, which is incorrect)
+@@ -3141,6 +3258,28 @@
  
          inp->self_kq_mask = build_attn_inp_kq_mask(ctx0, mctx_cur, ubatch, cparams);
          inp->self_kq_mask_cnv = inp->self_kq_mask;
@@ -190,9 +484,12 @@
 +        // EdgePrefill: allocate the attention top-k gather indices when the
 +        // prefill attention sparsity is active. The tensor is I32
 +        // [n_idx, n_head_kv, n_stream, 1]; set_input replicates the caller's
-+        // indices across heads and streams.
++        // indices across heads and streams. The per-head matrix path takes
++        // precedence, so a configured matrix suppresses the scalar tensor.
 +        if (cparams.prefill_mode && cparams.prefill_attn_top_k > 0 &&
-+            !cparams.prefill_attn_indices.empty()) {
++            !cparams.prefill_attn_indices.empty() &&
++            cparams.prefill_attn_head_top_k.empty() &&
++            cparams.prefill_attn_ranked_rows.empty()) {
 +            const int64_t n_idx = std::min<int64_t>(
 +                    cparams.prefill_attn_top_k,
 +                    static_cast<int64_t>(cparams.prefill_attn_indices.size()));
@@ -208,10 +505,257 @@
      }
  
      inp->self_k_rot = mctx_cur->build_input_k_rot(ctx0);
-@@ -3221,6 +3269,57 @@
+@@ -3214,7 +3353,305 @@
  
      ggml_tensor * kq_mask = inp->get_kq_mask();
  
+-    ggml_tensor * cur = build_attn_mha(q, k, v, kq_b, kq_mask, sinks, v_mla, 0, kq_scale, il);
++    ggml_tensor * cur = nullptr;
++
++    // EdgePrefill per-head adaptive path: takes precedence over the scalar
++    // top-k gather. Heads of the layer are grouped by their distinct top-k
++    // matrix value (<= 4 groups; more distinct values safely degrades the
++    // whole layer to the original dense path). Queries are permuted so each
++    // group forms a contiguous head range, every group runs the attention
++    // core at its own gathered width (dense groups at full width), and the
++    // group outputs are restored to the original head order before the
++    // output projection. Sparse groups gather the pool's top-k rows
++    // filtered to the live cache width; the sink row 0 is force-included so
++    // every token's visible set is non-empty (an all-masked softmax row
++    // would be NaN). Only uniform-GQA (n_head == n_head_kv) layers use the
++    // matrix path; other geometries keep the dense path.
++    if (cparams.prefill_mode &&
++        !cparams.prefill_attn_head_top_k.empty() &&
++        !cparams.prefill_attn_ranked_rows.empty() &&
++        !cparams.flash_attn && kq_b == nullptr && sinks == nullptr &&
++        v_mla == nullptr && hparams.n_head(il) == hparams.n_head(0) &&
++        hparams.n_head_kv(il) == hparams.n_head(0) && k->ne[2] > 1) {
++        const int64_t n_head    = hparams.n_head(0);
++        const int64_t n_head_kv = n_head; // uniform GQA enforced above
++        const int64_t n_kv      = k->ne[2];
++
++        // Group discovery: distinct matrix values for this layer.
++        std::vector<int32_t> group_keys;
++        std::vector<int32_t> group_of(n_head, -1);
++        for (int64_t h = 0; h < n_head; ++h) {
++            const int32_t val =
++                cparams.prefill_attn_head_top_k[il * n_head + h];
++            int32_t g = -1;
++            for (size_t j = 0; j < group_keys.size(); ++j) {
++                if (group_keys[j] == val) {
++                    g = static_cast<int32_t>(j);
++                    break;
++                }
++            }
++            if (g < 0) {
++                group_keys.push_back(val);
++                g = static_cast<int32_t>(group_keys.size() - 1);
++            }
++            group_of[h] = g;
++        }
++
++        // A single all-dense group is the original path exactly; skip the
++        // matrix machinery so a fully dense layer costs nothing extra.
++        const bool all_dense_single =
++            group_keys.size() == 1 && group_keys[0] < 0;
++        if (!all_dense_single && static_cast<int64_t>(group_keys.size()) <= 4) {
++            // Group members in original head order.
++            std::vector<std::vector<int64_t>> members(group_keys.size());
++            for (int64_t h = 0; h < n_head; ++h) {
++                members[group_of[h]].push_back(h);
++            }
++
++            // Per-group gathered row sets from the ranked pool.
++            const auto & pool = cparams.prefill_attn_ranked_rows;
++            std::vector<llm_graph_input_attn_kv::edge_group> groups;
++            groups.reserve(group_keys.size());
++            for (const int32_t key : group_keys) {
++                llm_graph_input_attn_kv::edge_group spec;
++                if (key < 0) {
++                    spec.dense = true;
++                } else {
++                    std::vector<int32_t> rows;
++                    for (size_t i = 0;
++                         i < pool.size() && static_cast<int64_t>(rows.size()) < key;
++                         ++i) {
++                        if (pool[i] < n_kv) {
++                            rows.push_back(pool[i]);
++                        }
++                    }
++                    // Forced sink row: guarantees a non-empty visible set for
++                    // every token; duplicate pool rows carry no information
++                    // and are deduped after sorting.
++                    if (std::find(rows.begin(), rows.end(), 0) == rows.end()) {
++                        rows.push_back(0);
++                    }
++                    std::sort(rows.begin(), rows.end());
++                    rows.erase(std::unique(rows.begin(), rows.end()), rows.end());
++                    if (static_cast<int64_t>(rows.size()) >= n_kv) {
++                        spec.dense = true; // no reduction possible
++                    } else {
++                        spec.dense = false;
++                        spec.n_idx = static_cast<int64_t>(rows.size());
++                        spec.rows = std::move(rows);
++                    }
++                }
++                groups.push_back(std::move(spec));
++            }
++
++            // Head permutation: grouped slot -> original head and inverse.
++            std::vector<int32_t> head_order;
++            std::vector<int32_t> head_pos(n_head, 0);
++            head_order.reserve(n_head);
++            for (const auto & m : members) {
++                for (const int64_t h : m) {
++                    head_pos[h] = static_cast<int32_t>(head_order.size());
++                    head_order.push_back(static_cast<int32_t>(h));
++                }
++            }
++            const bool identity_perm = [&head_order]() {
++                for (size_t i = 0; i < head_order.size(); ++i) {
++                    if (head_order[i] != static_cast<int32_t>(i)) return false;
++                }
++                return true;
++            }();
++
++            // Register the layer plan on the shared input object.
++            if (inp->edge_layers.empty()) {
++                inp->edge_layers.resize(hparams.n_layer());
++                inp->edge_matrix = cparams.prefill_attn_head_top_k;
++                inp->edge_pool = cparams.prefill_attn_ranked_rows;
++                inp->edge_n_kv = n_kv;
++            }
++            auto & layer = inp->edge_layers[il];
++            layer.active = true;
++            layer.groups = groups;
++            layer.head_perm = head_pos;
++            layer.head_perm_inv = head_order;
++            layer.group_idx.assign(groups.size(), nullptr);
++
++            const int64_t n_str = k->ne[3];
++
++            // Grouped-order queries (skip the copy for an identity layout).
++            ggml_tensor * q_g = q;
++            ggml_tensor * k_g = k;
++            ggml_tensor * v_g = v;
++            if (!identity_perm) {
++                ggml_tensor * q_p = ggml_permute(ctx0, q, 1, 0, 2, 3);
++                layer.perm_idx = ggml_new_tensor_4d(ctx0, GGML_TYPE_I32,
++                                                    n_head, q_p->ne[2], q_p->ne[3], 1);
++                ggml_set_input(layer.perm_idx);
++                ggml_set_name(layer.perm_idx, "edge_head_perm_idx");
++                q_g = ggml_get_rows(ctx0, q_p, layer.perm_idx);
++                // [n_embd_h, n_head, ne2, ne3] with grouped heads
++
++                // Same permutation for K (uniform GQA: kv head == q head).
++                ggml_tensor * k_p = ggml_permute(ctx0, k, 1, 0, 2, 3);
++                layer.kv_perm_idx = ggml_new_tensor_4d(ctx0, GGML_TYPE_I32,
++                                                       n_head_kv, n_kv, n_str, 1);
++                ggml_set_input(layer.kv_perm_idx);
++                ggml_set_name(layer.kv_perm_idx, "edge_kv_perm_idx");
++                k_g = ggml_get_rows(ctx0, k_p, layer.kv_perm_idx);
++
++                // Head-gathering V produces a contiguous non-transposed
++                // [n_embd_hv, n_head_kv, n_kv, n_stream] tensor regardless of
++                // the cache layout, so only the !v_trans branch is needed
++                // downstream.
++                ggml_tensor * v_p = ggml_permute(ctx0, v, 1, 0, 2, 3);
++                v_g = ggml_get_rows(ctx0, v_p, layer.kv_perm_idx);
++            }
++
++            // Per-group attention cores, concatenated in grouped head order.
++            ggml_tensor * acc = nullptr;
++            int64_t slot = 0;
++            for (size_t g = 0; g < groups.size(); ++g) {
++                const int64_t n_h_g = static_cast<int64_t>(members[g].size());
++                ggml_tensor * q_grp = identity_perm && groups.size() == 1
++                    ? q_g
++                    : ggml_view_4d(ctx0, q_g, q_g->ne[0], n_h_g, q_g->ne[2],
++                                   q_g->ne[3], q_g->nb[1], q_g->nb[2],
++                                   q_g->nb[3], slot * q_g->nb[1]);
++                ggml_tensor * k_grp = nullptr;
++                ggml_tensor * v_grp = nullptr;
++                ggml_tensor * mask_grp = kq_mask;
++
++                if (groups[g].dense) {
++                    k_grp = identity_perm && groups.size() == 1
++                        ? k_g
++                        : ggml_view_4d(ctx0, k_g, k_g->ne[0], n_h_g, k_g->ne[2],
++                                       k_g->ne[3], k_g->nb[1], k_g->nb[2],
++                                       k_g->nb[3], slot * k_g->nb[1]);
++                    v_grp = identity_perm && groups.size() == 1
++                        ? v_g
++                        : ggml_view_4d(ctx0, v_g, v_g->ne[0], n_h_g, v_g->ne[2],
++                                       v_g->ne[3], v_g->nb[1], v_g->nb[2],
++                                       v_g->nb[3], slot * v_g->nb[1]);
++                } else {
++                    const int64_t n_idx = groups[g].n_idx;
++                    ggml_tensor * idx = ggml_new_tensor_4d(ctx0, GGML_TYPE_I32,
++                                                           n_idx, n_h_g, n_str, 1);
++                    ggml_set_input(idx);
++                    ggml_set_name(idx, "edge_group_idx");
++                    layer.group_idx[g] = idx;
++
++                    // Row gather for the group's kv-head slice of K.
++                    ggml_tensor * k_view = identity_perm && groups.size() == 1
++                        ? k_g
++                        : ggml_view_4d(ctx0, k_g, k_g->ne[0], n_h_g, k_g->ne[2],
++                                       k_g->ne[3], k_g->nb[1], k_g->nb[2],
++                                       k_g->nb[3], slot * k_g->nb[1]);
++                    ggml_tensor * k_rp = ggml_permute(ctx0, k_view, 0, 2, 1, 3);
++                    k_grp = ggml_get_rows(ctx0, k_rp, idx);
++                    k_grp = ggml_cont(ctx0, ggml_permute(ctx0, k_grp, 0, 2, 1, 3));
++
++                    // Row gather for V (v_g is non-transposed by construction).
++                    ggml_tensor * v_view = identity_perm && groups.size() == 1
++                        ? v_g
++                        : ggml_view_4d(ctx0, v_g, v_g->ne[0], n_h_g, v_g->ne[2],
++                                       v_g->ne[3], v_g->nb[1], v_g->nb[2],
++                                       v_g->nb[3], slot * v_g->nb[1]);
++                    ggml_tensor * v_rp = ggml_permute(ctx0, v_view, 0, 2, 1, 3);
++                    v_grp = ggml_get_rows(ctx0, v_rp, idx);
++                    v_grp = ggml_cont(ctx0, ggml_permute(ctx0, v_grp, 0, 2, 1, 3));
++
++                    // Gather the causal mask rows (head-independent): the
++                    // head-0 slice of idx drives the gather.
++                    ggml_tensor * m_p = ggml_permute(ctx0, kq_mask, 1, 0, 2, 3);
++                    ggml_tensor * idx_m = ggml_view_4d(ctx0, idx,
++                            idx->ne[0], 1, idx->ne[2], 1,
++                            idx->nb[0], idx->nb[1], idx->nb[2], 0);
++                    mask_grp = ggml_get_rows(ctx0, m_p, idx_m);
++                    mask_grp = ggml_cont(ctx0, ggml_permute(ctx0, mask_grp, 1, 0, 2, 3));
++                }
++
++                ggml_tensor * out_g = build_attn_mha(
++                        q_grp, k_grp, v_grp, nullptr, mask_grp, nullptr,
++                        nullptr, 0, kq_scale, il);
++                acc = acc ? ggml_concat(ctx0, acc, out_g, 0) : out_g;
++                slot += n_h_g;
++            }
++
++            if (identity_perm) {
++                // Head order never changed: the concatenation already is the
++                // original head-major output.
++                cur = acc;
++            } else {
++                // Restore the original head order: [n_embd_h*n_head, TN] ->
++                // [n_embd_h, n_head, TN, 1] -> head-major gather -> 2D.
++                const int64_t tn = acc->ne[1];
++                ggml_tensor * cur3 = ggml_reshape_4d(ctx0, acc, acc->ne[0] / n_head,
++                                                     n_head, tn, 1);
++                ggml_tensor * cur_p = ggml_permute(ctx0, cur3, 1, 0, 2, 3);
++                layer.out_perm_idx = ggml_new_tensor_4d(ctx0, GGML_TYPE_I32,
++                                                        n_head, tn, 1, 1);
++                ggml_set_input(layer.out_perm_idx);
++                ggml_set_name(layer.out_perm_idx, "edge_out_perm_idx");
++                ggml_tensor * restored = ggml_get_rows(ctx0, cur_p, layer.out_perm_idx);
++                cur = ggml_reshape_2d(ctx0, restored,
++                                      restored->ne[0] * restored->ne[1], tn);
++            }
++        }
++    }
++
++    if (!cur) {
 +    // EdgePrefill: attention-level top-k gather during prefill. Gathers K, V
 +    // and the causal KQ mask rows selected by the caller's indices, reducing
 +    // the attention width from n_kv to n_idx. Falls back to the original
@@ -263,6 +807,8 @@
 +        kq_mask = ggml_cont(ctx0, ggml_permute(ctx0, kq_mask, 1, 0, 2, 3));
 +    }
 +
-     ggml_tensor * cur = build_attn_mha(q, k, v, kq_b, kq_mask, sinks, v_mla, 0, kq_scale, il);
++    cur = build_attn_mha(q, k, v, kq_b, kq_mask, sinks, v_mla, 0, kq_scale, il);
++    }
      cb(cur, "kqv_out", il);
  
+     if (inp->self_v_rot) {
