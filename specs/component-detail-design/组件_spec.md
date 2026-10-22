@@ -104,6 +104,21 @@ Pareto 基准**，降低 TTFT 与 KV 写入量，同时以真实基准验证质�
   head 消融探测（单 head 施加 sink+recent 稀疏、其余 dense，真实前向 logits
   散度），输出确定性 JSON profile；不引入 attention dump，不产生合成分数；
   探测长度超过 n_ctx 返回 `InvalidArgument` 并给出建议参数。
+- 压缩上下文分支（AR004，NSA 式）通过 `llama_set_prefill_attn_pool_blocks`
+  （池化块行区间 + 块内最大 position，n≤1024）控制：已选未 gather 的满块经
+  graph 内 `pool_1d(AVG)` 均值 + `get_rows` 池化进注意力集；选择级被丢块由
+  规划层注入每块 1 个最高 draft 分代表 token（`compressed_rows_cap` 上限）；
+  `compressed_branch=off|sample|pool` 三档，off 时与 AR003 行为逐字段一致；
+  patch 缺失回退代表注入并记录 `compressed-branch-unsupported`；flash
+  attention 下禁用。
+- Query-chunk 门控（AR004，MoBA 式）通过 `llama_set_prefill_qg_count/
+  qg_rows/qg_bounds` 控制：graph 按查询分片（默认 128 token/片，≤16 片）循环
+  gather-attend-concat；每分片行集必含 sink+recent；与 head 矩阵路径互斥
+  （矩阵优先，`query-gating-skipped`）；超限/无 draft 分数回退全局集合并审计；
+  patch 缺失回退全局集合；flash attention 下禁用。
+- Head 模式路由与金字塔先验（AR004，MInference/PyramidKV 式）为纯规划层：
+  HeadProfile 三模式分类（锚点/局部/检索）映射 k+必留模板；无 profile 时
+  `pyramid_prior` 生成层凸函数矩阵（中层最疏），输出 AR003 兼容矩阵，无新 patch。
 - `RiskController` 为纯函数：draft 分数区分度/覆盖率/锚完整率 →
   `Ok/Tighten/DenseFallback` 三级动作；evaluate 失败按 `Tighten` 保守处理；
   `Plan.risk_level` 与 metrics `risk_level` 列全程审计；`--risk-guard off` 时
@@ -169,3 +184,4 @@ Pareto 基准**，降低 TTFT 与 KV 写入量，同时以真实基准验证质�
 | 2026-10-20 | 初始组件设计，建立 AR001 架构基线 | AR001 |
 | 2026-10-20 | 升级为 AR002：加入 draft 模型、attention 全局/分层 top-k、Radix 前缀缓存、按层 KV 精度、自动调优与 Pareto 基准 | AR002 |
 | 2026-10-21 | 升级为 AR003：加入 head 级自适应稀疏（ranked 池 + 层×头 top-k 矩阵 patch、消融式 head 分类器）、在线质量风险控制器、TuneSearchSpace 增 head_adaptive 维度、Sample 增 risk_level/head_adaptive/retrieval_heads、classify-heads CLI 契约、sync_gitee.sh 交付 | AR003 |
+| 2026-10-22 | 升级为 AR004：加入压缩上下文分支（pool_blocks patch + 代表注入）、query-chunk 门控（qg_count/qg_rows/qg_bounds patch）、head 模式路由与金字塔先验、chunk_size=0 自动对齐 n_ubatch 语义、Gitee 开放复现契约（download_model.sh 双通道+SHA256、结果 CSV/图入库） | AR004 |
