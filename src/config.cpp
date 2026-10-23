@@ -314,6 +314,33 @@ Status parse_config_file(const std::string& path, Config* out) {
         } else if (key == "seed") {
             if (!parse_u64(value, &u)) goto bad_value;
             out->seed = u;
+        } else if (key == "head_pattern_routing") {
+            if (!parse_bool(value, &b)) goto bad_value;
+            out->head_pattern_routing = b;
+        } else if (key == "pyramid_prior") {
+            if (!parse_bool(value, &b)) goto bad_value;
+            out->pyramid_prior = b;
+        } else if (key == "pyramid_k_min") {
+            if (!parse_u64(value, &u) || u > 0xffffffffull) goto bad_value;
+            out->pyramid_k_min = static_cast<uint32_t>(u);
+        } else if (key == "pyramid_k_max") {
+            if (!parse_u64(value, &u) || u > 0xffffffffull) goto bad_value;
+            out->pyramid_k_max = static_cast<uint32_t>(u);
+        } else if (key == "pool_branches") {
+            if (!parse_bool(value, &b)) goto bad_value;
+            out->pool_branches = b;
+        } else if (key == "query_gating") {
+            if (!parse_bool(value, &b)) goto bad_value;
+            out->query_gating = b;
+        } else if (key == "query_chunk_size") {
+            if (!parse_u64(value, &u) || u == 0 || u > 0xffffffffull) goto bad_value;
+            out->query_chunk_size = static_cast<uint32_t>(u);
+        } else if (key == "query_chunk_max") {
+            if (!parse_u64(value, &u) || u == 0 || u > 16) goto bad_value;
+            out->query_chunk_max = static_cast<uint32_t>(u);
+        } else if (key == "query_top_k") {
+            if (!parse_u64(value, &u) || u > 0xffffffffull) goto bad_value;
+            out->query_top_k_per_group = static_cast<uint32_t>(u);
         } else {
             return Status::error(ErrorCode::InvalidArgument, "unknown config key: " + key);
         }

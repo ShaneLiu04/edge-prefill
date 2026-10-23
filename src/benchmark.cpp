@@ -545,6 +545,32 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
                         }
                     }
 
+                    // AR004 FR-3: query-chunk gating replaces the scalar
+                    // gather; head matrix wins (exclusivity), pool rides
+                    // only on the scalar gather.
+                    if (cfg.query_gating && !popts.enable_head_adaptive &&
+                        !selection.dense &&
+                        selection.per_pos_scores.size() == selection.total_tokens) {
+                        QueryGatingOptions qg_opts;
+                        qg_opts.query_chunk_size = cfg.query_chunk_size;
+                        qg_opts.query_chunk_max = cfg.query_chunk_max;
+                        qg_opts.top_k_per_group = cfg.query_top_k_per_group;
+                        std::string qg_reason;
+                        auto qst = AttentionSparsityController::build_query_gated(
+                                selection, selection.per_pos_scores, qg_opts,
+                                &popts.qg_group_rows, &popts.qg_bounds,
+                                &qg_reason);
+                        if (!qst.ok()) {
+                            log_warn("query gating plan rejected: " + qst.message);
+                        } else if (popts.qg_group_rows.empty()) {
+                            log_debug("query gating: none (" + qg_reason + ")");
+                        } else {
+                            popts.enable_query_gating = true;
+                            popts.enable_pool_blocks = false;
+                            log_debug(qg_reason);
+                        }
+                    }
+
                     // Untimed warmup runs stabilize caches and page in model
                     // weights so the timed repeats measure steady state.
                     bool prefill_ok = true;
@@ -650,6 +676,8 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
                     sample.repeats = reps;
                     sample.ppl_dense = sample_ppl_dense;
                     sample.ppl_sparse = sample_ppl_sparse;
+                    sample.query_gating = stats.query_gating;
+                    sample.qg_groups = stats.qg_groups;
                     log_info("case=" + sample.case_id + " mode=" + sample.mode +
                              " quality=" + std::to_string(sample.quality) +
                              " generated=" + generated);

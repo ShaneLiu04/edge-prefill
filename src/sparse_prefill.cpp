@@ -125,7 +125,29 @@ Status SparsePrefiller::prefill(const std::vector<llama_token>& tokens,
             }
         }
     }
-    if (!head_active && attn_requested) {
+    // AR004 FR-3 query-chunk gating: replaces the scalar gather with
+    // per-group row sets. Only meaningful in the un-prefixed row space (a
+    // prefix-cache hit shifts rows); a rejected probe degrades to the
+    // scalar path below, never fails the request.
+    bool qg_active = false;
+    if (opts.enable_query_gating && !head_active &&
+        prefix_len == 0 && !opts.qg_group_rows.empty()) {
+        auto probe = backend_->set_qg_count(1);
+        if (!probe.ok()) {
+            log_warn("query gating unavailable (" + probe.message +
+                     "); falling back to scalar gather");
+        } else {
+            backend_->set_qg_count(0);
+            qg_active = true;
+            attn_active = true;
+            stats->query_gating = true;
+            stats->qg_groups = static_cast<uint32_t>(opts.qg_group_rows.size());
+            log_info("query-chunk gating active: " +
+                     std::to_string(opts.qg_group_rows.size()) + " groups");
+        }
+    }
+
+    if (!head_active && !qg_active && attn_requested) {
         stats->attn_indices = static_cast<uint32_t>(selection.attention_indices.size());
         auto probe = backend_->set_attn_top_k(1);
         if (!probe.ok()) {
@@ -142,7 +164,7 @@ Status SparsePrefiller::prefill(const std::vector<llama_token>& tokens,
     // the scalar gather (they describe the selected-but-not-gathered
     // blocks) and only in the un-prefixed row space (a prefix-cache hit
     // shifts rows). Any rejection degrades to gather-only, never fails.
-    if (opts.enable_pool_blocks && attn_active && prefix_len == 0) {
+    if (opts.enable_pool_blocks && attn_active && !qg_active && prefix_len == 0) {
         std::vector<int32_t> pool_starts;
         std::vector<int32_t> pool_sizes;
         std::vector<int32_t> pool_max_pos;
@@ -182,7 +204,7 @@ Status SparsePrefiller::prefill(const std::vector<llama_token>& tokens,
         Status st = Status::success();
         if (attn_active) {
             st = attn_prefill(active_tokens, active_positions, selection.attention_indices,
-                              opts, stats);
+                              opts, stats, qg_active);
         } else {
             // enable_chunking=false passes the whole active span: the
             // scheduler emits one range and llama_decode splits internally
@@ -203,6 +225,7 @@ Status SparsePrefiller::prefill(const std::vector<llama_token>& tokens,
         backend_->set_attn_top_k(0);
         backend_->set_attn_indices({});
         backend_->set_attn_pool_blocks({}, {}, {});
+        backend_->set_qg_count(0);
         if (!st.ok()) return st;
         stats->prompt_tokens = static_cast<uint32_t>(tokens.size());
         stats->selected_tokens = static_cast<uint32_t>(selection.token_indices.size());
@@ -236,7 +259,8 @@ Status SparsePrefiller::attn_prefill(const std::vector<llama_token>& tokens,
                                      const std::vector<llama_pos>& positions,
                                      const std::vector<int32_t>& attn_indices,
                                      const Options& opts,
-                                     PrefillStats* stats) {
+                                     PrefillStats* stats,
+                                     bool qg_active) {
     // The llama.cpp gather patch indexes KV cells in decode order, not by
     // absolute position: with sparse selection the r-th cell holds the r-th
     // selected token, so position != row. Map every gather position to its
@@ -284,20 +308,83 @@ Status SparsePrefiller::attn_prefill(const std::vector<llama_token>& tokens,
                                               tokens.begin() + range.end);
         std::vector<llama_pos> chunk_positions(positions.begin() + range.begin,
                                                 positions.begin() + range.end);
-        const auto row_end =
-            std::lower_bound(index_rows.begin(), index_rows.end(),
-                             static_cast<int32_t>(range.end));
-        allowed.assign(index_rows.begin(), row_end);
-        // Per-chunk gather geometry: rows must stay below the K view width
-        // (n_kv == range.end after this chunk's decode), which holds because
-        // the backend decodes the chunk in a single llama_decode call.
-        log_debug("chunk [" + std::to_string(range.begin) + "," +
-                  std::to_string(range.end) + ") allowed=" +
-                  std::to_string(allowed.size()));
-        st = backend_->set_attn_indices(allowed);
-        if (!st.ok()) return st;
-        st = backend_->set_attn_top_k(static_cast<int32_t>(allowed.size()));
-        if (!st.ok()) return st;
+        std::vector<std::vector<int32_t>> chunk_groups;
+        if (qg_active) {
+            // Per-chunk gating plan: intersect the full-plan groups with
+            // the chunk's row window and keep only live rows (< range.end;
+            // the chunk's own rows are written by this decode and enter
+            // via the mask's causality). Groups tile the query axis
+            // ascending, so the concatenated chunk bounds stay valid.
+            std::vector<int32_t> chunk_bounds{0};
+            for (size_t g = 0; g + 1 < opts.qg_bounds.size(); ++g) {
+                const int32_t lo = std::max(opts.qg_bounds[g],
+                                            static_cast<int32_t>(range.begin));
+                const int32_t hi = std::min(opts.qg_bounds[g + 1],
+                                            static_cast<int32_t>(range.end));
+                if (lo >= hi) continue;
+                std::vector<int32_t> rows;
+                for (int32_t r : opts.qg_group_rows[g]) {
+                    if (r >= 0 && r < static_cast<int32_t>(range.end)) {
+                        rows.push_back(r);
+                    }
+                }
+                if (rows.empty()) {
+                    // Forced sink row: keeps every query's visible set
+                    // non-empty (an all-masked softmax row is NaN).
+                    rows.push_back(0);
+                }
+                chunk_bounds.push_back(hi - static_cast<int32_t>(range.begin));
+                chunk_groups.push_back(std::move(rows));
+            }
+            if (chunk_groups.size() > 16) {
+                // The C API caps groups at 16; a chunk this fragmented
+                // degrades to dense attention for the chunk (never a
+                // wrong-row gather).
+                log_warn("chunk [" + std::to_string(range.begin) + "," +
+                         std::to_string(range.end) + ") has " +
+                         std::to_string(chunk_groups.size()) +
+                         " gating groups; running the chunk dense");
+                chunk_groups.clear();
+                st = backend_->set_qg_count(0);
+                if (!st.ok()) return st;
+                st = backend_->set_attn_top_k(0);
+                if (!st.ok()) return st;
+            } else {
+                st = backend_->set_qg_count(
+                        static_cast<int32_t>(chunk_groups.size()));
+                if (!st.ok()) return st;
+                for (size_t g = 0; g < chunk_groups.size(); ++g) {
+                    st = backend_->set_qg_rows(static_cast<int32_t>(g),
+                                               chunk_groups[g]);
+                    if (!st.ok()) return st;
+                }
+                st = backend_->set_qg_bounds(chunk_bounds);
+                if (!st.ok()) return st;
+                // The scalar gather must stay off while gating is armed.
+                st = backend_->set_attn_top_k(0);
+                if (!st.ok()) return st;
+                st = backend_->set_attn_indices({});
+                if (!st.ok()) return st;
+                log_debug("chunk [" + std::to_string(range.begin) + "," +
+                          std::to_string(range.end) + ") qg groups=" +
+                          std::to_string(chunk_groups.size()));
+            }
+        } else {
+            const auto row_end =
+                std::lower_bound(index_rows.begin(), index_rows.end(),
+                                 static_cast<int32_t>(range.end));
+            allowed.assign(index_rows.begin(), row_end);
+            // Per-chunk gather geometry: rows must stay below the K view width
+            // (n_kv == range.end after this chunk's decode), which holds because
+            // the backend decodes the chunk in a single llama_decode call.
+            log_debug("chunk [" + std::to_string(range.begin) + "," +
+                      std::to_string(range.end) + ") allowed=" +
+                      std::to_string(allowed.size()));
+            st = backend_->set_attn_indices(allowed);
+            if (!st.ok()) return st;
+            st = backend_->set_attn_top_k(static_cast<int32_t>(allowed.size()));
+            if (!st.ok()) return st;
+        }
 
         PrefillStats chunk_stats;
         chunk_stats.collect_chunk_stats = stats->collect_chunk_stats;
@@ -312,9 +399,19 @@ Status SparsePrefiller::attn_prefill(const std::vector<llama_token>& tokens,
                                static_cast<uint32_t>(chunk_tokens.size()),
                                &chunk_stats);
         if (!st.ok()) return st;
+        // Audit the gathered width: scalar allowed-prefix rows, or the
+        // per-group row total under query gating.
+        uint32_t chunk_rows = 0;
+        if (qg_active) {
+            for (const auto& rows : chunk_groups) {
+                chunk_rows += static_cast<uint32_t>(rows.size());
+            }
+        } else {
+            chunk_rows = static_cast<uint32_t>(allowed.size());
+        }
         for (ChunkStats cs : chunk_stats.chunk_stats) {
             cs.index = static_cast<uint32_t>(stats->chunk_stats.size());
-            cs.attn_rows = static_cast<uint32_t>(allowed.size());
+            cs.attn_rows = chunk_rows;
             stats->chunk_stats.push_back(cs);
         }
     }

@@ -675,3 +675,147 @@ TEST_CASE(pool_branches_switch_default_off) {
     Config cfg;
     CHECK(!cfg.pool_branches);
 }
+
+// AR004 FR-3: groups partition the row space and every group carries the
+// mandatory anchors.
+TEST_CASE(qg_planner_groups_partition) {
+    const Selection sel = make_selection(4096, 0.5);
+    CHECK(!sel.dense);
+    const uint32_t n_rows = static_cast<uint32_t>(sel.token_indices.size());
+    CHECK(n_rows > 128);
+
+    std::vector<double> scores(sel.total_tokens, 0.0);
+    constexpr uint32_t needle_pos = 37 * 32 + 5;
+    for (uint32_t i = needle_pos & ~31u; i < (needle_pos | 31u); ++i) {
+        scores[i] = 1.0;
+    }
+
+    QueryGatingOptions opts;
+    opts.query_chunk_size = 128;
+    opts.query_chunk_max = 16;
+    opts.top_k_per_group = 256;
+    std::vector<std::vector<int32_t>> groups;
+    std::vector<int32_t> bounds;
+    std::string reason;
+    CHECK_OK(AttentionSparsityController::build_query_gated(
+            sel, scores, opts, &groups, &bounds, &reason));
+    CHECK_EQ(bounds.front(), 0);
+    CHECK_EQ(static_cast<uint32_t>(bounds.back()), n_rows);
+    CHECK_EQ(groups.size() + 1, bounds.size());
+    for (size_t g = 0; g < groups.size(); ++g) {
+        CHECK(bounds[g] < bounds[g + 1]);
+        CHECK(!groups[g].empty());
+        // Ascending rows inside the row space.
+        for (size_t i = 0; i < groups[g].size(); ++i) {
+            CHECK(groups[g][i] >= 0);
+            CHECK(static_cast<uint32_t>(groups[g][i]) < n_rows);
+            if (i > 0) CHECK(groups[g][i] > groups[g][i - 1]);
+        }
+        // Mandatory anchors: the sink row 0 and (for later groups) the
+        // recent row directly preceding the group.
+        CHECK_EQ(groups[g].front(), 0);
+        if (g > 0) {
+            bool has_recent = false;
+            for (int32_t r : groups[g]) {
+                if (r == bounds[g] - 1) has_recent = true;
+            }
+            CHECK(has_recent);
+        }
+    }
+    // The top-scored needle block must be gathered by the last group
+    // (its first row precedes the group's last query row).
+    uint32_t needle_row_begin = n_rows;
+    uint32_t needle_row_end = 0;
+    for (size_t i = 0; i < sel.token_indices.size(); ++i) {
+        const uint32_t pos = sel.token_indices[i];
+        if (pos >= (needle_pos & ~31u) && pos <= (needle_pos | 31u)) {
+            needle_row_begin = std::min(needle_row_begin, static_cast<uint32_t>(i));
+            needle_row_end = std::max(needle_row_end, static_cast<uint32_t>(i) + 1);
+        }
+    }
+    CHECK(needle_row_begin < needle_row_end);
+    bool last_group_has_needle = false;
+    for (int32_t r : groups.back()) {
+        if (r >= static_cast<int32_t>(needle_row_begin) &&
+            r < static_cast<int32_t>(needle_row_end)) {
+            last_group_has_needle = true;
+        }
+    }
+    CHECK(last_group_has_needle);
+}
+
+// AR004 FR-3: score length must match the prompt.
+TEST_CASE(qg_planner_invalid_score_length) {
+    const Selection sel = make_selection(4096, 0.5);
+    QueryGatingOptions opts;
+    std::vector<std::vector<int32_t>> groups;
+    std::vector<int32_t> bounds;
+    std::string reason;
+    CHECK_ERR(AttentionSparsityController::build_query_gated(
+                  sel, {}, opts, &groups, &bounds, &reason),
+              ErrorCode::InvalidArgument);
+    std::vector<double> short_scores(sel.total_tokens - 1, 0.0);
+    CHECK_ERR(AttentionSparsityController::build_query_gated(
+                  sel, short_scores, opts, &groups, &bounds, &reason),
+              ErrorCode::InvalidArgument);
+    // Null outputs and degenerate options are rejected.
+    CHECK_ERR(AttentionSparsityController::build_query_gated(
+                  sel, std::vector<double>(sel.total_tokens, 0.0), opts,
+                  nullptr, &bounds, &reason),
+              ErrorCode::InvalidArgument);
+    QueryGatingOptions zero_chunk;
+    zero_chunk.query_chunk_size = 0;
+    CHECK_ERR(AttentionSparsityController::build_query_gated(
+                  sel, std::vector<double>(sel.total_tokens, 0.0), zero_chunk,
+                  &groups, &bounds, &reason),
+              ErrorCode::InvalidArgument);
+    QueryGatingOptions zero_max;
+    zero_max.query_chunk_max = 0;
+    CHECK_ERR(AttentionSparsityController::build_query_gated(
+                  sel, std::vector<double>(sel.total_tokens, 0.0), zero_max,
+                  &groups, &bounds, &reason),
+              ErrorCode::InvalidArgument);
+}
+
+// AR004 FR-3: too many groups degrades to a single global set.
+TEST_CASE(qg_planner_group_cap) {
+    const Selection sel = make_selection(4096, 0.5);
+    const uint32_t n_rows = static_cast<uint32_t>(sel.token_indices.size());
+    QueryGatingOptions opts;
+    opts.query_chunk_size = 64;  // 2048 rows -> 32 groups > cap 16
+    opts.query_chunk_max = 16;
+    std::vector<std::vector<int32_t>> groups;
+    std::vector<int32_t> bounds;
+    std::string reason;
+    CHECK_OK(AttentionSparsityController::build_query_gated(
+            sel, std::vector<double>(sel.total_tokens, 0.0), opts,
+            &groups, &bounds, &reason));
+    CHECK_EQ(groups.size(), 1u);
+    CHECK_EQ(bounds.size(), 2u);
+    CHECK_EQ(bounds.front(), 0);
+    CHECK_EQ(static_cast<uint32_t>(bounds.back()), n_rows);
+    CHECK(reason.find("capped") != std::string::npos);
+}
+
+// AR004 FR-3: dense selections gate nothing.
+TEST_CASE(qg_planner_dense_empty) {
+    const Selection dense = make_selection(256, 0.5);
+    CHECK(dense.dense);
+    QueryGatingOptions opts;
+    std::vector<std::vector<int32_t>> groups;
+    std::vector<int32_t> bounds;
+    std::string reason;
+    CHECK_OK(AttentionSparsityController::build_query_gated(
+            dense, {}, opts, &groups, &bounds, &reason));
+    CHECK(groups.empty());
+    CHECK(bounds.empty());
+    CHECK_EQ(reason, std::string("dense"));
+}
+
+// AR004 FR-3 zero-regression guard: the switch defaults to off.
+TEST_CASE(qg_switch_default_off) {
+    Config cfg;
+    CHECK(!cfg.query_gating);
+    CHECK_EQ(cfg.query_chunk_size, 128u);
+    CHECK_EQ(cfg.query_chunk_max, 16u);
+}

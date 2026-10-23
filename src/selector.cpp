@@ -206,6 +206,7 @@ Status BlockSelector::select(const std::vector<llama_token>& tokens,
 
     std::vector<std::vector<std::string>> block_terms(n_blocks);
     std::vector<std::unordered_set<std::string>> block_terms_unique(n_blocks);
+    std::vector<std::vector<std::string>> token_terms(n_tokens);
     std::vector<Vec64> token_embeddings(tokens.size());
     for (uint32_t i = 0; i < n_tokens; ++i) {
         const std::string norm = normalize_piece(token_pieces[i]);
@@ -214,6 +215,7 @@ Status BlockSelector::select(const std::vector<llama_token>& tokens,
             if (term.size() >= 2 || static_cast<unsigned char>(term[0]) >= 0x80) {
                 block_terms[i / block_size].push_back(term);
                 block_terms_unique[i / block_size].insert(term);
+                token_terms[i].push_back(term);
             }
         }
         token_embeddings[i] = hashed_embedding(norm);
@@ -246,6 +248,27 @@ Status BlockSelector::select(const std::vector<llama_token>& tokens,
         }
         const uint32_t size = std::min(block_size, n_tokens - b * block_size);
         lexical[b] = score / std::sqrt(static_cast<double>(std::max<uint32_t>(1, size)));
+    }
+
+    // AR004 FR-3: per-position lexical relevance (idf of the token's own
+    // query-term hits, deduped within the token). Retained for the
+    // query-chunk gating planner; superseded by draft scores below when a
+    // draft scorer is active.
+    std::vector<double> per_pos(n_tokens, 0.0);
+    {
+        std::vector<std::string> uniq;
+        for (uint32_t i = 0; i < n_tokens; ++i) {
+            uniq = token_terms[i];
+            std::sort(uniq.begin(), uniq.end());
+            uniq.erase(std::unique(uniq.begin(), uniq.end()), uniq.end());
+            double score = 0.0;
+            for (const auto& term : uniq) {
+                if (!query_terms.count(term)) continue;
+                score += std::log((static_cast<double>(n_blocks) + 1.0) /
+                                  (static_cast<double>(df[term]) + 1.0)) + 1.0;
+            }
+            per_pos[i] = score;
+        }
     }
 
     Vec64 global{};
@@ -292,20 +315,20 @@ Status BlockSelector::select(const std::vector<llama_token>& tokens,
     }
 
     std::vector<double> draft_scores(n_blocks, 0.0);
+    std::vector<double> draft_per_token;
     bool draft_enabled = false;
     if (draft) {
-        std::vector<double> per_token;
-        auto st = draft->score(tokens, query_text, &per_token);
+        auto st = draft->score(tokens, query_text, &draft_per_token);
         // A failed draft pass (missing model, vocab mismatch, oversized
         // prompt) must degrade to lexical-only selection rather than fail
         // the request; never fabricate semantic scores.
-        if (st.ok() && per_token.size() == tokens.size()) {
+        if (st.ok() && draft_per_token.size() == tokens.size()) {
             draft_enabled = true;
             for (uint32_t b = 0; b < n_blocks; ++b) {
                 const uint32_t begin = b * block_size;
                 const uint32_t end = std::min(n_tokens, begin + block_size);
                 double sum = 0.0;
-                for (uint32_t i = begin; i < end; ++i) sum += per_token[i];
+                for (uint32_t i = begin; i < end; ++i) sum += draft_per_token[i];
                 draft_scores[b] = sum / std::max<uint32_t>(1, end - begin);
             }
         } else if (!st.ok()) {
@@ -321,6 +344,14 @@ Status BlockSelector::select(const std::vector<llama_token>& tokens,
     minmax(&diversity);
     minmax(&position);
     if (draft_enabled) minmax(&draft_scores);
+
+    // FR-3 score source: semantic draft scores win over the lexical
+    // per-position fallback when the draft scorer produced a full-length
+    // vector.
+    if (draft_enabled && draft_per_token.size() == n_tokens) {
+        per_pos = draft_per_token;
+    }
+    out->per_pos_scores = std::move(per_pos);
 
     SelectorWeights weights = opts.weights;
     if (!draft_enabled) {

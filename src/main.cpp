@@ -77,6 +77,14 @@ struct Args {
     bool pyramid_k_max_set = false;
     bool pool_branches = false;
     bool pool_branches_set = false;
+    bool query_gating = false;
+    bool query_gating_set = false;
+    uint32_t query_chunk_size = 128;
+    bool query_chunk_size_set = false;
+    uint32_t query_chunk_max = 16;
+    bool query_chunk_max_set = false;
+    uint32_t query_top_k_per_group = 256;
+    bool query_top_k_per_group_set = false;
     double budget = 0.5;
     bool budget_set = false;
     bool chat = false;
@@ -101,6 +109,8 @@ void usage() {
         "  --head-profile P  --head-adaptive on|off  --head-retrieval-threshold F\n"
         "  --head-pattern-routing on|off  --pyramid-prior on|off\n"
         "  --pyramid-k-min N  --pyramid-k-max N  --pool-branches on|off\n"
+        "  --query-gating on|off  --query-chunk-size N  --query-chunk-max N\n"
+        "  --query-top-k N\n"
         "  --risk-guard on|off\n"
         "  --probe-block-len N  --probe-repeats N  --probe-k N  --output F\n"
         "  --threads N       --n-ctx N                 --n-ubatch N\n"
@@ -291,6 +301,49 @@ Status parse_args(int argc, char** argv, Args* args) {
             }
             args->pool_branches = value == "on";
             args->pool_branches_set = true;
+        } else if (flag == "--query-gating") {
+            std::string value;
+            auto st = next(&value);
+            if (!st.ok()) return st;
+            if (value != "on" && value != "off") {
+                return Status::error(ErrorCode::InvalidArgument,
+                                     "invalid --query-gating: " + value);
+            }
+            args->query_gating = value == "on";
+            args->query_gating_set = true;
+        } else if (flag == "--query-chunk-size") {
+            std::string value;
+            auto st = next(&value);
+            if (!st.ok()) return st;
+            int64_t parsed = 0;
+            if (!parse_i64_strict(value, &parsed) || parsed < 1 || parsed > 0xffffffffll) {
+                return Status::error(ErrorCode::InvalidArgument,
+                                     "invalid --query-chunk-size: " + value);
+            }
+            args->query_chunk_size = static_cast<uint32_t>(parsed);
+            args->query_chunk_size_set = true;
+        } else if (flag == "--query-chunk-max") {
+            std::string value;
+            auto st = next(&value);
+            if (!st.ok()) return st;
+            int64_t parsed = 0;
+            if (!parse_i64_strict(value, &parsed) || parsed < 1 || parsed > 16) {
+                return Status::error(ErrorCode::InvalidArgument,
+                                     "invalid --query-chunk-max: " + value);
+            }
+            args->query_chunk_max = static_cast<uint32_t>(parsed);
+            args->query_chunk_max_set = true;
+        } else if (flag == "--query-top-k") {
+            std::string value;
+            auto st = next(&value);
+            if (!st.ok()) return st;
+            int64_t parsed = 0;
+            if (!parse_i64_strict(value, &parsed) || parsed < 0 || parsed > 0xffffffffll) {
+                return Status::error(ErrorCode::InvalidArgument,
+                                     "invalid --query-top-k: " + value);
+            }
+            args->query_top_k_per_group = static_cast<uint32_t>(parsed);
+            args->query_top_k_per_group_set = true;
         } else if (flag == "--output") {
             auto st = next(&args->output);
             if (!st.ok()) return st;
@@ -484,6 +537,12 @@ Status apply_common_config(const Args& args, Config* cfg) {
     if (args.pyramid_k_min_set) cfg->pyramid_k_min = args.pyramid_k_min;
     if (args.pyramid_k_max_set) cfg->pyramid_k_max = args.pyramid_k_max;
     if (args.pool_branches_set) cfg->pool_branches = args.pool_branches;
+    if (args.query_gating_set) cfg->query_gating = args.query_gating;
+    if (args.query_chunk_size_set) cfg->query_chunk_size = args.query_chunk_size;
+    if (args.query_chunk_max_set) cfg->query_chunk_max = args.query_chunk_max;
+    if (args.query_top_k_per_group_set) {
+        cfg->query_top_k_per_group = args.query_top_k_per_group;
+    }
     if (cfg->pyramid_k_min > cfg->pyramid_k_max) {
         return Status::error(ErrorCode::InvalidArgument,
                              "pyramid-k-min must be <= pyramid-k-max");
@@ -767,6 +826,33 @@ Status run_command(const Args& args) {
                      "without one); using scalar path");
         }
     }
+
+    // AR004 FR-3: query-chunk gating. The head matrix path wins
+    // (graph-level exclusivity, v1); gating replaces the scalar gather
+    // and pool rides only on the scalar gather, so both are off while
+    // gating is armed.
+    if (run_cfg.query_gating && !popts.enable_head_adaptive &&
+        !selection.dense &&
+        selection.per_pos_scores.size() == selection.total_tokens) {
+        QueryGatingOptions qg_opts;
+        qg_opts.query_chunk_size = run_cfg.query_chunk_size;
+        qg_opts.query_chunk_max = run_cfg.query_chunk_max;
+        qg_opts.top_k_per_group = run_cfg.query_top_k_per_group;
+        std::string qg_reason;
+        auto qst = AttentionSparsityController::build_query_gated(
+                selection, selection.per_pos_scores, qg_opts,
+                &popts.qg_group_rows, &popts.qg_bounds, &qg_reason);
+        if (!qst.ok()) {
+            log_warn("query gating plan rejected (" + qst.message +
+                     "); using scalar path");
+        } else if (popts.qg_group_rows.empty()) {
+            log_debug("query gating: none (" + qg_reason + ")");
+        } else {
+            popts.enable_query_gating = true;
+            popts.enable_pool_blocks = false;
+            log_info(qg_reason);
+        }
+    }
     PrefillStats stats;
     const auto begin = std::chrono::steady_clock::now();
     st = prefilter.prefill(tokens, selection, popts, &stats);
@@ -862,6 +948,15 @@ Status bench_command(const Args& args) {
     bench.head_adaptive = cfg.head_adaptive;
     bench.head_top_k = cfg.head_top_k;
     bench.head_profile = cfg.head_profile_path;
+    bench.head_pattern_routing = cfg.head_pattern_routing;
+    bench.pyramid_prior = cfg.pyramid_prior;
+    bench.pyramid_k_min = cfg.pyramid_k_min;
+    bench.pyramid_k_max = cfg.pyramid_k_max;
+    bench.pool_branches = cfg.pool_branches;
+    bench.query_gating = cfg.query_gating;
+    bench.query_chunk_size = cfg.query_chunk_size;
+    bench.query_chunk_max = cfg.query_chunk_max;
+    bench.query_top_k_per_group = cfg.query_top_k_per_group;
     bench.n_gpu_layers = cfg.n_gpu_layers;
     bench.out_dir = cfg.results_dir;
 
