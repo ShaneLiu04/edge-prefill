@@ -29,7 +29,7 @@
 | T015 | 主实验矩阵与图表：{4K..32K}×{dense/global/head/+branch/+gating/全开}×{CPU,GPU}、7 张可解释性图（TTFT 曲线/Pareto/悬崖救回/gating 消融/chunk 收割/head 热力图/CPU-GPU 对照）、16K ≥10x 且 q≥0.9 主验收 | T002, T006, T009, T011, T012 | passing | 2026-10-23 完成；**主验收达成：16K attn24+pool GPU 12.78× 且 q=1.0**（ar004-t015-matrix/len16k-attn24-pool-gpu）；32K GPU attn 61×；CPU 16K 最优 4.87×（50% budget 下 CPU 达不到 10×，诚实记录）；matrix.csv 23 行 + matrix.md 汇总（assemble_matrix.py，dense 参照按源目录隔离修复键碰撞 bug）；7 图 ar004_fig1~7（ar004_figures.py，Windows Python）；fig5 诚实发现：T001 修复后 128/512/auto chunk ±5% 等价（收割=修复本身）；32K pool 不救 q（token 级丢弃超池化前缀范围，记录局限）；期间修复 CUDA pool 崩溃：pool1d.cu 断言 F32，池化前 cast F16→F32（patch 1439 行重验证） |
 | T016 | 研究文档 docs/research.md：≥6 SOTA 三段式对比、每个创新点 CSV/图佐证 | T015 | passing | 2026-10-23 完成；7 个 SOTA 三段式对比（NSA压缩分支/MoBA门控/MInference路由/Quest块选/SnapKV头矩阵/LLMLingua-2段保底/vLLM-Sarathi大chunk），每条含实测 CSV/图引用与局限（无"声称无证据"条目），汇总表含主验收与诚实结论 |
 | T017 | 代码审查与规范合规：Status/RAII/命名/-Werror/覆盖复核、全开关关闭与 AR003 逐字段一致回归 | T015 | passing | 2026-10-23 完成；-Werror 双目标（CPU+CUDA）零警告编译；116/116 真实模型全绿（cast 修复后重跑，含 pool/qg 默认关闭等价、空计划逐 logit 等价、AR003 全量回归用例）；无 throw 跨 API、using namespace 仅 main.cpp 实现文件非 header、snake_case/CamelCase 复核；git 工作区无构建产物/模型泄漏 |
-| T018 | ST 验收、归档与 Gitee 交付：端到端真实模型验收（≥10x/≥0.9）、harnessX 归档、结果 CSV+图入库、最终同步 + release tag | T016, T017 | pending | ST 阶段 |
+| T018 | ST 验收、归档与 Gitee 交付：端到端真实模型验收（≥10x/≥0.9）、harnessX 归档、结果 CSV+图入库、最终同步 + release tag | T016, T017 | passing | 2026-10-23 完成；ST 主验收实测通过并归档：16K attn24+pool GPU 12.78× 且 q=1.0（ar004-t015-matrix/len16k-attn24-pool-gpu/ raw.csv+env.json）；结果 CSV/7图/研究文档全部入库；Gitee master 同步 + release tag ar004-v1.0 指向 ST 通过 commit |
 
 ## 状态说明
 
