@@ -1,0 +1,4 @@
+config,case,ttft_sparse_ms,quality
+chunk_size=128 (4x more chunks),niah-01@4102,9597.204397,0.4444444444
+chunk_size=512 (old default),niah-01@4102,10049.8927,0.4444444444
+chunk_size=0 (auto n_ubatch),niah-01@4102,9941.547833,0.4444444444
