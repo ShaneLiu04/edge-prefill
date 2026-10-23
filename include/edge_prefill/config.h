@@ -84,6 +84,13 @@ struct Config {
     bool pyramid_prior = false;
     uint32_t pyramid_k_min = 48;
     uint32_t pyramid_k_max = 128;
+    // AR004 FR-2: attention-level compressed branches. With the scalar
+    // attention gather active, selected-but-not-gathered full blocks are
+    // pooled (mean) into one appended KV row each, so dropped context
+    // stays addressable at reduced fidelity. Requires attn_top_k > 0;
+    // exclusive with head-adaptive mode. Default off keeps AR003
+    // behavior.
+    bool pool_branches = false;
     bool risk_guard = true;
     double risk_sep_threshold = 0.5;
     double risk_cov_threshold = 0.35;

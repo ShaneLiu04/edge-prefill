@@ -138,6 +138,25 @@ public:
     static Status build_pyramid_matrix(uint32_t n_layer, uint32_t n_head,
                                        const PyramidOptions& opts,
                                        std::vector<int32_t>* matrix);
+
+    // AR004 FR-2: attention-level compressed branches. Selected blocks
+    // that are fully present in the KV row space but not gathered become
+    // pool blocks: the graph pools their 32 rows (mean) into one appended
+    // KV row. A block is poolable only when all its tokens are selected
+    // AND its first token lands on a 32-aligned row (pool_1d geometry:
+    // starts must be multiples of 32 in the compacted row space, so a
+    // partially selected block permanently breaks alignment for the
+    // blocks after it). attention_indices are the gathered prompt
+    // positions (Selection semantics); a block overlapping them is
+    // already gathered and is not pooled. Dense selections and block_size
+    // != 32 yield an empty set (dense) / InvalidArgument respectively.
+    static Status build_pool_blocks(const Selection& selection,
+                                    const std::vector<int32_t>& attention_indices,
+                                    uint32_t block_size,
+                                    std::vector<int32_t>* starts,
+                                    std::vector<int32_t>* sizes,
+                                    std::vector<int32_t>* max_pos,
+                                    std::string* reason);
 };
 
 } // namespace edge_prefill

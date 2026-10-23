@@ -15,8 +15,8 @@
 | T001 | 大 chunk 默认调度：chunk_size=0 自动对齐 n_ubatch、backend 不二次拆分的断言防线、原崩溃配置回归测试、全稀疏关闭 dense 等价 <1e-5 | - | passing | 2026-10-22 完成；附带修复预存缺陷（probe_argmax 未按 n_batch 分块 + classify 测试未考虑 n_ctx 运行时填充） |
 | T002 | 全长度基准刷新：4K/8K/16K/32K × {dense, global, head} 大 chunk 配置重跑，刷新头条数字 | T001 | pending | FR-1/FR-8 数据基础 |
 | T003 | PPL 质量指标修复：定位 quality=0 根因、与 llama.cpp 官方 ppl 交叉验证、综合 q 落地 CSV | - | passing | 2026-10-22 完成；根因=exp(均值对数概率)口径；quality 改为 min(1, ppl_dense/ppl_sparse) 保持率，dense 参考 per (case,length) 缓存，原始 ppl 入 CSV 审计列；EX-8 空 answer 跳样本+警告 |
-| T004 | 压缩分支 patch：`llama_set_prefill_attn_compressed` C API + ggml 池化行（reshape/mean/concat）+ 因果 mask（块内最大位置）+ Unsupported 回退 | - | pending | FR-2 核心 |
-| T005 | 压缩分支规划与执行：planner 输出被丢块池化集合、sparse_prefill 集成、分段最低保留（防整段全丢）、审计字段 | T004 | pending | FR-2 |
+| T004 | 压缩分支 patch：`llama_set_prefill_attn_compressed` C API + ggml 池化行（reshape/mean/concat）+ 因果 mask（块内最大位置）+ Unsupported 回退 | T005 | passing | FR-2 核心 |
+| T005 | 压缩分支规划与执行：planner 输出被丢块池化集合、sparse_prefill 集成、分段最低保留（防整段全丢）、审计字段 | T004 | passing | FR-2 |
 | T006 | 压缩分支消融实验：attn-24 @8K/16K 开/关对比，q 0.44→≥0.75 验证 | T005, T002 | pending | FR-2 验收 |
 | T007 | query-chunk 门控规划：draft per-position 分数落盘、分片×块得分矩阵、分片级行集合（必含 sink+recent+前文锚）、分片数上限降级 | T001 | pending | FR-3 |
 | T008 | query-chunk 门控 patch：graph 按分片循环 gather-concat（复用 head 分组机制）、空集合强制 sink+recent、head 矩阵优先互斥 | T007 | pending | FR-3 核心 |

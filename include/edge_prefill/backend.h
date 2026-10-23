@@ -113,6 +113,15 @@ public:
     int32_t attn_head_top_k_size() const;
     bool attn_per_head_supported() const;
 
+    // AR004 attention-level compressed branches: full 32-row blocks that
+    // are selected but not gathered are pooled (mean) into one appended
+    // KV row. Empty vectors disable. Exclusive with the per-head matrix
+    // path in the graph (v1).
+    Status set_attn_pool_blocks(const std::vector<int32_t>& starts,
+                                const std::vector<int32_t>& sizes,
+                                const std::vector<int32_t>& max_pos);
+    int32_t attn_pool_blocks_size() const;
+
     const llama_model* model() const { return model_; }
     llama_context* context() const { return ctx_; }
     const llama_vocab* vocab() const { return vocab_; }

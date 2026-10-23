@@ -35,6 +35,9 @@ struct BenchmarkConfig {
     bool pyramid_prior = false;
     uint32_t pyramid_k_min = 48;
     uint32_t pyramid_k_max = 128;
+    // AR004 FR-2: attention-level compressed branches over the scalar
+    // gather. Default off.
+    bool pool_branches = false;
     // GPU offload: layers above this index move to the GPU backend (99 =
     // full offload). 0 keeps everything on CPU.
     int32_t n_gpu_layers = 0;

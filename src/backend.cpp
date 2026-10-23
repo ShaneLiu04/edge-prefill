@@ -470,6 +470,32 @@ bool LlamaBackend::attn_per_head_supported() const {
     return true;
 }
 
+Status LlamaBackend::set_attn_pool_blocks(const std::vector<int32_t>& starts,
+                                          const std::vector<int32_t>& sizes,
+                                          const std::vector<int32_t>& max_pos) {
+    if (!ctx_) return Status::error(ErrorCode::InvalidArgument, "context is not created");
+    if (starts.size() != sizes.size() || starts.size() != max_pos.size()) {
+        return Status::error(ErrorCode::InvalidArgument,
+                             "pool block arrays must have equal length");
+    }
+    const int32_t rc = llama_set_prefill_attn_pool_blocks(
+            ctx_,
+            starts.empty() ? nullptr : starts.data(),
+            sizes.empty()  ? nullptr : sizes.data(),
+            max_pos.empty() ? nullptr : max_pos.data(),
+            starts.size());
+    if (rc != 0) {
+        return Status::error(ErrorCode::InvalidArgument,
+                             "llama_set_prefill_attn_pool_blocks rejected blocks (n=" +
+                                 std::to_string(starts.size()) + ")");
+    }
+    return Status::success();
+}
+
+int32_t LlamaBackend::attn_pool_blocks_size() const {
+    return ctx_ ? llama_get_prefill_attn_pool_blocks_size(ctx_) : 0;
+}
+
 int32_t LlamaBackend::n_vocab() const {
     return vocab_ ? llama_vocab_n_tokens(vocab_) : 0;
 }

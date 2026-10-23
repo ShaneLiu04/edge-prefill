@@ -428,4 +428,98 @@ Status AttentionSparsityController::build_pyramid_matrix(uint32_t n_layer,
     return Status::success();
 }
 
+Status AttentionSparsityController::build_pool_blocks(
+        const Selection& selection,
+        const std::vector<int32_t>& attention_indices,
+        uint32_t block_size,
+        std::vector<int32_t>* starts,
+        std::vector<int32_t>* sizes,
+        std::vector<int32_t>* max_pos,
+        std::string* reason) {
+    if (!starts || !sizes || !max_pos) {
+        return Status::error(ErrorCode::InvalidArgument, "null pool block output");
+    }
+    if (block_size != 32) {
+        // The graph pools with ggml_pool_1d(AVG, 32, 32); any other block
+        // size would break the pooled-row id arithmetic (start / 32).
+        return Status::error(ErrorCode::InvalidArgument,
+                             "pool blocks require block_size 32");
+    }
+    starts->clear();
+    sizes->clear();
+    max_pos->clear();
+    if (reason) reason->clear();
+
+    if (selection.dense) {
+        // Dense prefill attends everything; pooled rows would duplicate.
+        if (reason) *reason = "dense";
+        return Status::success();
+    }
+    if (selection.token_indices.empty()) {
+        return Status::error(ErrorCode::InvalidArgument,
+                             "non-dense selection has no token indices");
+    }
+    const uint32_t n_tokens = selection.total_tokens;
+    const uint32_t n_blocks = (n_tokens + block_size - 1) / block_size;
+    if (selection.signals.size() != n_blocks) {
+        return Status::error(ErrorCode::InvalidArgument, "selection signals size mismatch");
+    }
+
+    // Gathered positions (prompt indices, Selection semantics).
+    std::vector<bool> gathered(n_tokens, false);
+    for (int32_t p : attention_indices) {
+        if (p < 0 || static_cast<uint32_t>(p) >= n_tokens) {
+            return Status::error(ErrorCode::InvalidArgument,
+                                 "attention index out of range");
+        }
+        gathered[p] = true;
+    }
+
+    // Selected tokens per block, ascending.
+    std::vector<uint32_t> count_of(n_blocks, 0);
+    for (uint32_t t : selection.token_indices) {
+        if (t >= n_tokens) {
+            return Status::error(ErrorCode::InvalidArgument, "token index out of range");
+        }
+        ++count_of[t / block_size];
+    }
+
+    // Walk blocks in ascending order; the row counter follows the compacted
+    // row space. A full block whose rows start 32-aligned and that is not
+    // (partially) gathered becomes a pool block; its max position is its
+    // last token's prompt index (all 32 tokens are selected, so the block
+    // spans prompt positions [b*32, b*32+32) contiguously).
+    uint32_t row = 0;
+    uint32_t pooled = 0;
+    for (uint32_t b = 0; b < n_blocks; ++b) {
+        if (count_of[b] == 0) {
+            continue;
+        }
+        const bool full = count_of[b] == block_size;
+        if (full && row % block_size == 0) {
+            bool is_gathered = false;
+            for (uint32_t j = 0; j < block_size; ++j) {
+                if (gathered[b * block_size + j]) {
+                    is_gathered = true;
+                    break;
+                }
+            }
+            if (!is_gathered) {
+                starts->push_back(static_cast<int32_t>(row));
+                sizes->push_back(static_cast<int32_t>(block_size));
+                max_pos->push_back(static_cast<int32_t>(b * block_size +
+                                                        block_size - 1));
+                ++pooled;
+            }
+        }
+        row += count_of[b];
+    }
+
+    if (reason) {
+        *reason = "pool-blocks: " + std::to_string(pooled) + " of " +
+                  std::to_string(n_blocks) + " blocks";
+    }
+    return Status::success();
+}
+
 } // namespace edge_prefill

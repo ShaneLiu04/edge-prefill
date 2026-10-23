@@ -477,6 +477,10 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
                     popts.enable_chunking = true;
                     popts.enable_ffn_skip = true;
                     popts.ffn_skip_mask = plan.dense_fallback ? 0 : plan.skip_ffn_mask;
+                    // AR004 compressed branches ride on the scalar gather;
+                    // the head path disables them when it activates below
+                    // (graph-level exclusivity, v1).
+                    popts.enable_pool_blocks = cfg.pool_branches;
 
                     // AR003/AR004 FR-4: per-head adaptive gather. Pattern
                     // routing replaces only the matrix; without a profile
@@ -506,6 +510,9 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
                             popts.enable_head_adaptive = true;
                             popts.head_pool = std::move(pool);
                             popts.head_matrix = std::move(matrix);
+                            // The pooled compressed branch is exclusive with
+                            // the per-head matrix path in the graph (v1).
+                            popts.enable_pool_blocks = false;
                             log_debug(head_reason);
                         } else if (!head_reason.empty()) {
                             log_warn("head-adaptive build failed: " + head_reason);
@@ -528,6 +535,8 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
                             popts.enable_head_adaptive = true;
                             popts.head_pool = std::move(pool);
                             popts.head_matrix = std::move(matrix);
+                            // Exclusive with the pooled branch (v1).
+                            popts.enable_pool_blocks = false;
                             log_debug("pyramid prior: k(min/max)=" +
                                       std::to_string(pyopts.k_min) + "/" +
                                       std::to_string(pyopts.k_max));

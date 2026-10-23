@@ -31,6 +31,11 @@ public:
         bool enable_head_adaptive = false;
         std::vector<int32_t> head_pool;    // ranked cache rows
         std::vector<int32_t> head_matrix;  // n_layer * n_head, -1 dense / k sparse
+        // AR004 attention-level compressed branches: with the scalar gather
+        // active, selected-but-not-gathered full blocks are pooled (mean)
+        // into one appended KV row each. Requires attn_top_k gather; off by
+        // default; exclusive with the head-adaptive path.
+        bool enable_pool_blocks = false;
     };
 
     SparsePrefiller(LlamaBackend* backend, PrefixCache* cache);
