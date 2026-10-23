@@ -1,41 +1,24 @@
-# Build directories
+# Build trees
+build-wsl/
+build-cuda/
 build/
-build-*/
 out/
-dist/
 
-# CMake artifacts
-CMakeCache.txt
-CMakeFiles/
-cmake_install.cmake
-Makefile
+# llama.cpp fetched source and tarballs (pinned commit, fetched by CMake)
+third_party/
+llama-src*/
 
-# Compiled objects and libraries
-*.o
-*.obj
-*.a
-*.so
-*.so.*
-*.dll
-*.dylib
-*.lib
-*.exe
+# Models and datasets are fetched by scripts/download_model.sh, never
+# committed (license + size).
+*.gguf
+models/
 
-# Python cache
-__pycache__/
-*.py[cod]
-
-# IDE and editor files
-.vscode/
-.idea/
-*.swp
-*~
-
-# OS artifacts
-.DS_Store
-Thumbs.db
-
-# Logs and temporary files
+# Logs and scratch output
 *.log
-*.tmp
-*.bak
+nohup.out
+__pycache__/
+*.pyc
+
+# Experiment scratch directories (reports under benchmarks/results/exp*/
+# are committed; transient dumps are not)
+benchmarks/results/exp-dump*/

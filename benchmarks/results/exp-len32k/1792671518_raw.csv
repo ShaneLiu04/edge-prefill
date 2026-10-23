@@ -1,0 +1,3 @@
+task,case,ttft_ms,e2e_ms,prefill_tps,kv_bytes,quality,dense,prompt_tokens,selected_tokens,mode,budget,attn_top_k,repeats
+niah,niah-32k@31878,500731.4993,990888.1446,65.4944776,915651352,1,1,31922,31922,dense,1,0,2
+niah,niah-32k@31878,84604.65123,183182.1584,49.00460721,118924568,0.25,0,31922,4146,balanced,0.1283127624,0,2

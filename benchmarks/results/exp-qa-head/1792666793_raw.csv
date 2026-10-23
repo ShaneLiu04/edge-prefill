@@ -1,0 +1,3 @@
+task,case,ttft_ms,e2e_ms,prefill_tps,kv_bytes,quality,dense,prompt_tokens,selected_tokens,mode,budget,attn_top_k,repeats
+qa,qa-02@7984,70558.29647,138318.4783,118.8467576,230361908,1,1,8031,8031,dense,1,0,2
+qa,qa-02@7984,34396.02293,68364.20514,122.8131468,115625908,1,0,8031,4031,balanced,0.5,0,2
