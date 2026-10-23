@@ -1441,3 +1441,127 @@ TEST_CASE(pool_branches_empty_set_equivalence) {
 
     LlamaBackend::shutdown();
 }
+
+// AR004 FR-3: query-chunk gating executes on the real model. Every query
+// group gathers its own rows; logits stay finite and greedy prefill stays
+// deterministic.
+TEST_CASE(qg_execution_engages) {
+    Loaded loaded;
+    SparseScenario scenario;
+    if (!setup_sparse_scenario(&loaded, &scenario)) {
+        std::cout << "SKIP qg_execution_engages (EDGE_PREFILL_TEST_MODEL unset)\n";
+        return;
+    }
+    // The lexical per-position scores retained by the selector drive the
+    // gating plan.
+    CHECK_EQ(scenario.selection.per_pos_scores.size(),
+             scenario.selection.total_tokens);
+
+    QueryGatingOptions qg_opts;
+    qg_opts.query_chunk_size = 64;
+    qg_opts.query_chunk_max = 16;
+    qg_opts.top_k_per_group = 128;
+    std::vector<std::vector<int32_t>> groups;
+    std::vector<int32_t> bounds;
+    std::string qg_reason;
+    CHECK_OK(AttentionSparsityController::build_query_gated(
+            scenario.selection, scenario.selection.per_pos_scores, qg_opts,
+            &groups, &bounds, &qg_reason));
+    CHECK(groups.size() >= 2);
+
+    Selection selection = scenario.selection;
+    selection.attention_indices = scenario.indices;
+    selection.attention_top_k = static_cast<uint32_t>(scenario.indices.size());
+
+    std::unique_ptr<PrefixCache> cache;
+    SparsePrefiller prefiller(&loaded.backend, cache.get());
+    SparsePrefiller::Options popts = exec_options();
+    popts.enable_query_gating = true;
+    popts.qg_group_rows = groups;
+    popts.qg_bounds = bounds;
+
+    PrefillStats stats;
+    CHECK_OK(prefiller.prefill(loaded.tokens, selection, popts, &stats));
+    CHECK(stats.query_gating);
+    CHECK_EQ(stats.qg_groups, static_cast<uint32_t>(groups.size()));
+    CHECK(!stats.attn_fallback);
+    const std::vector<float> first_logits = logits_of(loaded.backend);
+    CHECK(!first_logits.empty());
+    CHECK(all_finite(first_logits));
+
+    PrefillStats stats2;
+    CHECK_OK(prefiller.prefill(loaded.tokens, selection, popts, &stats2));
+    const std::vector<float> second_logits = logits_of(loaded.backend);
+    CHECK_EQ(argmax(first_logits), argmax(second_logits));
+
+    LlamaBackend::shutdown();
+}
+
+// AR004 FR-3 zero-regression: an empty plan leaves the scalar path
+// untouched — the flag is inert without group rows, so logits are
+// bit-identical to the plain sparse run.
+TEST_CASE(qg_empty_plan_equivalence) {
+    Loaded loaded;
+    SparseScenario scenario;
+    if (!setup_sparse_scenario(&loaded, &scenario)) {
+        std::cout << "SKIP qg_empty_plan_equivalence (EDGE_PREFILL_TEST_MODEL unset)\n";
+        return;
+    }
+
+    Selection selection = scenario.selection;
+    selection.attention_indices = scenario.indices;
+    selection.attention_top_k = static_cast<uint32_t>(scenario.indices.size());
+
+    std::unique_ptr<PrefixCache> cache;
+    SparsePrefiller prefiller(&loaded.backend, cache.get());
+    SparsePrefiller::Options popts = exec_options();
+    PrefillStats stats_off;
+    CHECK_OK(prefiller.prefill(loaded.tokens, selection, popts, &stats_off));
+    const std::vector<float> logits_off = logits_of(loaded.backend);
+
+    popts.enable_query_gating = true;  // no group rows: inert
+    PrefillStats stats_on;
+    CHECK_OK(prefiller.prefill(loaded.tokens, selection, popts, &stats_on));
+    const std::vector<float> logits_on = logits_of(loaded.backend);
+    CHECK(!stats_on.query_gating);
+
+    CHECK_EQ(logits_off.size(), logits_on.size());
+    for (size_t i = 0; i < logits_off.size(); ++i) {
+        CHECK_EQ(logits_off[i], logits_on[i]);
+    }
+
+    LlamaBackend::shutdown();
+}
+
+// AR004 FR-3: the patch C API validates its state machine — group budget,
+// append-only group order, ascending rows, bounds length.
+TEST_CASE(qg_capi_validation) {
+    Loaded loaded;
+    if (!load(&loaded)) {
+        std::cout << "SKIP qg_capi_validation (EDGE_PREFILL_TEST_MODEL unset)\n";
+        return;
+    }
+
+    CHECK_ERR(loaded.backend.set_qg_count(17), ErrorCode::InvalidArgument);
+    CHECK_ERR(loaded.backend.set_qg_count(-1), ErrorCode::InvalidArgument);
+    CHECK_OK(loaded.backend.set_qg_count(2));
+    // Groups must be configured in ascending order.
+    CHECK_ERR(loaded.backend.set_qg_rows(1, {4, 8}), ErrorCode::InvalidArgument);
+    CHECK_ERR(loaded.backend.set_qg_rows(0, {8, 4}), ErrorCode::InvalidArgument);
+    CHECK_ERR(loaded.backend.set_qg_rows(0, {4, 4}), ErrorCode::InvalidArgument);
+    CHECK_OK(loaded.backend.set_qg_rows(0, {4, 8}));
+    CHECK_OK(loaded.backend.set_qg_rows(1, {}));
+    // Bounds: wrong length, wrong start, non-ascending.
+    CHECK_ERR(loaded.backend.set_qg_bounds({0, 4}), ErrorCode::InvalidArgument);
+    CHECK_ERR(loaded.backend.set_qg_bounds({1, 4, 8}), ErrorCode::InvalidArgument);
+    CHECK_ERR(loaded.backend.set_qg_bounds({0, 8, 4}), ErrorCode::InvalidArgument);
+    CHECK_OK(loaded.backend.set_qg_bounds({0, 4, 8}));
+    CHECK_EQ(loaded.backend.qg_count(), 2);
+    // Reset restores a clean state.
+    CHECK_OK(loaded.backend.set_qg_count(0));
+    CHECK_EQ(loaded.backend.qg_count(), 0);
+    CHECK_ERR(loaded.backend.set_qg_rows(0, {0}), ErrorCode::InvalidArgument);
+    CHECK_ERR(loaded.backend.set_qg_bounds({0, 1}), ErrorCode::InvalidArgument);
+
+    LlamaBackend::shutdown();
+}
