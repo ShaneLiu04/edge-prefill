@@ -522,4 +522,163 @@ Status AttentionSparsityController::build_pool_blocks(
     return Status::success();
 }
 
+Status AttentionSparsityController::build_query_gated(
+        const Selection& selection,
+        const std::vector<double>& per_pos_scores,
+        const QueryGatingOptions& opts,
+        std::vector<std::vector<int32_t>>* group_rows,
+        std::vector<int32_t>* q_bounds,
+        std::string* reason) {
+    if (!group_rows || !q_bounds) {
+        return Status::error(ErrorCode::InvalidArgument, "null query gating output");
+    }
+    group_rows->clear();
+    q_bounds->clear();
+    if (reason) reason->clear();
+
+    if (opts.query_chunk_size == 0) {
+        return Status::error(ErrorCode::InvalidArgument, "query_chunk_size is 0");
+    }
+    if (opts.query_chunk_max == 0) {
+        return Status::error(ErrorCode::InvalidArgument, "query_chunk_max is 0");
+    }
+    if (selection.dense) {
+        // Dense prefill has no row space to gate; the caller keeps the
+        // dense path.
+        if (reason) *reason = "dense";
+        return Status::success();
+    }
+    if (per_pos_scores.size() != selection.total_tokens) {
+        return Status::error(ErrorCode::InvalidArgument,
+                             "per-position score length " +
+                                 std::to_string(per_pos_scores.size()) +
+                                 " != total_tokens " +
+                                 std::to_string(selection.total_tokens));
+    }
+    if (selection.token_indices.empty()) {
+        if (reason) *reason = "no-rows";
+        return Status::success();
+    }
+
+    // The gating block granularity is fixed at 32 rows, mirroring the pool
+    // branch geometry. token_indices is ascending, so the row space walks
+    // prompt order and each block occupies a contiguous row range.
+    constexpr uint32_t bs = 32;
+    const uint32_t n_tokens = selection.total_tokens;
+    const uint32_t n_rows = static_cast<uint32_t>(selection.token_indices.size());
+    const uint32_t n_blocks = (n_tokens + bs - 1) / bs;
+
+    std::vector<uint32_t> blk_count(n_blocks, 0);
+    std::vector<double> blk_sum(n_blocks, 0.0);
+    for (size_t i = 0; i < selection.token_indices.size(); ++i) {
+        const uint32_t pos = selection.token_indices[i];
+        if (pos >= n_tokens) {
+            return Status::error(ErrorCode::InvalidArgument, "token index out of range");
+        }
+        const uint32_t b = pos / bs;
+        ++blk_count[b];
+        blk_sum[b] += per_pos_scores[pos];
+    }
+    // Contiguous row range per selected block, ascending.
+    std::vector<uint32_t> blk_first_row(n_blocks, 0);
+    uint32_t row = 0;
+    for (uint32_t b = 0; b < n_blocks; ++b) {
+        blk_first_row[b] = row;
+        row += blk_count[b];
+    }
+
+    const uint32_t qcs = opts.query_chunk_size;
+    uint32_t n_groups = (n_rows + qcs - 1) / qcs;
+    bool capped = false;
+    uint32_t eff_chunk = qcs;
+    if (n_groups > opts.query_chunk_max) {
+        // Too many groups would explode the graph's per-group loop; a
+        // single global group keeps the request running (audited).
+        n_groups = 1;
+        eff_chunk = n_rows;
+        capped = true;
+    }
+
+    q_bounds->push_back(0);
+    for (uint32_t g = 0; g < n_groups; ++g) {
+        const uint32_t lo = std::min(g * eff_chunk, n_rows);
+        const uint32_t hi = std::min((g + 1) * eff_chunk, n_rows);
+        q_bounds->push_back(static_cast<int32_t>(hi));
+
+        // Mandatory blocks: the sink block (row 0 — guarantees every
+        // query sees at least one row, the NaN guard) and the recent
+        // block (the rows directly preceding the group).
+        std::set<uint32_t> mandatory;
+        const uint32_t sink_block = selection.token_indices.front() / bs;
+        mandatory.insert(sink_block);
+        if (lo > 0) {
+            // Block containing row lo-1: the last block whose first row
+            // is <= lo-1.
+            uint32_t rb = sink_block;
+            for (uint32_t b = 0; b < n_blocks; ++b) {
+                if (blk_count[b] == 0) continue;
+                if (blk_first_row[b] <= lo - 1) {
+                    rb = b;
+                } else {
+                    break;
+                }
+            }
+            mandatory.insert(rb);
+        }
+
+        // Causally eligible blocks: at least one row < hi (rows are in
+        // prompt order, so first_row <= hi-1 suffices). Later blocks are
+        // fully masked for this group and would waste gather work.
+        struct ScoredBlock {
+            uint32_t block;
+            double score;
+        };
+        std::vector<ScoredBlock> eligible;
+        for (uint32_t b = 0; b < n_blocks; ++b) {
+            if (blk_count[b] == 0) continue;
+            if (blk_first_row[b] > hi - 1) continue;
+            if (mandatory.count(b)) continue;
+            const double mean = blk_sum[b] / static_cast<double>(blk_count[b]);
+            eligible.push_back({b, mean});
+        }
+        std::sort(eligible.begin(), eligible.end(),
+                  [](const ScoredBlock& a, const ScoredBlock& b2) {
+                      if (a.score != b2.score) return a.score > b2.score;
+                      return a.block < b2.block;
+                  });
+
+        // Top-scoring eligible blocks under the per-group row budget.
+        // Block-granular: a block that does not fit is skipped whole.
+        std::set<uint32_t> chosen(mandatory);
+        uint32_t used = 0;
+        for (const ScoredBlock& sb : eligible) {
+            if (used + blk_count[sb.block] > opts.top_k_per_group) continue;
+            chosen.insert(sb.block);
+            used += blk_count[sb.block];
+        }
+
+        // Expand blocks to ascending rows.
+        std::vector<int32_t> rows;
+        for (uint32_t b : chosen) {
+            for (uint32_t r = blk_first_row[b]; r < blk_first_row[b] + blk_count[b]; ++r) {
+                rows.push_back(static_cast<int32_t>(r));
+            }
+        }
+        // Empty sets cannot happen (the sink block is always mandatory),
+        // but the contract promises forced sink+recent; keep the guard.
+        if (rows.empty()) {
+            rows.push_back(0);
+        }
+        group_rows->push_back(std::move(rows));
+    }
+
+    if (reason) {
+        *reason = "query-gating: groups=" + std::to_string(n_groups) +
+                  (capped ? " (capped to global set)" : "") +
+                  " rows=" + std::to_string(n_rows) +
+                  " budget=" + std::to_string(opts.top_k_per_group);
+    }
+    return Status::success();
+}
+
 } // namespace edge_prefill

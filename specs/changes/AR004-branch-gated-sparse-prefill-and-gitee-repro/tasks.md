@@ -18,8 +18,8 @@
 | T004 | 压缩分支 patch：`llama_set_prefill_attn_compressed` C API + ggml 池化行（reshape/mean/concat）+ 因果 mask（块内最大位置）+ Unsupported 回退 | T005 | passing | FR-2 核心 |
 | T005 | 压缩分支规划与执行：planner 输出被丢块池化集合、sparse_prefill 集成、分段最低保留（防整段全丢）、审计字段 | T004 | passing | FR-2 |
 | T006 | 压缩分支消融实验：attn-24 @8K/16K 开/关对比，q 0.44→≥0.75 验证 | T005, T002 | pending | FR-2 验收 |
-| T007 | query-chunk 门控规划：draft per-position 分数落盘、分片×块得分矩阵、分片级行集合（必含 sink+recent+前文锚）、分片数上限降级 | T001 | pending | FR-3 |
-| T008 | query-chunk 门控 patch：graph 按分片循环 gather-concat（复用 head 分组机制）、空集合强制 sink+recent、head 矩阵优先互斥 | T007 | pending | FR-3 核心 |
+| T007 | query-chunk 门控规划：draft per-position 分数落盘、分片×块得分矩阵、分片级行集合（必含 sink+recent+前文锚）、分片数上限降级 | T008 | passing | FR-3 |
+| T008 | query-chunk 门控 patch：graph 按分片循环 gather-concat（复用 head 分组机制）、空集合强制 sink+recent、head 矩阵优先互斥 | T007 | passing | FR-3 核心 |
 | T009 | query-gating 消融实验：8K/16K 多针数据 开/关质量对照，≥5pp 提升或不可达分析 | T008, T002 | pending | FR-3 验收 |
 | T010 | head 模式路由：HeadProfile 分数 → 锚点/局部/检索三模式模板（k+必留块映射）、阈值配置、审计 | - | passing | 2026-10-23 完成；分类序 retrieval(-1)→landmark(k=32,echo≥0.5)→local(k=48,induction≥0.5)→normal(k=head_top_k)；必留锚点由 pool 必留前缀天然保障（小 k=保留 sink/recent）；reason 含各类计数审计；CLI --head-pattern-routing；默认 off 零回归 |
 | T011 | 金字塔先验默认矩阵：k(l) 凸函数、与 AR003 矩阵格式兼容、无 profile 时默认启用 | T010 | passing | 2026-10-23 完成；k(l)=round(k_min+(k_max-k_min)·2\|l-(L-1)/2\|/(L-1))，单层=k_max；无 profile 时 --pyramid-prior on 启用（默认 off 保零回归，srs 触发条件为显式 on，与 tasks.md 原表述"默认启用"的偏差已注记）；CLI --pyramid-k-min/max 校验 min≤max 否则 exit 2；真实模型冒烟 pool=2009 k=48/128 通过 |

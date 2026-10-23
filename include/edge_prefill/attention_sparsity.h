@@ -61,6 +61,18 @@ struct PyramidOptions {
     uint32_t k_max = 128;
 };
 
+// AR004 FR-3: MoBA-style query-chunk gating. Query rows (the compacted
+// KV row space of the selection) are partitioned into groups of
+// query_chunk_size rows; each group gathers its own row set under a
+// top_k_per_group row budget (mandatory sink/recent rows excluded from
+// the budget). More than query_chunk_max groups degrades the plan to a
+// single global group.
+struct QueryGatingOptions {
+    uint32_t query_chunk_size = 128;
+    uint32_t query_chunk_max = 16;
+    uint32_t top_k_per_group = 256;
+};
+
 // Derives the strictly ascending gather indices for the llama.cpp
 // attention top-k patch from a block selection: keep the highest fused
 // scoring blocks up to top_k_blocks, always including mandatory blocks
@@ -156,6 +168,25 @@ public:
                                     std::vector<int32_t>* starts,
                                     std::vector<int32_t>* sizes,
                                     std::vector<int32_t>* max_pos,
+                                    std::string* reason);
+
+    // AR004 FR-3: MoBA-style query-chunk gating. Query rows are partitioned
+    // into groups of query_chunk_size; every group gets its own KV row set:
+    // the sink block (row 0, the NaN guard), the recent block (the rows
+    // directly preceding the group), and the top-scoring causally eligible
+    // blocks under a per-group row budget. Block scores aggregate the
+    // per-position draft/lexical scores (mean over each block's positions);
+    // a block is eligible for group g only when its first row precedes the
+    // group's last query row (later blocks are fully masked for g). When
+    // the group count exceeds query_chunk_max the plan degrades to a single
+    // global group (audited via reason). Dense selections and empty row
+    // spaces return an empty plan (caller falls back); a score vector whose
+    // length differs from total_tokens is InvalidArgument.
+    static Status build_query_gated(const Selection& selection,
+                                    const std::vector<double>& per_pos_scores,
+                                    const QueryGatingOptions& opts,
+                                    std::vector<std::vector<int32_t>>* group_rows,
+                                    std::vector<int32_t>* q_bounds,
                                     std::string* reason);
 };
 

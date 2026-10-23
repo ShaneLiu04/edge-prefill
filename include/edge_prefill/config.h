@@ -91,6 +91,17 @@ struct Config {
     // exclusive with head-adaptive mode. Default off keeps AR003
     // behavior.
     bool pool_branches = false;
+    // AR004 FR-3: MoBA-style query-chunk gating. Query rows are
+    // partitioned into groups of query_chunk_size; every group gathers
+    // its own KV row set (sink+recent mandatory, top-scoring blocks under
+    // query_top_k_per_group rows). More than query_chunk_max groups
+    // degrades to a single global set. Replaces the scalar gather;
+    // exclusive with head-adaptive mode. Default off keeps AR003
+    // behavior.
+    bool query_gating = false;
+    uint32_t query_chunk_size = 128;
+    uint32_t query_chunk_max = 16;
+    uint32_t query_top_k_per_group = 256;
     bool risk_guard = true;
     double risk_sep_threshold = 0.5;
     double risk_cov_threshold = 0.35;

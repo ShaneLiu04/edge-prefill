@@ -39,6 +39,10 @@ struct Sample {
     // retention (0 for non-ppl tasks). quality = min(1, ppl_dense/ppl_sparse).
     double ppl_dense = 0.0;
     double ppl_sparse = 0.0;
+    // AR004 FR-3 audit: query-chunk gating engaged and the planned group
+    // count (0 when off / fell back).
+    bool query_gating = false;
+    uint32_t qg_groups = 0;
 };
 
 class Reporter {

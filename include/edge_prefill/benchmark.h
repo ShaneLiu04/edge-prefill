@@ -38,6 +38,12 @@ struct BenchmarkConfig {
     // AR004 FR-2: attention-level compressed branches over the scalar
     // gather. Default off.
     bool pool_branches = false;
+    // AR004 FR-3: MoBA-style query-chunk gating (replaces the scalar
+    // gather; exclusive with head-adaptive). Default off.
+    bool query_gating = false;
+    uint32_t query_chunk_size = 128;
+    uint32_t query_chunk_max = 16;
+    uint32_t query_top_k_per_group = 256;
     // GPU offload: layers above this index move to the GPU backend (99 =
     // full offload). 0 keeps everything on CPU.
     int32_t n_gpu_layers = 0;

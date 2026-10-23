@@ -36,6 +36,14 @@ public:
         // into one appended KV row each. Requires attn_top_k gather; off by
         // default; exclusive with the head-adaptive path.
         bool enable_pool_blocks = false;
+        // AR004 FR-3 query-chunk gating: when enabled with non-empty
+        // qg_group_rows/qg_bounds, every query group gathers its own KV row
+        // set (per-chunk live filtering inside) and the graph loops over
+        // groups. Replaces the scalar gather; exclusive with the
+        // head-adaptive path; requires an un-prefixed row space.
+        bool enable_query_gating = false;
+        std::vector<std::vector<int32_t>> qg_group_rows;  // full-plan rows per group
+        std::vector<int32_t> qg_bounds;                   // full-plan bounds (groups+1)
     };
 
     SparsePrefiller(LlamaBackend* backend, PrefixCache* cache);
@@ -53,7 +61,8 @@ private:
                         const std::vector<llama_pos>& positions,
                         const std::vector<int32_t>& attn_indices,
                         const Options& opts,
-                        PrefillStats* stats);
+                        PrefillStats* stats,
+                        bool qg_active);
 
     LlamaBackend* backend_;
     PrefixCache* cache_;

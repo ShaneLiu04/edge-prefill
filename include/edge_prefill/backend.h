@@ -44,6 +44,10 @@ struct PrefillStats {
     uint32_t attn_indices = 0;
     int32_t attn_top_k = 0;
     bool attn_fallback = false;
+    // AR004 FR-3 audit: query-chunk gating engaged (per-group row sets
+    // replaced the scalar gather) and the planned group count.
+    bool query_gating = false;
+    uint32_t qg_groups = 0;
 };
 
 struct ModelFingerprint {
@@ -121,6 +125,15 @@ public:
                                 const std::vector<int32_t>& sizes,
                                 const std::vector<int32_t>& max_pos);
     int32_t attn_pool_blocks_size() const;
+
+    // AR004 FR-3 query-chunk gating. set_qg_count resets the plan (rows
+    // and bounds); groups are then configured in ascending order via
+    // set_qg_rows, and set_qg_bounds finalizes. count 0 disables.
+    // Replaces the scalar top-k path while active.
+    Status set_qg_count(int32_t n_groups);
+    Status set_qg_rows(int32_t group, const std::vector<int32_t>& rows);
+    Status set_qg_bounds(const std::vector<int32_t>& bounds);
+    int32_t qg_count() const;
 
     const llama_model* model() const { return model_; }
     llama_context* context() const { return ctx_; }

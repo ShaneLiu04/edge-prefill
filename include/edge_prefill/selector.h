@@ -30,6 +30,11 @@ struct Selection {
     // positions), populated by AttentionSparsityController. Empty means
     // the dense attention path is used.
     std::vector<int32_t> attention_indices;
+    // AR004 FR-3: per-position relevance scores (draft scores when a
+    // DraftScorer is active, otherwise lexical idf hits), one entry per
+    // prompt token. Empty for dense selections. Consumed by
+    // AttentionSparsityController::build_query_gated; not serialized.
+    std::vector<double> per_pos_scores;
     uint32_t attention_top_k = 0;
     uint32_t total_tokens = 0;
     uint32_t selected_tokens = 0;

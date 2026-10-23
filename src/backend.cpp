@@ -496,6 +496,55 @@ int32_t LlamaBackend::attn_pool_blocks_size() const {
     return ctx_ ? llama_get_prefill_attn_pool_blocks_size(ctx_) : 0;
 }
 
+Status LlamaBackend::set_qg_count(int32_t n_groups) {
+    if (!ctx_) return Status::error(ErrorCode::InvalidArgument, "context is not created");
+    const int32_t rc = llama_set_prefill_qg_count(ctx_, n_groups);
+    if (rc != 0) {
+        return Status::error(ErrorCode::InvalidArgument,
+                             "llama_set_prefill_qg_count rejected n_groups=" +
+                                 std::to_string(n_groups));
+    }
+    return Status::success();
+}
+
+Status LlamaBackend::set_qg_rows(int32_t group, const std::vector<int32_t>& rows) {
+    if (!ctx_) return Status::error(ErrorCode::InvalidArgument, "context is not created");
+    // Local pre-validation keeps the context free of half-writes (the C
+    // API would reject the same inputs, but only after mutation-free
+    // checks).
+    for (size_t i = 0; i < rows.size(); ++i) {
+        if (i > 0 && rows[i] <= rows[i - 1]) {
+            return Status::error(ErrorCode::InvalidArgument,
+                                 "qg rows must be strictly ascending");
+        }
+    }
+    const int32_t rc = llama_set_prefill_qg_rows(
+            ctx_, group, rows.empty() ? nullptr : rows.data(), rows.size());
+    if (rc != 0) {
+        return Status::error(ErrorCode::InvalidArgument,
+                             "llama_set_prefill_qg_rows rejected group " +
+                                 std::to_string(group) + " (n=" +
+                                 std::to_string(rows.size()) + ")");
+    }
+    return Status::success();
+}
+
+Status LlamaBackend::set_qg_bounds(const std::vector<int32_t>& bounds) {
+    if (!ctx_) return Status::error(ErrorCode::InvalidArgument, "context is not created");
+    const int32_t rc = llama_set_prefill_qg_bounds(
+            ctx_, bounds.empty() ? nullptr : bounds.data(), bounds.size());
+    if (rc != 0) {
+        return Status::error(ErrorCode::InvalidArgument,
+                             "llama_set_prefill_qg_bounds rejected bounds (n=" +
+                                 std::to_string(bounds.size()) + ")");
+    }
+    return Status::success();
+}
+
+int32_t LlamaBackend::qg_count() const {
+    return ctx_ ? llama_get_prefill_qg_count(ctx_) : 0;
+}
+
 int32_t LlamaBackend::n_vocab() const {
     return vocab_ ? llama_vocab_n_tokens(vocab_) : 0;
 }
