@@ -811,7 +811,7 @@
      }
  
      inp->self_k_rot = mctx_cur->build_input_k_rot(ctx0);
-@@ -3221,7 +3451,616 @@
+@@ -3221,7 +3451,624 @@
  
      ggml_tensor * kq_mask = inp->get_kq_mask();
  
@@ -1365,10 +1365,15 @@
 +            // tensor, so materialize the rows-major view
 +            // [n_kv, n_embd_h, n_head_kv, ns]. Note ggml_permute uses
 +            // destination semantics (ne[axis_i] = a->ne[i]), so moving the
-+            // kv axis (a->ne[2]) to dim0 is permute(1, 2, 0, 3). The
-+            // kernel reads F16 natively and outputs F32.
++            // kv axis (a->ne[2]) to dim0 is permute(1, 2, 0, 3). The CPU
++            // pool_1d reads F16 natively, but the CUDA kernel asserts
++            // F32-only (pool1d.cu), so normalize the type up front; the
++            // pooled result is cast back to the cache type below.
 +            ggml_tensor * k_rows = ggml_cont(ctx0,
 +                    ggml_permute(ctx0, k_full, 1, 2, 0, 3));
++            if (k_rows->type != GGML_TYPE_F32) {
++                k_rows = ggml_cast(ctx0, k_rows, GGML_TYPE_F32);
++            }
 +            ggml_tensor * k_pool = ggml_pool_1d(ctx0, k_rows,
 +                    GGML_OP_POOL_AVG, 32, 32, 0);
 +            // [n_pool_full, n_embd_h, n_head_kv, ns] -> row-gatherable
@@ -1393,6 +1398,9 @@
 +                : v_full;
 +            ggml_tensor * v_rows = ggml_cont(ctx0,
 +                    ggml_permute(ctx0, v_norm, 1, 2, 0, 3));
++            if (v_rows->type != GGML_TYPE_F32) {
++                v_rows = ggml_cast(ctx0, v_rows, GGML_TYPE_F32);
++            }
 +            ggml_tensor * v_pool = ggml_pool_1d(ctx0, v_rows,
 +                    GGML_OP_POOL_AVG, 32, 32, 0);
 +            ggml_tensor * v_pool_c = ggml_cont(ctx0,
