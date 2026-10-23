@@ -556,3 +556,122 @@ TEST_CASE(fr4_switches_default_off) {
     CHECK_EQ(cfg.pyramid_k_min, 48u);
     CHECK_EQ(cfg.pyramid_k_max, 128u);
 }
+
+// AR004 FR-2: selected-but-not-gathered full blocks become pool blocks.
+TEST_CASE(pool_blocks_selected_not_gathered) {
+    const Selection sel = make_selection(4096, 0.5);
+    CHECK(!sel.dense);
+    AttentionSparsityOptions aopts = sparsity_options(8);
+    std::vector<int32_t> indices;
+    std::string reason;
+    CHECK_OK(AttentionSparsityController::build(sel, aopts, &indices, &reason));
+    CHECK(!indices.empty());
+
+    std::vector<int32_t> starts;
+    std::vector<int32_t> sizes;
+    std::vector<int32_t> max_pos;
+    std::string pool_reason;
+    CHECK_OK(AttentionSparsityController::build_pool_blocks(
+            sel, indices, 32, &starts, &sizes, &max_pos, &pool_reason));
+    CHECK(!starts.empty());
+    CHECK_EQ(starts.size(), sizes.size());
+    CHECK_EQ(starts.size(), max_pos.size());
+    CHECK(!pool_reason.empty());
+
+    std::vector<bool> gathered(sel.total_tokens, false);
+    for (int32_t p : indices) gathered[static_cast<uint32_t>(p)] = true;
+
+    // Row space walk: verify each pool block against the selection.
+    uint32_t row = 0;
+    size_t next_pool = 0;
+    const uint32_t block_size = 32;
+    const uint32_t n_blocks =
+            (sel.total_tokens + block_size - 1) / block_size;
+    std::vector<uint32_t> count_of(n_blocks, 0);
+    for (uint32_t t : sel.token_indices) ++count_of[t / block_size];
+    for (uint32_t b = 0; b < n_blocks; ++b) {
+        if (count_of[b] == 0) continue;
+        const bool full = count_of[b] == block_size;
+        bool is_gathered = false;
+        if (full) {
+            for (uint32_t j = 0; j < block_size; ++j) {
+                if (gathered[b * block_size + j]) { is_gathered = true; break; }
+            }
+        }
+        if (full && row % block_size == 0 && !is_gathered) {
+            CHECK(next_pool < starts.size());
+            if (next_pool < starts.size()) {
+                CHECK_EQ(starts[next_pool], static_cast<int32_t>(row));
+                CHECK_EQ(sizes[next_pool], 32);
+                CHECK_EQ(max_pos[next_pool],
+                         static_cast<int32_t>(b * block_size + block_size - 1));
+                CHECK(starts[next_pool] % 32 == 0);
+                CHECK(max_pos[next_pool] % 32 == 31);
+                if (next_pool > 0) {
+                    CHECK(starts[next_pool] > starts[next_pool - 1]);
+                }
+            }
+            ++next_pool;
+        }
+        row += count_of[b];
+    }
+    CHECK_EQ(next_pool, starts.size());
+}
+
+// AR004 FR-2: dense selections pool nothing (pooled rows would duplicate
+// full attention).
+TEST_CASE(pool_blocks_dense_empty) {
+    const Selection dense = make_selection(256, 0.5);
+    CHECK(dense.dense);
+    std::vector<int32_t> starts;
+    std::vector<int32_t> sizes;
+    std::vector<int32_t> max_pos;
+    std::string reason;
+    CHECK_OK(AttentionSparsityController::build_pool_blocks(
+            dense, {}, 32, &starts, &sizes, &max_pos, &reason));
+    CHECK(starts.empty());
+    CHECK_EQ(reason, std::string("dense"));
+}
+
+// AR004 FR-2: pool_1d geometry is fixed; only block_size 32 is legal.
+TEST_CASE(pool_blocks_invalid_block_size) {
+    const Selection sel = make_selection(4096, 0.5);
+    std::vector<int32_t> starts;
+    std::vector<int32_t> sizes;
+    std::vector<int32_t> max_pos;
+    std::string reason;
+    CHECK_ERR(AttentionSparsityController::build_pool_blocks(
+            sel, {}, 16, &starts, &sizes, &max_pos, &reason),
+              ErrorCode::InvalidArgument);
+    CHECK_ERR(AttentionSparsityController::build_pool_blocks(
+            sel, {}, 0, &starts, &sizes, &max_pos, &reason),
+              ErrorCode::InvalidArgument);
+    // Null outputs are rejected up front.
+    CHECK_ERR(AttentionSparsityController::build_pool_blocks(
+            sel, {}, 32, nullptr, &sizes, &max_pos, &reason),
+              ErrorCode::InvalidArgument);
+}
+
+// AR004 FR-2: with nothing gathered, every full aligned block is pooled.
+TEST_CASE(pool_blocks_no_gather_pools_all_full) {
+    const Selection sel = make_selection(4096, 0.5);
+    CHECK(!sel.dense);
+    std::vector<int32_t> starts;
+    std::vector<int32_t> sizes;
+    std::vector<int32_t> max_pos;
+    std::string reason;
+    CHECK_OK(AttentionSparsityController::build_pool_blocks(
+            sel, {}, 32, &starts, &sizes, &max_pos, &reason));
+    CHECK(!starts.empty());
+    for (size_t i = 0; i < starts.size(); ++i) {
+        CHECK(starts[i] % 32 == 0);
+        CHECK_EQ(sizes[i], 32);
+        CHECK(max_pos[i] % 32 == 31);
+    }
+}
+
+// AR004 FR-2 zero-regression guard: the switch defaults to off.
+TEST_CASE(pool_branches_switch_default_off) {
+    Config cfg;
+    CHECK(!cfg.pool_branches);
+}

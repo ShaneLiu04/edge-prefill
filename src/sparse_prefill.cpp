@@ -138,6 +138,35 @@ Status SparsePrefiller::prefill(const std::vector<llama_token>& tokens,
         }
     }
 
+    // AR004 attention-level compressed branches: only meaningful on top of
+    // the scalar gather (they describe the selected-but-not-gathered
+    // blocks) and only in the un-prefixed row space (a prefix-cache hit
+    // shifts rows). Any rejection degrades to gather-only, never fails.
+    if (opts.enable_pool_blocks && attn_active && prefix_len == 0) {
+        std::vector<int32_t> pool_starts;
+        std::vector<int32_t> pool_sizes;
+        std::vector<int32_t> pool_max_pos;
+        std::string pool_reason;
+        auto pst = AttentionSparsityController::build_pool_blocks(
+                selection, selection.attention_indices, 32,
+                &pool_starts, &pool_sizes, &pool_max_pos, &pool_reason);
+        if (!pst.ok()) {
+            log_warn("pool blocks rejected (" + pst.message +
+                     "); continuing without compressed branches");
+        } else if (pool_starts.empty()) {
+            log_debug("pool blocks: none (" + pool_reason + ")");
+        } else {
+            auto sst = backend_->set_attn_pool_blocks(pool_starts, pool_sizes,
+                                                      pool_max_pos);
+            if (!sst.ok()) {
+                log_warn("pool blocks rejected by backend (" + sst.message +
+                         "); continuing without compressed branches");
+            } else {
+                log_info("compressed branches active: " + pool_reason);
+            }
+        }
+    }
+
     std::vector<llama_token> active_tokens;
     std::vector<llama_pos> active_positions;
     active_tokens.reserve(selection.token_indices.size());
@@ -173,6 +202,7 @@ Status SparsePrefiller::prefill(const std::vector<llama_token>& tokens,
         }
         backend_->set_attn_top_k(0);
         backend_->set_attn_indices({});
+        backend_->set_attn_pool_blocks({}, {}, {});
         if (!st.ok()) return st;
         stats->prompt_tokens = static_cast<uint32_t>(tokens.size());
         stats->selected_tokens = static_cast<uint32_t>(selection.token_indices.size());

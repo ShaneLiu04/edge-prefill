@@ -1343,3 +1343,101 @@ TEST_CASE(per_head_group_limit_degrades_layer_to_dense) {
 
     LlamaBackend::shutdown();
 }
+
+// AR004 FR-2: pooled compressed branches execute on the real model. The
+// pool branch must not disturb prefill correctness: logits stay finite and
+// greedy prefill stays deterministic.
+TEST_CASE(pool_branches_execution_engages) {
+    Loaded loaded;
+    SparseScenario scenario;
+    if (!setup_sparse_scenario(&loaded, &scenario)) {
+        std::cout << "SKIP pool_branches_execution_engages (EDGE_PREFILL_TEST_MODEL unset)\n";
+        return;
+    }
+
+    // The pool set must be non-empty for this scenario to exercise the
+    // branch; verify with the planner before running.
+    std::vector<int32_t> starts;
+    std::vector<int32_t> sizes;
+    std::vector<int32_t> max_pos;
+    std::string pool_reason;
+    CHECK_OK(AttentionSparsityController::build_pool_blocks(
+            scenario.selection, scenario.indices, 32, &starts, &sizes,
+            &max_pos, &pool_reason));
+    CHECK(!starts.empty());
+
+    Selection selection = scenario.selection;
+    selection.attention_indices = scenario.indices;
+    selection.attention_top_k = static_cast<uint32_t>(scenario.indices.size());
+
+    std::unique_ptr<PrefixCache> cache;
+    SparsePrefiller prefiller(&loaded.backend, cache.get());
+    SparsePrefiller::Options popts = exec_options();
+    popts.enable_pool_blocks = true;
+
+    PrefillStats stats;
+    CHECK_OK(prefiller.prefill(loaded.tokens, selection, popts, &stats));
+    CHECK(!stats.attn_fallback);
+    const std::vector<float> first_logits = logits_of(loaded.backend);
+    CHECK(!first_logits.empty());
+    CHECK(all_finite(first_logits));
+
+    // Deterministic rerun with the pooled branch must reproduce the same
+    // greedy first token.
+    PrefillStats stats2;
+    CHECK_OK(prefiller.prefill(loaded.tokens, selection, popts, &stats2));
+    const std::vector<float> second_logits = logits_of(loaded.backend);
+    CHECK_EQ(argmax(first_logits), argmax(second_logits));
+
+    LlamaBackend::shutdown();
+}
+
+// AR004 FR-2 zero-regression: an empty pool set (everything gathered)
+// leaves the graph untouched — the flag is inert when the planner pools
+// nothing, so logits are bit-identical to the flag-off run.
+TEST_CASE(pool_branches_empty_set_equivalence) {
+    Loaded loaded;
+    SparseScenario scenario;
+    if (!setup_sparse_scenario(&loaded, &scenario)) {
+        std::cout << "SKIP pool_branches_empty_set_equivalence (EDGE_PREFILL_TEST_MODEL unset)\n";
+        return;
+    }
+
+    // Gather EVERY selected token: the planner pools nothing.
+    Selection selection = scenario.selection;
+    selection.attention_indices.clear();
+    selection.attention_indices.reserve(scenario.selection.token_indices.size());
+    for (uint32_t t : scenario.selection.token_indices) {
+        selection.attention_indices.push_back(static_cast<int32_t>(t));
+    }
+    selection.attention_top_k =
+            static_cast<uint32_t>(scenario.selection.token_indices.size());
+
+    std::vector<int32_t> starts;
+    std::vector<int32_t> sizes;
+    std::vector<int32_t> max_pos;
+    std::string pool_reason;
+    CHECK_OK(AttentionSparsityController::build_pool_blocks(
+            selection, selection.attention_indices, 32, &starts, &sizes,
+            &max_pos, &pool_reason));
+    CHECK(starts.empty());
+
+    std::unique_ptr<PrefixCache> cache;
+    SparsePrefiller prefiller(&loaded.backend, cache.get());
+    SparsePrefiller::Options popts = exec_options();
+    PrefillStats stats_off;
+    CHECK_OK(prefiller.prefill(loaded.tokens, selection, popts, &stats_off));
+    const std::vector<float> logits_off = logits_of(loaded.backend);
+
+    popts.enable_pool_blocks = true;
+    PrefillStats stats_on;
+    CHECK_OK(prefiller.prefill(loaded.tokens, selection, popts, &stats_on));
+    const std::vector<float> logits_on = logits_of(loaded.backend);
+
+    CHECK_EQ(logits_off.size(), logits_on.size());
+    for (size_t i = 0; i < logits_off.size(); ++i) {
+        CHECK_EQ(logits_off[i], logits_on[i]);
+    }
+
+    LlamaBackend::shutdown();
+}

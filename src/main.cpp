@@ -75,6 +75,8 @@ struct Args {
     bool pyramid_k_min_set = false;
     uint32_t pyramid_k_max = 128;
     bool pyramid_k_max_set = false;
+    bool pool_branches = false;
+    bool pool_branches_set = false;
     double budget = 0.5;
     bool budget_set = false;
     bool chat = false;
@@ -98,7 +100,7 @@ void usage() {
         "  --draft-model M   --attn-top-k N  --attn-top-k-layers 4,8,16\n"
         "  --head-profile P  --head-adaptive on|off  --head-retrieval-threshold F\n"
         "  --head-pattern-routing on|off  --pyramid-prior on|off\n"
-        "  --pyramid-k-min N  --pyramid-k-max N\n"
+        "  --pyramid-k-min N  --pyramid-k-max N  --pool-branches on|off\n"
         "  --risk-guard on|off\n"
         "  --probe-block-len N  --probe-repeats N  --probe-k N  --output F\n"
         "  --threads N       --n-ctx N                 --n-ubatch N\n"
@@ -279,6 +281,16 @@ Status parse_args(int argc, char** argv, Args* args) {
             }
             args->pyramid_k_max = static_cast<uint32_t>(parsed);
             args->pyramid_k_max_set = true;
+        } else if (flag == "--pool-branches") {
+            std::string value;
+            auto st = next(&value);
+            if (!st.ok()) return st;
+            if (value != "on" && value != "off") {
+                return Status::error(ErrorCode::InvalidArgument,
+                                     "invalid --pool-branches: " + value);
+            }
+            args->pool_branches = value == "on";
+            args->pool_branches_set = true;
         } else if (flag == "--output") {
             auto st = next(&args->output);
             if (!st.ok()) return st;
@@ -471,6 +483,7 @@ Status apply_common_config(const Args& args, Config* cfg) {
     if (args.pyramid_prior_set) cfg->pyramid_prior = args.pyramid_prior;
     if (args.pyramid_k_min_set) cfg->pyramid_k_min = args.pyramid_k_min;
     if (args.pyramid_k_max_set) cfg->pyramid_k_max = args.pyramid_k_max;
+    if (args.pool_branches_set) cfg->pool_branches = args.pool_branches;
     if (cfg->pyramid_k_min > cfg->pyramid_k_max) {
         return Status::error(ErrorCode::InvalidArgument,
                              "pyramid-k-min must be <= pyramid-k-max");
@@ -665,6 +678,9 @@ Status run_command(const Args& args) {
     popts.enable_chunking = run_cfg.enable_chunking;
     popts.enable_ffn_skip = run_cfg.enable_ffn_skip;
     popts.ffn_skip_mask = plan.dense_fallback ? 0 : plan.skip_ffn_mask;
+    // AR004 compressed branches ride on the scalar gather; the head path
+    // is exclusive in the graph (v1), so only enable one.
+    popts.enable_pool_blocks = run_cfg.pool_branches && !run_cfg.head_adaptive;
 
     // AR003/AR004 FR-4: per-head adaptive gather. The ranked pool is
     // profile-free; the matrix comes from the profile (uniform or pattern
