@@ -24,8 +24,8 @@
 | T010 | head 模式路由：HeadProfile 分数 → 锚点/局部/检索三模式模板（k+必留块映射）、阈值配置、审计 | - | passing | 2026-10-23 完成；分类序 retrieval(-1)→landmark(k=32,echo≥0.5)→local(k=48,induction≥0.5)→normal(k=head_top_k)；必留锚点由 pool 必留前缀天然保障（小 k=保留 sink/recent）；reason 含各类计数审计；CLI --head-pattern-routing；默认 off 零回归 |
 | T011 | 金字塔先验默认矩阵：k(l) 凸函数、与 AR003 矩阵格式兼容、无 profile 时默认启用 | T010 | passing | 2026-10-23 完成；k(l)=round(k_min+(k_max-k_min)·2\|l-(L-1)/2\|/(L-1))，单层=k_max；无 profile 时 --pyramid-prior on 启用（默认 off 保零回归，srs 触发条件为显式 on，与 tasks.md 原表述"默认启用"的偏差已注记）；CLI --pyramid-k-min/max 校验 min≤max 否则 exit 2；真实模型冒烟 pool=2009 k=48/128 通过 |
 | T012 | GPU sparse 路径：phase5 CUDA 构建、scalar/head 路径 GPU 正确性、GPU sparse vs dense-FA ≥1.3x 或诚实分析 | T001 | pending | FR-6；orchestrator 已排队 |
-| T013 | Gitee 仓库工程化：git init、.gitignore（third_party/构建产物/模型）、诊断脚本归档、README 快速开始+配置表+预期结果表、docs/architecture.md + experiments.md | - | pending | FR-7；可并行 |
-| T014 | 模型下载与一键复现：download_model.sh（ModelScope→hf-mirror 择优+SHA256）、download_data.sh、run_experiments.sh 一键头条、sync_gitee.sh | T013 | pending | FR-7 |
+| T013 | Gitee 仓库工程化：git init、.gitignore（third_party/构建产物/模型）、诊断脚本归档、README 快速开始+配置表+预期结果表、docs/architecture.md + experiments.md | - | passing | 2026-10-23 完成；仓库已有AR002/AR003历史与gitee remote(笔记过时)，按模板补3个提交：specs(908行)/代码(AR003收尾+AR004 T001/T003/T010/T011)/工程化(README+docs+42组实验CSV入库+diagnostics归档13脚本)；WSL缺git已装(tuna源替换被407卡死的archive源)；README含llama commit+模型SHA256双pin |
+| T014 | 模型下载与一键复现：download_model.sh（ModelScope→hf-mirror 择优+SHA256）、download_data.sh、run_experiments.sh 一键头条、sync_gitee.sh | T013 | passing | 2026-10-23 完成；download_model.sh双镜像择优+SHA256不匹配即拒绝(本地模型实测验证通过6a1a2eb6...)；download_data.sh调gen_*.py+make_deep_datasets+数据集SHA256输出；sync_gitee.sh推送前强制clean tree+README双pin校验；run_experiments.sh已有(全矩阵编排) |
 | T015 | 主实验矩阵与图表：{4K..32K}×{dense/global/head/+branch/+gating/全开}×{CPU,GPU}、7 张可解释性图（TTFT 曲线/Pareto/悬崖救回/gating 消融/chunk 收割/head 热力图/CPU-GPU 对照）、16K ≥10x 且 q≥0.9 主验收 | T002, T006, T009, T011, T012 | pending | FR-8 主验收 |
 | T016 | 研究文档 docs/research.md：≥6 SOTA 三段式对比、每个创新点 CSV/图佐证 | T015 | pending | FR-9 |
 | T017 | 代码审查与规范合规：Status/RAII/命名/-Werror/覆盖复核、全开关关闭与 AR003 逐字段一致回归 | T015 | pending | Review 阶段 |

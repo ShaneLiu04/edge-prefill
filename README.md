@@ -116,7 +116,10 @@ docs/           architecture.md, experiments.md
 
 ## Reproducibility rules
 
-- llama.cpp is pinned; model and data SHA256 are recorded in every report.
+- Pinned llama.cpp commit: `3bb63cbcbfb62056c84fe9e521b0f3d756d29c32`
+- Benchmark model: Qwen2.5-1.5B-Instruct Q4_K_M GGUF,
+  SHA256 `6a1a2eb6d15622bf3c96857206351ba97e1af16c30d7a74ee38970e434e9407e`
+  (`scripts/download_model.sh` verifies the hash and refuses mismatches).
 - No performance number without the raw CSV and the exact command.
 - Prefill-only FFN skip and attention sparsity are lossy; every latency claim
   carries its quality metric in the same report.
