@@ -3,8 +3,8 @@
 | 字段 | 内容 |
 |------|------|
 | 组件名称 | edge-prefill / EdgePrefill |
-| 版本 | 0.3（AR003） |
-| 日期 | 2026-10-21 |
+| 版本 | 0.4（AR005） |
+| 日期 | 2026-10-24 |
 | 语言 | C++17 |
 | 构建 | CMake ≥ 3.20 |
 | 推理后端 | llama.cpp（固定 commit）+ GGUF |
@@ -12,11 +12,12 @@
 ## 1. 组件职责与边界
 
 EdgePrefill 负责端侧 LLM 的 **prefill 阶段优化**：在真实 GGUF 模型上，通过
-**draft 模型语义打分**、**块级上下文选择**、**attention 级全局/分层 top-k**、
-**head 级自适应稀疏（离线 head 分类 + 层×头 top-k 矩阵）**、**在线质量风险
-控制**、**跨请求/多轮前缀 KV 复用（Radix 树）**、**分块 prefill**、
-**prefill-only FFN 跳过**、**按层与相位感知的 KV 精度规划**、**自动调优与
-Pareto 基准**，降低 TTFT 与 KV 写入量，同时以真实基准验证质量保持。
+**draft 模型语义打分**、**嵌入模型（bge-small）组×块语义门控**、**块级上下文
+选择**、**attention 级全局/分层 top-k**、**head 级自适应稀疏（离线 head 分类 +
+任务内校准 + 层×头 top-k 矩阵）**、**在线质量风险控制**、**跨请求/多轮前缀 KV
+复用（Radix 树）**、**分块 prefill**、**prefill-only FFN 跳过**、**按层与相位
+感知的 KV 精度规划**、**自动调优与 Pareto 基准**，降低 TTFT 与 KV 写入量，
+同时以真实基准验证质量保持。
 
 **不负责：** 模型训练/微调、decode 算法优化、GPU/NPU 自定义 kernel、服务化多请求调度。
 
@@ -27,7 +28,8 @@ Pareto 基准**，降低 TTFT 与 KV 写入量，同时以真实基准验证质�
 │ CLI / Benchmark Runner / TuneRunner                          │
 ├──────────────────────────────────────────────────────────────┤
 │ Planner（预算/模式/attention top-k/自适应精度/回退/风险控制）    │
-│   ├─ DraftScorer                                            │
+│   ├─ DraftScorer（多态：LlamaDraftScorer / EmbeddingSelectionScorer）│
+│   ├─ EmbeddingScorer（bge-small GGUF，多 seq 并行块编码）        │
 │   ├─ BlockSelector                                          │
 │   ├─ AttentionSparsityController                            │
 │   ├─ AdaptivePrecisionController（策略规划层）                 │
@@ -53,9 +55,9 @@ Pareto 基准**，降低 TTFT 与 KV 写入量，同时以真实基准验证质�
 
 | 结构 | 作用 | 关键字段 |
 |------|------|----------|
-| `Config` | 运行配置 | model、draft_model、budget、mode、block/chunk、attention_top_k、skip mask、KV 类型/profile、hardware_profile |
+| `Config` | 运行配置 | model、draft_model、embedding_model、budget、mode、block/chunk、attention_top_k、skip mask、KV 类型/profile、hardware_profile |
 | `Plan` | 规划器输出 | passes、budget、skip mask、dense_fallback、reasons、attention_top_k、kv_profile、ffn_skip_mask、draft_enabled、per_head_top_k（层×头矩阵序列化）、head_adaptive、risk_level |
-| `Selection` | 块选择结果 | block/token indices、signals、mandatory、selected_tokens、attention_indices、attention_top_k |
+| `Selection` | 块选择结果 | block/token indices、signals、mandatory、selected_tokens、attention_indices、attention_top_k、per_group_block_scores（G×B 语义矩阵，b 为原始块序号）、score_source（lexical/draft/embedding/混合来源审计） |
 | `CacheHit` | 前缀命中 | prefix_len、state blob、age、node_id |
 | `CacheStats` | 缓存统计 | cache_hit_rate、reused_tokens、saved_ttft_ms、saved_kv_bytes |
 | `KvSignature` | KV 兼容签名 | model_key、n_ctx、type_k、type_v、per_layer_profile |
@@ -64,10 +66,10 @@ Pareto 基准**，降低 TTFT 与 KV 写入量，同时以真实基准验证质�
 | `HardwareProfile` | 硬件条件 | n_threads、has_cuda、available_memory、n_ctx |
 | `TuneSearchSpace` | 自动调优搜索空间 | budgets、block_sizes、attention_top_ks、kv_types、ffn_masks、chunk_sizes、head_adaptive |
 | `ChunkStats` | 分块统计 | tokens、elapsed_us、kv_pos_max |
-| `Sample` | 基准样本 | ttft/e2e、tokens/s、kv_bytes、quality、quality_retention、cache_hit_rate、reused_tokens、attention_top_k、repeats、risk_level、head_adaptive、retrieval_heads |
+| `Sample` | 基准样本 | ttft/e2e、tokens/s、kv_bytes、quality、quality_retention、cache_hit_rate、reused_tokens、attention_top_k、repeats、risk_level、head_adaptive、retrieval_heads、semantic_score_ms（语义打分开销独立计时） |
 | `HeadProfile` | 离线 head 分类结果 | model_sha、n_layer、n_head、probe 参数、heads[]（layer/head/echo_score/induction_score/retrieval）|
 | `RiskSignals` / `RiskDecision` | 风险输入与决策 | separation/coverage/anchor_ratio → Ok/Tighten/DenseFallback + reason |
-| `HeadProbeParams` | head 探测参数 | block_len、repeats、sink、recent、probe_k、seed |
+| `HeadProbeParams` | head 探测参数 | block_len、repeats、sink、recent、probe_k、seed、probe_source（random/calibration_text，任务内校准用真实文本重复段） |
 
 ## 4. 关键接口契约
 
@@ -80,6 +82,25 @@ Pareto 基准**，降低 TTFT 与 KV 写入量，同时以真实基准验证质�
   接收 token 与文本片段，便于单测与复用。
 - `LlamaDraftScorer` 实现真实 GGUF draft 模型语义打分；draft 缺失或加载失败时回退
   lexical-only，并在 `Plan.reasons` 记录 `draft-disabled`，不伪造语义分数。
+- `EmbeddingScorer`（AR005）为独立块编码嵌入引擎（bge-small GGUF，池化=GGUF
+  自带池化头：bge=CLS、通用=MEAN；无池化头的 causal GGUF 拒绝 Unsupported）：
+  `load_model` 独占嵌入模型生命周期，`encode` 支持多 seq 并行编码，组文本取组内
+  行的原始连续块跨度（含未选 token 文本）；输出 G×B 余弦矩阵，b 为**原始提示块
+  序号**（非行空间块）；引擎输出矩阵含非有限元素返回 `Internal`（无静默截断），
+  消费方 `build_query_gated` 对输入矩阵的尺寸/非有限校验返回 `InvalidArgument`。
+  零 patch 改动，纯规划层，检索目标与 NIAH 任务对齐。
+- `EmbeddingSelectionScorer`（AR005）把 `EmbeddingScorer` 适配为 `DraftScorer`
+  多态实现，`BlockSelector` 零改动；语义分数优先参与选择权重，保证 needle 块
+  进选择集（真实模型守护测试，32K budget 0.15）。
+- Query-chunk 门控 v2（AR005）：`build_query_gated` 提供 2D 矩阵重载，每组独立
+  对**本组**分数做因果 top-k（v1 的 1D 同源分数各组必相同，退化为全局 top-k）；
+  空矩阵回退 1D 与 v1 **字节等价**；矩阵尺寸不匹配返回 `InvalidArgument`。
+- 降级链（AR005）：embedding 模型缺失 → qg 回退 v1 1D → scalar → dense，每级
+  在 `Plan.reasons` 记录原因；**显式配置**的 embedding 路径无效为硬错（ModelLoad），
+  不降级。
+- Head 任务内校准（AR005）：`classify-heads --calibration-file` 从真实任务文本
+  取重复段作为探针（`ProbeSource::CalibrationText`），替代通用随机探针；
+  三分数机制与 profile 格式不变，通用随机路径保留为默认。
 - `AttentionSparsityController` 把块选择结果映射为严格升序的 token 级
   `attention_indices`；`top_k=0` 时关闭 attention 稀疏并完全恢复原路径。
 - `PrefixCache` 只管理 byte blob 与签名，不直接操作 llama context；内部使用 Radix 树，
@@ -145,7 +166,7 @@ Pareto 基准**，降低 TTFT 与 KV 写入量，同时以真实基准验证质�
 | `Status` / `ErrorCode` | `Ok=0, InvalidArgument=2, ModelLoad=3, Tokenize=4, ContextInit=5, Prefill=6, Decode=7, Cache=8, Unsupported=9, OutOfMemory=10, Io=11, Internal=12`；公共 API 返回 Status，不抛异常 |
 | `KvSignature` | `model_key,n_ctx,type_k,type_v,per_layer_profile`；全字段相等才可复用 |
 | `Metrics` | `ttft_ms,e2e_ms,prefill_tokens_per_s,kv_bytes,quality,quality_retention,attention_top_k,per_layer_attn_stats,kv_profile,draft_enabled,cache_hit_rate,reused_tokens,saved_ttft_ms,saved_kv_bytes` |
-| `EnvironmentInfo` | OS/CPU/核数/编译器/CMake/llama commit/model_sha/draft_model_sha/data_sha/threads/kv/command/timestamp |
+| `EnvironmentInfo` | OS/CPU/核数/编译器/CMake/llama commit/model_sha/draft_model_sha/embedding_model_sha/data_sha/threads/kv/command/timestamp |
 | `Reporter` | 输出 `raw.csv`、`report.md`、`env.json`；空样本仍写表头 |
 | `AttentionSparsity` | indices 必须严格升序且小于 KV 长度；`top_k=0` 关闭；C API 返回 `int32_t` 错误码，patch 缺失返回 `Unsupported` |
 | `PerLayerKV` | `type_k/type_v` 数组长度必须等于 `n_layer`；长度不匹配返回 `InvalidArgument` |
@@ -185,3 +206,4 @@ Pareto 基准**，降低 TTFT 与 KV 写入量，同时以真实基准验证质�
 | 2026-10-20 | 升级为 AR002：加入 draft 模型、attention 全局/分层 top-k、Radix 前缀缓存、按层 KV 精度、自动调优与 Pareto 基准 | AR002 |
 | 2026-10-21 | 升级为 AR003：加入 head 级自适应稀疏（ranked 池 + 层×头 top-k 矩阵 patch、消融式 head 分类器）、在线质量风险控制器、TuneSearchSpace 增 head_adaptive 维度、Sample 增 risk_level/head_adaptive/retrieval_heads、classify-heads CLI 契约、sync_gitee.sh 交付 | AR003 |
 | 2026-10-22 | 升级为 AR004：加入压缩上下文分支（pool_blocks patch + 代表注入）、query-chunk 门控（qg_count/qg_rows/qg_bounds patch）、head 模式路由与金字塔先验、chunk_size=0 自动对齐 n_ubatch 语义、Gitee 开放复现契约（download_model.sh 双通道+SHA256、结果 CSV/图入库） | AR004 |
+| 2026-10-24 | 升级为 AR005：加入嵌入模型语义引擎（bge-small GGUF，EmbeddingScorer + EmbeddingSelectionScorer 多态适配，零 patch）、qg v2 组×块 2D 门控（每组本组分数因果 top-k，1D 回退字节等价）、head 任务内校准（--calibration-file 真实文本探针）、Selection 增 per_group_block_scores/score_source、Sample 增 semantic_score_ms 净值记账、语义降级链（embedding→qg v1→scalar→dense 逐级审计） | AR005 |
