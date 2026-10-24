@@ -8,6 +8,12 @@
 
 namespace edge_prefill {
 
+// AR005 FR-4: source of the offline probe segment. Random keeps the
+// AR004 fixed-seed vocabulary sampling (byte-identical default);
+// CalibrationText derives the segment from real-task text so head
+// classification reflects the deployment distribution.
+enum class ProbeSource { Random, CalibrationText };
+
 // Parameters of the offline head-classification probe (classify-heads).
 // Mirrored into head_profile.json so a profile records how it was produced.
 struct HeadProbeParams {
@@ -17,7 +23,18 @@ struct HeadProbeParams {
     uint32_t recent = 8;
     uint32_t probe_k = 8;
     uint64_t seed = 42;
+    // AR005: probe segment source. Defaults keep every AR004 call site
+    // byte-identical; CalibrationText also requires calibration_text.
+    ProbeSource source = ProbeSource::Random;
+    std::string calibration_text;
 };
+
+// AR005 FR-4: validates calibration text before any probe forward. Empty
+// or whitespace-only text carries no probe signal and is
+// InvalidArgument; text shorter than one block_len is legal (the probe
+// pads the segment cyclically, an audited truncation). block_len == 0 is
+// InvalidArgument.
+Status validate_calibration_text(const std::string& text, uint32_t block_len);
 
 // Per-(layer, head) sensitivity measured by the offline probe. `retrieval`
 // marks heads that must stay dense during adaptive sparse prefill.

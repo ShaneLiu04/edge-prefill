@@ -35,10 +35,19 @@ struct Selection {
     // prompt token. Empty for dense selections. Consumed by
     // AttentionSparsityController::build_query_gated; not serialized.
     std::vector<double> per_pos_scores;
+    // AR005 FR-2: G x B_orig semantic matrix (embedding engine active
+    // and query gating armed). Empty = the 1D v1 path. Rows follow the
+    // build_group_spans group order; columns index original prompt
+    // blocks (block b spans positions [b*32,(b+1)*32)).
+    std::vector<std::vector<double>> per_group_block_scores;
     uint32_t attention_top_k = 0;
     uint32_t total_tokens = 0;
     uint32_t selected_tokens = 0;
     bool dense = false;
+    // AR005: which engine produced per_pos_scores — "lexical" (idf
+    // fallback or draft-disabled) or DraftScorer::source() ("draft",
+    // "embedding"). Audited per request; never fabricated.
+    std::string score_source = "lexical";
     std::string reason;
 
     std::string to_json() const;
@@ -63,5 +72,11 @@ public:
                   DraftScorer* draft,
                   Selection* out) const;
 };
+
+// AR005: fusion defaults when the embedding engine is the active score
+// source — semantic evidence dominates while lexical/diversity/position
+// keep tie-breaking capacity. Applied only when the user has not
+// explicitly overridden the weights.
+SelectorWeights semantic_priority_weights();
 
 } // namespace edge_prefill

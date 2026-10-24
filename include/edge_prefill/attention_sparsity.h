@@ -183,11 +183,33 @@ public:
     // spaces return an empty plan (caller falls back); a score vector whose
     // length differs from total_tokens is InvalidArgument.
     static Status build_query_gated(const Selection& selection,
-                                    const std::vector<double>& per_pos_scores,
-                                    const QueryGatingOptions& opts,
-                                    std::vector<std::vector<int32_t>>* group_rows,
-                                    std::vector<int32_t>* q_bounds,
-                                    std::string* reason);
+                                     const std::vector<double>& per_pos_scores,
+                                     const QueryGatingOptions& opts,
+                                     std::vector<std::vector<int32_t>>* group_rows,
+                                     std::vector<int32_t>* q_bounds,
+                                     std::string* reason);
+
+    // AR005 FR-2: qg v2 overload. An empty group_block_scores matrix is a
+    // byte-exact fallback to the 1D overload (identical group_rows,
+    // q_bounds and reason — no suffix). A non-empty matrix supplies
+    // per-group block-level scores: row g must match the cap-adjusted
+    // group count of the v1 partition, every row must hold exactly
+    // n_prompt_blocks finite entries (column b scores original prompt
+    // block b, positions [b*32,(b+1)*32)), and violations return
+    // InvalidArgument with no silent truncation. Group g ranks blocks by
+    // matrix[g][b] instead of the shared 1D block mean; every other
+    // semantic (mandatory sink/recent anchors, causal eligibility, the
+    // block-granular top_k_per_group budget, the forced row-0 NaN guard,
+    // the single-group cap degradation) matches v1 exactly. The reason
+    // appends " src=embedding-2d" when the matrix is active.
+    static Status build_query_gated(const Selection& selection,
+                                     const std::vector<double>& per_pos_scores,
+                                     const std::vector<std::vector<double>>& group_block_scores,
+                                     uint32_t n_prompt_blocks,
+                                     const QueryGatingOptions& opts,
+                                     std::vector<std::vector<int32_t>>* group_rows,
+                                     std::vector<int32_t>* q_bounds,
+                                     std::string* reason);
 
     // AR005 FR-1: group span derivation for the semantic gating matrix.
     // Maps each query group of the v1 partition (row-space chunks of

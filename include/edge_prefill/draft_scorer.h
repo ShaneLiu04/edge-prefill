@@ -20,6 +20,10 @@ public:
     virtual Status score(const std::vector<llama_token>& tokens,
                          const std::string& query,
                          std::vector<double>* per_token_scores) = 0;
+    // Audit identity of the score source ("draft", "embedding"); recorded
+    // in Selection::score_source so results trace which engine produced
+    // the per-position relevance signal.
+    virtual const char* source() const { return "draft"; }
 };
 
 struct DraftScorerOptions {

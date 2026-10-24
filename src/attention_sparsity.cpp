@@ -529,6 +529,22 @@ Status AttentionSparsityController::build_query_gated(
         std::vector<std::vector<int32_t>>* group_rows,
         std::vector<int32_t>* q_bounds,
         std::string* reason) {
+    // v1: no per-group matrix — the 2D overload with an empty matrix is
+    // the byte-exact v1 path, so keep a single implementation.
+    return build_query_gated(selection, per_pos_scores,
+                             std::vector<std::vector<double>>(), 0, opts,
+                             group_rows, q_bounds, reason);
+}
+
+Status AttentionSparsityController::build_query_gated(
+        const Selection& selection,
+        const std::vector<double>& per_pos_scores,
+        const std::vector<std::vector<double>>& group_block_scores,
+        uint32_t n_prompt_blocks,
+        const QueryGatingOptions& opts,
+        std::vector<std::vector<int32_t>>* group_rows,
+        std::vector<int32_t>* q_bounds,
+        std::string* reason) {
     if (!group_rows || !q_bounds) {
         return Status::error(ErrorCode::InvalidArgument, "null query gating output");
     }
@@ -599,6 +615,37 @@ Status AttentionSparsityController::build_query_gated(
         capped = true;
     }
 
+    // AR005 FR-2: a non-empty matrix activates per-group block scores.
+    // Validate geometry up front against the cap-adjusted partition so a
+    // mismatched matrix never produces a partially-scored plan.
+    const bool use_2d = !group_block_scores.empty();
+    if (use_2d) {
+        if (n_prompt_blocks == 0) {
+            return Status::error(ErrorCode::InvalidArgument,
+                                 "n_prompt_blocks is 0 with a non-empty score matrix");
+        }
+        if (group_block_scores.size() != n_groups) {
+            return Status::error(ErrorCode::InvalidArgument,
+                                 "score matrix rows " +
+                                     std::to_string(group_block_scores.size()) +
+                                     " != group count " + std::to_string(n_groups));
+        }
+        for (const auto& row_scores : group_block_scores) {
+            if (row_scores.size() != n_prompt_blocks) {
+                return Status::error(
+                    ErrorCode::InvalidArgument,
+                    "score matrix row length " + std::to_string(row_scores.size()) +
+                        " != n_prompt_blocks " + std::to_string(n_prompt_blocks));
+            }
+            for (double v : row_scores) {
+                if (!std::isfinite(v)) {
+                    return Status::error(ErrorCode::InvalidArgument,
+                                         "non-finite score matrix entry");
+                }
+            }
+        }
+    }
+
     q_bounds->push_back(0);
     for (uint32_t g = 0; g < n_groups; ++g) {
         const uint32_t lo = std::min(g * eff_chunk, n_rows);
@@ -638,8 +685,12 @@ Status AttentionSparsityController::build_query_gated(
             if (blk_count[b] == 0) continue;
             if (blk_first_row[b] > hi - 1) continue;
             if (mandatory.count(b)) continue;
-            const double mean = blk_sum[b] / static_cast<double>(blk_count[b]);
-            eligible.push_back({b, mean});
+            // 2D: the group's own block score replaces the shared 1D
+            // mean; the sort and budget semantics below are unchanged.
+            const double score =
+                    use_2d ? group_block_scores[g][b]
+                           : blk_sum[b] / static_cast<double>(blk_count[b]);
+            eligible.push_back({b, score});
         }
         std::sort(eligible.begin(), eligible.end(),
                   [](const ScoredBlock& a, const ScoredBlock& b2) {
@@ -676,7 +727,8 @@ Status AttentionSparsityController::build_query_gated(
         *reason = "query-gating: groups=" + std::to_string(n_groups) +
                   (capped ? " (capped to global set)" : "") +
                   " rows=" + std::to_string(n_rows) +
-                  " budget=" + std::to_string(opts.top_k_per_group);
+                  " budget=" + std::to_string(opts.top_k_per_group) +
+                  (use_2d ? " src=embedding-2d" : "");
     }
     return Status::success();
 }

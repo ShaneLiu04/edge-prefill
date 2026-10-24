@@ -190,6 +190,9 @@ Status BlockSelector::select(const std::vector<llama_token>& tokens,
     out->mandatory_blocks.clear();
     out->block_indices.clear();
     out->token_indices.clear();
+    // Reset per call: a reused Selection must not leak the previous
+    // request's score source into the audit trail.
+    out->score_source = "lexical";
 
     if (n_tokens < opts.min_dense_tokens || opts.budget >= 0.95) {
         out->dense = true;
@@ -324,6 +327,7 @@ Status BlockSelector::select(const std::vector<llama_token>& tokens,
         // the request; never fabricate semantic scores.
         if (st.ok() && draft_per_token.size() == tokens.size()) {
             draft_enabled = true;
+            out->score_source = draft->source();
             for (uint32_t b = 0; b < n_blocks; ++b) {
                 const uint32_t begin = b * block_size;
                 const uint32_t end = std::min(n_tokens, begin + block_size);
@@ -499,6 +503,19 @@ Status BlockSelector::select(const std::vector<llama_token>& tokens,
     }
     out->selected_tokens = static_cast<uint32_t>(out->token_indices.size());
     return Status::success();
+}
+
+SelectorWeights semantic_priority_weights() {
+    // AR005: with the embedding engine active, semantic similarity is the
+    // strongest available relevance signal (bge query/block cosine vs the
+    // hashed-embedding proxies); 0.50 lets it decide while the remaining
+    // channels break ties and cover engine blind spots.
+    SelectorWeights w;
+    w.lexical = 0.20;
+    w.diversity = 0.15;
+    w.position = 0.15;
+    w.draft = 0.50;
+    return w;
 }
 
 } // namespace edge_prefill

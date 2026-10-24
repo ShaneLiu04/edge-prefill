@@ -43,7 +43,8 @@ add_library(edge_prefill
     src/backend.cpp
     src/selector.cpp
     src/draft_scorer.cpp
-    src/embedding_scorer.cpp
+        src/embedding_scorer.cpp
+        src/semantic_gate.cpp
     src/attention_sparsity.cpp
     src/prefix_cache.cpp
     src/chunk_scheduler.cpp

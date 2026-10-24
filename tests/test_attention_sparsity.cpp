@@ -1,9 +1,11 @@
 #include "test_framework.h"
 
 #include <algorithm>
+#include <limits>
 #include <numeric>
 #include <set>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "edge_prefill/attention_sparsity.h"
@@ -818,4 +820,456 @@ TEST_CASE(qg_switch_default_off) {
     CHECK(!cfg.query_gating);
     CHECK_EQ(cfg.query_chunk_size, 128u);
     CHECK_EQ(cfg.query_chunk_max, 16u);
+}
+
+// ================= AR005 FR-2: query-gated 2D overload =================
+
+namespace {
+
+// Row-space geometry of a selection at the fixed 32-row gating block
+// granularity: for every original prompt block, how many selected rows
+// it contributes and on which row it starts (token_indices is ascending,
+// so each block occupies a contiguous row range).
+struct BlockRows {
+    std::vector<uint32_t> count;  // selected rows per prompt block
+    std::vector<uint32_t> first;  // first row of each prompt block
+    uint32_t n_blocks = 0;
+};
+
+BlockRows block_rows_of(const Selection& sel) {
+    BlockRows br;
+    br.n_blocks = (sel.total_tokens + 31) / 32;
+    br.count.assign(br.n_blocks, 0);
+    for (uint32_t pos : sel.token_indices) ++br.count[pos / 32];
+    br.first.assign(br.n_blocks, 0);
+    uint32_t row = 0;
+    for (uint32_t b = 0; b < br.n_blocks; ++b) {
+        br.first[b] = row;
+        row += br.count[b];
+    }
+    return br;
+}
+
+// True when the row set contains at least one row of the block.
+bool rows_touch_block(const std::vector<int32_t>& rows, const BlockRows& br,
+                      uint32_t block) {
+    for (int32_t r : rows) {
+        const uint32_t u = static_cast<uint32_t>(r);
+        if (u >= br.first[block] && u < br.first[block] + br.count[block]) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// The non-empty block containing a row (mirrors the v1 recent-block
+// lookup: the last block whose first row is <= row).
+uint32_t block_of_row(const BlockRows& br, uint32_t row) {
+    uint32_t b = 0;
+    while (b + 1 < br.n_blocks && br.first[b + 1] <= row) ++b;
+    return b;
+}
+
+// The cap-adjusted group count of the v1 partition — the row count a 2D
+// score matrix must match (same contract as build_group_spans).
+uint32_t qg_group_count(const Selection& sel, const QueryGatingOptions& opts) {
+    std::vector<std::pair<uint32_t, uint32_t>> spans;
+    std::string reason;
+    CHECK_OK(AttentionSparsityController::build_group_spans(sel, opts, &spans,
+                                                            &reason));
+    return static_cast<uint32_t>(spans.size());
+}
+
+} // namespace
+
+// AR005 FR-2: per-group 2D scores let two groups rank different blocks
+// top — the differentiation v1's shared 1D scores cannot express.
+TEST_CASE(query_gated_2d_anti_degradation) {
+    const Selection sel = make_selection(4096, 0.5);
+    CHECK(!sel.dense);
+    const uint32_t n_rows = static_cast<uint32_t>(sel.token_indices.size());
+    CHECK(n_rows >= 256);
+
+    // Eight row-space chunks: multiple groups, comfortably under the cap.
+    QueryGatingOptions opts;
+    opts.query_chunk_size = (n_rows + 7) / 8;
+    opts.query_chunk_max = 16;
+    // One full 32-row block per group: once the top block is packed no
+    // other block can squeeze in, so each row set is exactly the
+    // mandatory anchors plus the per-group top block.
+    opts.top_k_per_group = 32;
+    const uint32_t n_groups = qg_group_count(sel, opts);
+    CHECK(n_groups >= 2);
+
+    const BlockRows br = block_rows_of(sel);
+    const uint32_t n_prompt_blocks = br.n_blocks;
+    const uint32_t group_a = n_groups - 2;
+    const uint32_t group_b = n_groups - 1;
+    const uint32_t sink_block = sel.token_indices.front() / 32;
+    // Mandatory recent anchors of the two groups under test (group 0 has
+    // no recent anchor).
+    const uint32_t recent_a = group_a > 0
+            ? block_of_row(br, group_a * opts.query_chunk_size - 1)
+            : sink_block;
+    const uint32_t recent_b =
+            block_of_row(br, group_b * opts.query_chunk_size - 1);
+
+    // Two full blocks causally visible from both groups, distinct from
+    // every mandatory anchor of the two groups.
+    std::vector<uint32_t> cand;
+    for (uint32_t b = 0; b < n_prompt_blocks; ++b) {
+        if (br.count[b] != 32) continue;
+        if (br.first[b] >= (group_a + 1) * opts.query_chunk_size) continue;
+        if (b == sink_block || b == recent_a || b == recent_b) continue;
+        cand.push_back(b);
+    }
+    CHECK(cand.size() >= 2);
+    const uint32_t block_x = cand[0];
+    const uint32_t block_y = cand[1];
+
+    std::vector<std::vector<double>> matrix(
+            n_groups, std::vector<double>(n_prompt_blocks, 0.0));
+    matrix[group_a][block_x] = 10.0;
+    matrix[group_b][block_y] = 10.0;
+
+    std::vector<std::vector<int32_t>> groups;
+    std::vector<int32_t> bounds;
+    std::string reason;
+    CHECK_OK(AttentionSparsityController::build_query_gated(
+            sel, std::vector<double>(sel.total_tokens, 0.0), matrix,
+            n_prompt_blocks, opts, &groups, &bounds, &reason));
+    CHECK_EQ(groups.size(), static_cast<size_t>(n_groups));
+    CHECK_EQ(bounds.size(), static_cast<size_t>(n_groups) + 1);
+    CHECK_EQ(bounds.front(), 0);
+    CHECK_EQ(static_cast<uint32_t>(bounds.back()), n_rows);
+
+    // The per-group differentiation: A gets X (not Y), B gets Y (not X).
+    CHECK(rows_touch_block(groups[group_a], br, block_x));
+    CHECK(!rows_touch_block(groups[group_a], br, block_y));
+    CHECK(rows_touch_block(groups[group_b], br, block_y));
+    CHECK(!rows_touch_block(groups[group_b], br, block_x));
+
+    // Reason: the v1 format with the 2D source suffix appended.
+    const std::string suffix = " src=embedding-2d";
+    CHECK(reason.size() >= suffix.size() &&
+          reason.compare(reason.size() - suffix.size(), suffix.size(),
+                         suffix) == 0);
+
+    // Anti-degradation contrast: the same block preference expressed
+    // through v1's shared 1D scores forces X into every group —
+    // including group B — which is exactly what the 2D overload avoids.
+    std::vector<double> per_pos(sel.total_tokens, 0.0);
+    for (uint32_t i = block_x * 32; i < block_x * 32 + 32; ++i) {
+        per_pos[i] = 10.0;
+    }
+    std::vector<std::vector<int32_t>> v1_groups;
+    std::vector<int32_t> v1_bounds;
+    std::string v1_reason;
+    CHECK_OK(AttentionSparsityController::build_query_gated(
+            sel, per_pos, opts, &v1_groups, &v1_bounds, &v1_reason));
+    CHECK_EQ(v1_groups.size(), static_cast<size_t>(n_groups));
+    CHECK(rows_touch_block(v1_groups[group_b], br, block_x));
+}
+
+// AR005 FR-2: an empty score matrix is a byte-exact fallback to v1.
+TEST_CASE(query_gated_2d_empty_matrix_equivalence) {
+    const Selection sel = make_selection(4096, 0.5);
+    CHECK(!sel.dense);
+    std::vector<double> per_pos(sel.total_tokens, 0.0);
+    constexpr uint32_t needle_pos = 37 * 32 + 5;
+    for (uint32_t i = needle_pos & ~31u; i < (needle_pos | 31u); ++i) {
+        per_pos[i] = 1.0;
+    }
+    const uint32_t n_prompt_blocks = (sel.total_tokens + 31) / 32;
+
+    QueryGatingOptions multi;  // several groups
+    multi.query_chunk_size = 128;
+    multi.query_chunk_max = 16;
+    multi.top_k_per_group = 256;
+    QueryGatingOptions capped;  // degrades to a single global group
+    capped.query_chunk_size = 64;
+    capped.query_chunk_max = 16;
+    capped.top_k_per_group = 256;
+
+    for (const QueryGatingOptions* opts : {&multi, &capped}) {
+        std::vector<std::vector<int32_t>> v1_groups;
+        std::vector<int32_t> v1_bounds;
+        std::string v1_reason;
+        CHECK_OK(AttentionSparsityController::build_query_gated(
+                sel, per_pos, *opts, &v1_groups, &v1_bounds, &v1_reason));
+        CHECK(!v1_groups.empty());
+
+        std::vector<std::vector<int32_t>> groups;
+        std::vector<int32_t> bounds;
+        std::string reason;
+        CHECK_OK(AttentionSparsityController::build_query_gated(
+                sel, per_pos, std::vector<std::vector<double>>(),
+                n_prompt_blocks, *opts, &groups, &bounds, &reason));
+        CHECK_EQ(groups.size(), v1_groups.size());
+        for (size_t g = 0; g < v1_groups.size(); ++g) {
+            CHECK_EQ(groups[g], v1_groups[g]);
+        }
+        CHECK_EQ(bounds, v1_bounds);
+        // Byte equivalence includes the reason: no 2D suffix on fallback.
+        CHECK_EQ(reason, v1_reason);
+        CHECK(reason.find("src=embedding-2d") == std::string::npos);
+    }
+}
+
+// AR005 FR-2: matrix geometry and finiteness are validated up front —
+// no silent truncation.
+TEST_CASE(query_gated_2d_invalid_matrix) {
+    const Selection sel = make_selection(4096, 0.5);
+    CHECK(!sel.dense);
+    const uint32_t n_rows = static_cast<uint32_t>(sel.token_indices.size());
+    QueryGatingOptions opts;
+    opts.query_chunk_size = (n_rows + 7) / 8;
+    opts.query_chunk_max = 16;
+    opts.top_k_per_group = 256;
+    const uint32_t n_groups = qg_group_count(sel, opts);
+    CHECK(n_groups >= 2);
+    const uint32_t n_prompt_blocks = (sel.total_tokens + 31) / 32;
+    const std::vector<double> per_pos(sel.total_tokens, 0.0);
+
+    std::vector<std::vector<int32_t>> groups;
+    std::vector<int32_t> bounds;
+    std::string reason;
+
+    // Sanity: a well-formed matrix passes.
+    const std::vector<std::vector<double>> valid(
+            n_groups, std::vector<double>(n_prompt_blocks, 0.0));
+    CHECK_OK(AttentionSparsityController::build_query_gated(
+            sel, per_pos, valid, n_prompt_blocks, opts, &groups, &bounds,
+            &reason));
+
+    // Row count must equal the cap-adjusted group count.
+    const std::vector<std::vector<double>> short_rows(
+            n_groups - 1, std::vector<double>(n_prompt_blocks, 0.0));
+    CHECK_ERR(AttentionSparsityController::build_query_gated(
+                      sel, per_pos, short_rows, n_prompt_blocks, opts, &groups,
+                      &bounds, &reason),
+              ErrorCode::InvalidArgument);
+    const std::vector<std::vector<double>> long_rows(
+            n_groups + 1, std::vector<double>(n_prompt_blocks, 0.0));
+    CHECK_ERR(AttentionSparsityController::build_query_gated(
+                      sel, per_pos, long_rows, n_prompt_blocks, opts, &groups,
+                      &bounds, &reason),
+              ErrorCode::InvalidArgument);
+
+    // Every row must have exactly n_prompt_blocks columns.
+    std::vector<std::vector<double>> short_cols = valid;
+    short_cols[0].resize(n_prompt_blocks - 1);
+    CHECK_ERR(AttentionSparsityController::build_query_gated(
+                      sel, per_pos, short_cols, n_prompt_blocks, opts, &groups,
+                      &bounds, &reason),
+              ErrorCode::InvalidArgument);
+    std::vector<std::vector<double>> long_cols = valid;
+    long_cols[1].resize(n_prompt_blocks + 1);
+    CHECK_ERR(AttentionSparsityController::build_query_gated(
+                      sel, per_pos, long_cols, n_prompt_blocks, opts, &groups,
+                      &bounds, &reason),
+              ErrorCode::InvalidArgument);
+
+    // Non-finite entries are rejected, never clamped.
+    std::vector<std::vector<double>> with_nan = valid;
+    with_nan[n_groups - 1][n_prompt_blocks - 1] =
+            std::numeric_limits<double>::quiet_NaN();
+    CHECK_ERR(AttentionSparsityController::build_query_gated(
+                      sel, per_pos, with_nan, n_prompt_blocks, opts, &groups,
+                      &bounds, &reason),
+              ErrorCode::InvalidArgument);
+    std::vector<std::vector<double>> with_inf = valid;
+    with_inf[0][0] = std::numeric_limits<double>::infinity();
+    CHECK_ERR(AttentionSparsityController::build_query_gated(
+                      sel, per_pos, with_inf, n_prompt_blocks, opts, &groups,
+                      &bounds, &reason),
+              ErrorCode::InvalidArgument);
+    std::vector<std::vector<double>> with_neg_inf = valid;
+    with_neg_inf[0][0] = -std::numeric_limits<double>::infinity();
+    CHECK_ERR(AttentionSparsityController::build_query_gated(
+                      sel, per_pos, with_neg_inf, n_prompt_blocks, opts,
+                      &groups, &bounds, &reason),
+              ErrorCode::InvalidArgument);
+
+    // A non-empty matrix with zero prompt blocks is contradictory.
+    CHECK_ERR(AttentionSparsityController::build_query_gated(
+                      sel, per_pos, valid, 0, opts, &groups, &bounds, &reason),
+              ErrorCode::InvalidArgument);
+}
+
+// AR005 FR-2: with 2D scores active, causality, the block-granular row
+// budget and the mandatory sink/recent anchors keep v1 semantics.
+TEST_CASE(query_gated_2d_causal_and_budget_consistency) {
+    const Selection sel = make_selection(4096, 0.5);
+    CHECK(!sel.dense);
+    const uint32_t n_rows = static_cast<uint32_t>(sel.token_indices.size());
+    QueryGatingOptions opts;
+    opts.query_chunk_size = (n_rows + 7) / 8;
+    opts.query_chunk_max = 16;
+    opts.top_k_per_group = 32;  // exactly one full block per group
+    const uint32_t n_groups = qg_group_count(sel, opts);
+    CHECK(n_groups >= 2);
+
+    const BlockRows br = block_rows_of(sel);
+    const uint32_t n_prompt_blocks = br.n_blocks;
+    const uint32_t hi0 = opts.query_chunk_size;  // < n_rows (n_groups >= 2)
+    CHECK(hi0 < n_rows);
+    const uint32_t sink_block = sel.token_indices.front() / 32;
+
+    // Z: causally infeasible for group 0 (its first row is at or beyond
+    // the group's last query row) — the last selected block qualifies.
+    uint32_t block_z = 0;
+    for (uint32_t b = 0; b < n_prompt_blocks; ++b) {
+        if (br.count[b] > 0) block_z = b;
+    }
+    CHECK(br.count[block_z] > 0);
+    CHECK(br.first[block_z] >= hi0);
+
+    // W and V: two full blocks causally visible from group 0, excluding
+    // the mandatory sink.
+    std::vector<uint32_t> cand;
+    for (uint32_t b = 0; b < n_prompt_blocks; ++b) {
+        if (br.count[b] != 32) continue;
+        if (br.first[b] >= hi0) continue;
+        if (b == sink_block) continue;
+        cand.push_back(b);
+    }
+    CHECK(cand.size() >= 2);
+    const uint32_t block_w = cand[0];
+    const uint32_t block_v = cand[1];
+
+    // Group 0 ranks the infeasible Z highest — it must still be excluded;
+    // W packs into the budget and V no longer fits (whole-block packing).
+    std::vector<std::vector<double>> matrix(
+            n_groups, std::vector<double>(n_prompt_blocks, 0.0));
+    matrix[0][block_z] = 10.0;
+    matrix[0][block_w] = 9.0;
+    matrix[0][block_v] = 5.0;
+
+    std::vector<std::vector<int32_t>> groups;
+    std::vector<int32_t> bounds;
+    std::string reason;
+    CHECK_OK(AttentionSparsityController::build_query_gated(
+            sel, std::vector<double>(sel.total_tokens, 0.0), matrix,
+            n_prompt_blocks, opts, &groups, &bounds, &reason));
+    CHECK_EQ(groups.size(), static_cast<size_t>(n_groups));
+    CHECK_EQ(bounds.front(), 0);
+    CHECK_EQ(static_cast<uint32_t>(bounds.back()), n_rows);
+
+    CHECK(rows_touch_block(groups[0], br, block_w));
+    CHECK(!rows_touch_block(groups[0], br, block_v));
+    CHECK(!rows_touch_block(groups[0], br, block_z));
+    // Exactly the sink block plus W: the budget admits nothing else.
+    CHECK_EQ(groups[0].size(),
+             static_cast<size_t>(br.count[sink_block] + br.count[block_w]));
+    CHECK_EQ(groups[0].front(), 0);
+
+    // Sink and recent anchors stay mandatory for later groups.
+    CHECK_EQ(groups[1].front(), 0);
+    bool has_recent = false;
+    for (int32_t r : groups[1]) {
+        if (r == bounds[1] - 1) has_recent = true;
+    }
+    CHECK(has_recent);
+}
+
+// AR005 FR-2: a group whose causal window leaves no eligible block still
+// gets a non-empty row set containing row 0 (the v1 NaN guard).
+TEST_CASE(query_gated_2d_empty_rowset_forces_row_zero) {
+    const Selection sel = make_selection(4096, 0.5);
+    CHECK(!sel.dense);
+    const uint32_t n_rows = static_cast<uint32_t>(sel.token_indices.size());
+    QueryGatingOptions opts;
+    // 32-row chunks: group 0's causal window sees only the sink block,
+    // which is mandatory and never ranked — no eligible block remains.
+    opts.query_chunk_size = 32;
+    opts.query_chunk_max = 4096;  // keep every chunk group
+    opts.top_k_per_group = 4096;  // the budget is not the limiter here
+    const uint32_t n_groups = qg_group_count(sel, opts);
+    CHECK(n_groups >= 2);
+    CHECK_EQ(n_groups, (n_rows + 31) / 32);
+
+    const BlockRows br = block_rows_of(sel);
+    const uint32_t n_prompt_blocks = br.n_blocks;
+    const uint32_t sink_block = sel.token_indices.front() / 32;
+
+    std::vector<std::vector<double>> matrix(
+            n_groups, std::vector<double>(n_prompt_blocks, 0.0));
+    std::vector<std::vector<int32_t>> groups;
+    std::vector<int32_t> bounds;
+    std::string reason;
+    CHECK_OK(AttentionSparsityController::build_query_gated(
+            sel, std::vector<double>(sel.total_tokens, 0.0), matrix,
+            n_prompt_blocks, opts, &groups, &bounds, &reason));
+    CHECK_EQ(groups.size(), static_cast<size_t>(n_groups));
+
+    // Group 0: only the sink block is causally visible, so its row set is
+    // exactly the sink rows — non-empty and anchored at row 0.
+    CHECK(!groups[0].empty());
+    CHECK_EQ(groups[0].front(), 0);
+    CHECK_EQ(groups[0].size(), static_cast<size_t>(br.count[sink_block]));
+    for (int32_t r : groups[0]) {
+        CHECK(static_cast<uint32_t>(r) < br.count[sink_block]);
+    }
+    // Every group keeps the mandatory sink row 0.
+    for (size_t g = 0; g < groups.size(); ++g) {
+        CHECK(!groups[g].empty());
+        CHECK_EQ(groups[g].front(), 0);
+    }
+    CHECK(reason.find("src=embedding-2d") != std::string::npos);
+}
+
+// AR005 FR-2: beyond the group cap the plan degrades to a single group
+// and the matrix must degrade with it.
+TEST_CASE(query_gated_2d_degrade_single_group) {
+    const Selection sel = make_selection(4096, 0.5);
+    CHECK(!sel.dense);
+    const uint32_t n_rows = static_cast<uint32_t>(sel.token_indices.size());
+    CHECK((n_rows + 63) / 64 > 16);  // the raw group count exceeds the cap
+    QueryGatingOptions opts;
+    opts.query_chunk_size = 64;
+    opts.query_chunk_max = 16;
+    opts.top_k_per_group = 256;
+    CHECK_EQ(qg_group_count(sel, opts), 1u);
+
+    const uint32_t n_prompt_blocks = (sel.total_tokens + 31) / 32;
+    const std::vector<double> per_pos(sel.total_tokens, 0.0);
+    std::vector<std::vector<int32_t>> groups;
+    std::vector<int32_t> bounds;
+    std::string reason;
+
+    // Degraded to one group: only a single-row matrix is valid.
+    const std::vector<std::vector<double>> two_rows(
+            2, std::vector<double>(n_prompt_blocks, 0.0));
+    CHECK_ERR(AttentionSparsityController::build_query_gated(
+                      sel, per_pos, two_rows, n_prompt_blocks, opts, &groups,
+                      &bounds, &reason),
+              ErrorCode::InvalidArgument);
+
+    const std::vector<std::vector<double>> one_row(
+            1, std::vector<double>(n_prompt_blocks, 0.0));
+    CHECK_OK(AttentionSparsityController::build_query_gated(
+            sel, per_pos, one_row, n_prompt_blocks, opts, &groups, &bounds,
+            &reason));
+    CHECK_EQ(groups.size(), static_cast<size_t>(1));
+    CHECK_EQ(bounds.size(), static_cast<size_t>(2));
+    CHECK_EQ(bounds.front(), 0);
+    CHECK_EQ(static_cast<uint32_t>(bounds.back()), n_rows);
+    CHECK(reason.find("capped") != std::string::npos);
+    CHECK(reason.find("src=embedding-2d") != std::string::npos);
+
+    // Empty matrix under the cap: exact v1 fallback, no 2D suffix.
+    std::vector<std::vector<int32_t>> v1_groups;
+    std::vector<int32_t> v1_bounds;
+    std::string v1_reason;
+    CHECK_OK(AttentionSparsityController::build_query_gated(
+            sel, per_pos, opts, &v1_groups, &v1_bounds, &v1_reason));
+    CHECK_EQ(v1_groups.size(), static_cast<size_t>(1));
+    CHECK_OK(AttentionSparsityController::build_query_gated(
+            sel, per_pos, std::vector<std::vector<double>>(),
+            n_prompt_blocks, opts, &groups, &bounds, &reason));
+    CHECK_EQ(groups.size(), v1_groups.size());
+    CHECK_EQ(groups[0], v1_groups[0]);
+    CHECK_EQ(bounds, v1_bounds);
+    CHECK_EQ(reason, v1_reason);
 }

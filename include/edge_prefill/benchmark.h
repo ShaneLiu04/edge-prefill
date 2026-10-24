@@ -44,6 +44,14 @@ struct BenchmarkConfig {
     uint32_t query_chunk_size = 128;
     uint32_t query_chunk_max = 16;
     uint32_t query_top_k_per_group = 256;
+    // AR005: embedding GGUF activates the semantic engine for selection
+    // and upgrades query gating to the per-group 2D matrix. Explicit
+    // configuration never degrades: a load failure fails the run.
+    std::string embedding_model;
+    // Selector fusion weights and whether the user pinned them (pinned
+    // weights suppress the semantic-priority default).
+    SelectorWeights weights;
+    bool weights_overridden = false;
     // GPU offload: layers above this index move to the GPU backend (99 =
     // full offload). 0 keeps everything on CPU.
     int32_t n_gpu_layers = 0;

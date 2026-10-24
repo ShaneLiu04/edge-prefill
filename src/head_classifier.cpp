@@ -13,18 +13,43 @@ Status invalid(const std::string& message) {
     return Status::error(ErrorCode::InvalidArgument, message);
 }
 
-// Deterministic probe sequence: rejection-sample non-control, non-EOG
-// tokens from the vocabulary with a fixed-seed generator so the same model
-// and parameters always produce the same sequence (and thus the same
-// profile, byte for byte).
+// Deterministic probe sequence. Random: rejection-sample non-control,
+// non-EOG tokens from the vocabulary with a fixed-seed generator so the
+// same model and parameters always produce the same sequence (and thus
+// the same profile, byte for byte). CalibrationText: the segment is the
+// first block_len tokens of the tokenized calibration text (cyclically
+// padded when the text is shorter than one segment — an audited
+// truncation, never a failure), repeated to the probe length.
 Status make_probe_tokens(const LlamaBackend& backend, const HeadProbeParams& params,
                          uint32_t n, std::vector<llama_token>* out) {
     const llama_vocab* vocab = backend.vocab();
     const int32_t n_vocab = backend.n_vocab();
     if (!vocab || n_vocab <= 0) return invalid("vocabulary is not available");
-    std::mt19937_64 rng(params.seed);
     out->clear();
     out->reserve(n);
+    if (params.source == ProbeSource::CalibrationText) {
+        std::vector<llama_token> text_tokens;
+        const char* text = params.calibration_text.c_str();
+        const int32_t text_len = static_cast<int32_t>(params.calibration_text.size());
+        int32_t needed =
+                llama_tokenize(vocab, text, text_len, nullptr, 0,
+                               /*add_special=*/false, /*parse_special=*/true);
+        if (needed == 0) return invalid("calibration text tokenizes to no tokens");
+        if (needed < 0) needed = -needed;
+        text_tokens.resize(static_cast<size_t>(needed));
+        const int32_t n_tok =
+                llama_tokenize(vocab, text, text_len, text_tokens.data(), needed,
+                               /*add_special=*/false, /*parse_special=*/true);
+        if (n_tok <= 0) return invalid("calibration text tokenization failed");
+        text_tokens.resize(static_cast<size_t>(n_tok));
+        const size_t seg =
+                std::min<size_t>(params.block_len, text_tokens.size());
+        for (uint32_t i = 0; i < n; ++i) {
+            out->push_back(text_tokens[i % seg]);
+        }
+        return Status::success();
+    }
+    std::mt19937_64 rng(params.seed);
     // Guard against a pathological vocabulary where every token is rejected:
     // fail loudly instead of looping forever.
     uint32_t consecutive_rejections = 0;
@@ -109,6 +134,12 @@ Status HeadClassifier::classify(LlamaBackend* backend, const HeadProbeParams& pa
     if (params.probe_k == 0) return invalid("probe probe_k must be >= 1");
     if (params.sink + params.recent == 0) {
         return invalid("probe sink+recent must be >= 1: the ablated head needs a row pool");
+    }
+    // AR005: reject unusable calibration text before any forward pass.
+    if (params.source == ProbeSource::CalibrationText) {
+        const Status st = validate_calibration_text(params.calibration_text,
+                                                    params.block_len);
+        if (!st.ok()) return st;
     }
 
     const int32_t n_layer = backend->n_layer();

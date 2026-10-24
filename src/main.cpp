@@ -5,6 +5,7 @@
 #include <cstring>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -17,6 +18,7 @@
 #include "edge_prefill/benchmark.h"
 #include "edge_prefill/config.h"
 #include "edge_prefill/draft_scorer.h"
+#include "edge_prefill/embedding_scorer.h"
 #include "edge_prefill/ffn_skip.h"
 #include "edge_prefill/head_classifier.h"
 #include "edge_prefill/json_writer.h"
@@ -26,6 +28,7 @@
 #include "edge_prefill/prefix_cache.h"
 #include "edge_prefill/selector.h"
 #include "edge_prefill/sparse_prefill.h"
+#include "edge_prefill/semantic_gate.h"
 
 namespace edge_prefill {
 namespace {
@@ -47,6 +50,7 @@ struct Args {
     std::string attn_top_k_layers;
     std::string head_profile;
     std::string output;
+    std::string calibration_file;
     uint32_t probe_block_len = 32;
     uint32_t probe_repeats = 8;
     uint32_t probe_k = 8;
@@ -87,6 +91,15 @@ struct Args {
     bool query_top_k_per_group_set = false;
     double budget = 0.5;
     bool budget_set = false;
+    std::string embedding_model;
+    double selector_w_lexical = 0.0;
+    bool selector_w_lexical_set = false;
+    double selector_w_diversity = 0.0;
+    bool selector_w_diversity_set = false;
+    double selector_w_position = 0.0;
+    bool selector_w_position_set = false;
+    double selector_w_draft = 0.0;
+    bool selector_w_draft_set = false;
     bool chat = false;
     bool json = false;
     bool verbose = false;
@@ -106,6 +119,9 @@ void usage() {
         "  --mode latency|balanced|quality|reuse|dense\n"
         "  --budget <0..1>   --kv-type f16|q8_0|q4_0   --skip-ffn <spec>\n"
         "  --draft-model M   --attn-top-k N  --attn-top-k-layers 4,8,16\n"
+        "  --embedding-model P  (bge-small style GGUF; activates semantic gating)\n"
+        "  --selector-w-lexical F  --selector-w-diversity F\n"
+        "  --selector-w-position F  --selector-w-draft F\n"
         "  --head-profile P  --head-adaptive on|off  --head-retrieval-threshold F\n"
         "  --head-pattern-routing on|off  --pyramid-prior on|off\n"
         "  --pyramid-k-min N  --pyramid-k-max N  --pool-branches on|off\n"
@@ -113,6 +129,7 @@ void usage() {
         "  --query-top-k N\n"
         "  --risk-guard on|off\n"
         "  --probe-block-len N  --probe-repeats N  --probe-k N  --output F\n"
+        "  --calibration-file F  (probe segment from real-task text)\n"
         "  --threads N       --n-ctx N                 --n-ubatch N\n"
         "  --max-new-tokens N  --chat   --dump-plan P  --dump-selection P\n"
         "  --verbose\n";
@@ -181,6 +198,39 @@ Status parse_args(int argc, char** argv, Args* args) {
         } else if (flag == "--draft-model") {
             auto st = next(&args->draft_model);
             if (!st.ok()) return st;
+        } else if (flag == "--embedding-model") {
+            auto st = next(&args->embedding_model);
+            if (!st.ok()) return st;
+        } else if (flag == "--selector-w-lexical" || flag == "--selector-w-diversity" ||
+                   flag == "--selector-w-position" || flag == "--selector-w-draft") {
+            std::string value;
+            auto st = next(&value);
+            if (!st.ok()) return st;
+            double parsed = 0.0;
+            try {
+                size_t pos = 0;
+                parsed = std::stod(value, &pos);
+                if (pos != value.size() || parsed < 0.0) {
+                    return Status::error(ErrorCode::InvalidArgument,
+                                         "invalid " + flag + ": " + value);
+                }
+            } catch (...) {
+                return Status::error(ErrorCode::InvalidArgument,
+                                     "invalid " + flag + ": " + value);
+            }
+            if (flag == "--selector-w-lexical") {
+                args->selector_w_lexical = parsed;
+                args->selector_w_lexical_set = true;
+            } else if (flag == "--selector-w-diversity") {
+                args->selector_w_diversity = parsed;
+                args->selector_w_diversity_set = true;
+            } else if (flag == "--selector-w-position") {
+                args->selector_w_position = parsed;
+                args->selector_w_position_set = true;
+            } else {
+                args->selector_w_draft = parsed;
+                args->selector_w_draft_set = true;
+            }
         } else if (flag == "--attn-top-k-layers") {
             auto st = next(&args->attn_top_k_layers);
             if (!st.ok()) return st;
@@ -346,6 +396,9 @@ Status parse_args(int argc, char** argv, Args* args) {
             args->query_top_k_per_group_set = true;
         } else if (flag == "--output") {
             auto st = next(&args->output);
+            if (!st.ok()) return st;
+        } else if (flag == "--calibration-file") {
+            auto st = next(&args->calibration_file);
             if (!st.ok()) return st;
         } else if (flag == "--probe-block-len") {
             std::string value;
@@ -527,6 +580,23 @@ Status apply_common_config(const Args& args, Config* cfg) {
         cfg->skip_ffn_mask = 0; // parsed after model load (needs n_layer)
     }
     if (!args.draft_model.empty()) cfg->draft_model_path = args.draft_model;
+    if (!args.embedding_model.empty()) cfg->embedding_model = args.embedding_model;
+    if (args.selector_w_lexical_set) {
+        cfg->weights.lexical = args.selector_w_lexical;
+        cfg->weights_overridden = true;
+    }
+    if (args.selector_w_diversity_set) {
+        cfg->weights.diversity = args.selector_w_diversity;
+        cfg->weights_overridden = true;
+    }
+    if (args.selector_w_position_set) {
+        cfg->weights.position = args.selector_w_position;
+        cfg->weights_overridden = true;
+    }
+    if (args.selector_w_draft_set) {
+        cfg->weights.draft = args.selector_w_draft;
+        cfg->weights_overridden = true;
+    }
     if (args.attn_top_k_set) cfg->attn_top_k = args.attn_top_k;
     if (!args.attn_top_k_layers.empty()) cfg->attn_top_k_layers = args.attn_top_k_layers;
     if (!args.head_profile.empty()) cfg->head_profile_path = args.head_profile;
@@ -619,6 +689,17 @@ Status run_command(const Args& args) {
         }
     }
 
+    // AR005: explicit embedding configuration never degrades — a failed
+    // load is a hard error so the semantic path is either real or absent.
+    EmbeddingScorer embed;
+    if (!cfg.embedding_model.empty()) {
+        auto embed_st = embed.load_model(cfg.embedding_model, cfg.n_threads);
+        if (!embed_st.ok()) {
+            LlamaBackend::shutdown();
+            return embed_st;
+        }
+    }
+
     std::string prompt = cfg.use_chat_template ? chat_prompt(backend.model(), cfg.prompt)
                                                : cfg.prompt;
     std::vector<llama_token> tokens;
@@ -687,10 +768,31 @@ Status run_command(const Args& args) {
     sopts.recent_blocks = run_cfg.recent_blocks;
     sopts.coverage_stride = run_cfg.coverage_stride;
     sopts.weights = run_cfg.weights;
+    // AR005: semantic evidence dominates the fusion when the embedding
+    // engine is active, unless the user pinned weights or pure latency
+    // mode makes the extra encoding cost the wrong trade.
+    if (embed.loaded() && run_cfg.mode != Mode::Latency && !run_cfg.weights_overridden) {
+        sopts.weights = semantic_priority_weights();
+    }
     Selection selection;
     BlockSelector selector;
-    st = selector.select(tokens, run_cfg.prompt, pieces, sopts,
-                         draft.loaded() ? &draft : nullptr, &selection);
+    // The embedding adapter outranks the draft scorer: the standalone
+    // encoder is the AR005 primary signal, the draft model the fallback.
+    EmbeddingSelectionScorer embed_adapter(embed.loaded() ? &embed : nullptr,
+                                           &pieces, run_cfg.block_size);
+    DraftScorer* selection_scorer =
+            embed.loaded() ? static_cast<DraftScorer*>(&embed_adapter)
+                           : (draft.loaded() ? static_cast<DraftScorer*>(&draft)
+                                             : nullptr);
+    // AR005 FR-5: selection-stage scoring time (semantic encoding when the
+    // embedding engine is active, draft forward otherwise) is accounted
+    // separately from the prefill TTFT so speedups stay net-honest.
+    const auto sel_begin = std::chrono::steady_clock::now();
+    st = selector.select(tokens, run_cfg.prompt, pieces, sopts, selection_scorer,
+                         &selection);
+    const double select_ms = std::chrono::duration<double, std::milli>(
+                                     std::chrono::steady_clock::now() - sel_begin)
+                                     .count();
     if (!st.ok()) {
         LlamaBackend::shutdown();
         return st;
@@ -827,10 +929,21 @@ Status run_command(const Args& args) {
         }
     }
 
-    // AR004 FR-3: query-chunk gating. The head matrix path wins
-    // (graph-level exclusivity, v1); gating replaces the scalar gather
-    // and pool rides only on the scalar gather, so both are off while
-    // gating is armed.
+    // AR004 FR-3 / AR005 FR-2: query-chunk gating. The head matrix path
+    // wins (graph-level exclusivity, v1); gating replaces the scalar
+    // gather and pool rides only on the scalar gather, so both are off
+    // while gating is armed. With the embedding engine active the plan
+    // upgrades to the per-group 2D matrix; every degradation step is
+    // audited, never silent.
+    std::string qg_source;
+    if (run_cfg.query_gating && !popts.enable_head_adaptive && !selection.dense) {
+        if (!embed.loaded()) {
+            log_debug("qg: embedding-disabled (no embedding model configured)");
+        }
+        if (selection.per_pos_scores.size() != selection.total_tokens) {
+            log_debug("qg: lexical-1d-unavailable (per-position scores missing)");
+        }
+    }
     if (run_cfg.query_gating && !popts.enable_head_adaptive &&
         !selection.dense &&
         selection.per_pos_scores.size() == selection.total_tokens) {
@@ -838,9 +951,60 @@ Status run_command(const Args& args) {
         qg_opts.query_chunk_size = run_cfg.query_chunk_size;
         qg_opts.query_chunk_max = run_cfg.query_chunk_max;
         qg_opts.top_k_per_group = run_cfg.query_top_k_per_group;
+        if (embed.loaded()) {
+            // AR005 FR-2: group texts are the raw contiguous slices of
+            // the group token spans (context included), block texts the
+            // original 32-token blocks; failure degrades to the 1D path
+            // with an audit instead of failing the request.
+            std::vector<std::pair<uint32_t, uint32_t>> spans;
+            std::string span_reason;
+            if (AttentionSparsityController::build_group_spans(
+                        selection, qg_opts, &spans, &span_reason).ok() &&
+                !spans.empty()) {
+                std::vector<std::string> group_texts;
+                group_texts.reserve(spans.size());
+                for (const auto& span : spans) {
+                    std::string text;
+                    for (uint32_t i = span.first; i < span.second; ++i) {
+                        text += pieces[i];
+                    }
+                    group_texts.push_back(std::move(text));
+                }
+                const uint32_t bs = run_cfg.block_size;
+                const uint32_t n_prompt_blocks =
+                        (selection.total_tokens + bs - 1) / bs;
+                std::vector<std::string> block_texts(n_prompt_blocks);
+                for (uint32_t b = 0; b < n_prompt_blocks; ++b) {
+                    const uint32_t begin = b * bs;
+                    const uint32_t end =
+                            std::min(selection.total_tokens, begin + bs);
+                    for (uint32_t i = begin; i < end; ++i) {
+                        block_texts[b] += pieces[i];
+                    }
+                }
+                std::vector<std::vector<double>> matrix;
+                auto score_st =
+                        embed.score_group_block(group_texts, block_texts, &matrix);
+                if (score_st.ok() && matrix.size() == spans.size()) {
+                    selection.per_group_block_scores = std::move(matrix);
+                } else {
+                    log_warn("semantic qg matrix unavailable (" + score_st.message +
+                             "); falling back to 1D scores");
+                }
+            } else {
+                log_warn("group spans unavailable (" + span_reason +
+                         "); falling back to 1D scores");
+            }
+        }
+        const uint32_t n_prompt_blocks =
+                selection.per_group_block_scores.empty()
+                        ? 0
+                        : (selection.total_tokens + run_cfg.block_size - 1) /
+                                  run_cfg.block_size;
         std::string qg_reason;
         auto qst = AttentionSparsityController::build_query_gated(
-                selection, selection.per_pos_scores, qg_opts,
+                selection, selection.per_pos_scores,
+                selection.per_group_block_scores, n_prompt_blocks, qg_opts,
                 &popts.qg_group_rows, &popts.qg_bounds, &qg_reason);
         if (!qst.ok()) {
             log_warn("query gating plan rejected (" + qst.message +
@@ -850,6 +1014,9 @@ Status run_command(const Args& args) {
         } else {
             popts.enable_query_gating = true;
             popts.enable_pool_blocks = false;
+            qg_source = selection.per_group_block_scores.empty()
+                                ? "lexical-1d"
+                                : "embedding-2d";
             log_info(qg_reason);
         }
     }
@@ -888,7 +1055,12 @@ Status run_command(const Args& args) {
               << " ttft_ms=" << ttft_ms << " kv_bytes=" << stats.kv_bytes
               << " attn_top_k=" << stats.attn_top_k
               << " attn_fallback=" << (stats.attn_fallback ? 1 : 0)
-              << " mode=" << mode_name(run_cfg.mode) << " budget=" << sopts.budget << '\n';
+              << " mode=" << mode_name(run_cfg.mode) << " budget=" << sopts.budget
+              << " score_source=" << selection.score_source
+              << " semantic_score_ms=" << (embed.loaded() ? select_ms : 0.0)
+              << " draft_score_ms="
+              << (!embed.loaded() && draft.loaded() ? select_ms : 0.0)
+              << " qg_source=" << qg_source << '\n';
     LlamaBackend::shutdown();
     return Status::success();
 }
@@ -957,6 +1129,9 @@ Status bench_command(const Args& args) {
     bench.query_chunk_size = cfg.query_chunk_size;
     bench.query_chunk_max = cfg.query_chunk_max;
     bench.query_top_k_per_group = cfg.query_top_k_per_group;
+    bench.embedding_model = cfg.embedding_model;
+    bench.weights = cfg.weights;
+    bench.weights_overridden = cfg.weights_overridden;
     bench.n_gpu_layers = cfg.n_gpu_layers;
     bench.out_dir = cfg.results_dir;
 
@@ -1024,6 +1199,21 @@ Status classify_heads_command(const Args& args) {
     params.block_len = args.probe_block_len;
     params.repeats = args.probe_repeats;
     params.probe_k = args.probe_k;
+
+    // AR005 FR-4: calibrate the probe segment from real-task text instead
+    // of the fixed-seed random vocabulary sample.
+    if (!args.calibration_file.empty()) {
+        std::ifstream in(args.calibration_file, std::ios::binary);
+        if (!in) {
+            LlamaBackend::shutdown();
+            return Status::error(ErrorCode::Io,
+                                 "cannot read --calibration-file: " +
+                                     args.calibration_file);
+        }
+        params.source = ProbeSource::CalibrationText;
+        params.calibration_text.assign(std::istreambuf_iterator<char>(in),
+                                       std::istreambuf_iterator<char>());
+    }
 
     const auto fp = backend.fingerprint();
     HeadClassifier classifier(args.head_retrieval_threshold);

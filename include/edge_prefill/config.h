@@ -24,6 +24,11 @@ struct SelectorWeights {
 struct Config {
     std::string model_path;
     std::string draft_model_path;
+    // AR005: bge-small style embedding GGUF. Non-empty activates the
+    // semantic engine (selection adapter + query-gating 2D matrix); a
+    // load failure with an explicit path is a hard error, never a silent
+    // downgrade.
+    std::string embedding_model;
     std::string prompt;
     std::string prompt_file;
     std::string data_dir;
@@ -116,6 +121,9 @@ struct Config {
     bool budget_overridden = false;
     bool skip_ffn_overridden = false;
     bool kv_overridden = false;
+    // AR005: user-set selector weights suppress the semantic-priority
+    // default that applies when the embedding engine is active.
+    bool weights_overridden = false;
 
     std::vector<std::string> warnings;
 };

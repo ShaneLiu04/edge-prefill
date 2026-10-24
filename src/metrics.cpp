@@ -37,7 +37,8 @@ Status Reporter::write_raw_csv(const std::string& path) {
     if (!out) return Status::error(ErrorCode::Io, "cannot write csv: " + path);
     out << "task,case,ttft_ms,e2e_ms,prefill_tps,kv_bytes,quality,dense,prompt_tokens,"
            "selected_tokens,mode,budget,attn_top_k,repeats,ppl_dense,ppl_sparse,"
-           "query_gating,qg_groups\n";
+           "query_gating,qg_groups,score_source,semantic_score_ms,draft_score_ms,"
+           "qg_source\n";
     out << std::setprecision(10);
     for (const auto& s : samples_) {
         out << s.task << ',' << s.case_id << ',' << s.ttft_ms << ',' << s.e2e_ms << ','
@@ -45,7 +46,10 @@ Status Reporter::write_raw_csv(const std::string& path) {
             << (s.dense ? 1 : 0) << ',' << s.prompt_tokens << ',' << s.selected_tokens << ','
             << mode_of(s) << ',' << s.budget << ',' << s.attn_top_k << ',' << s.repeats
             << ',' << s.ppl_dense << ',' << s.ppl_sparse << ','
-            << (s.query_gating ? 1 : 0) << ',' << s.qg_groups << '\n';
+            << (s.query_gating ? 1 : 0) << ',' << s.qg_groups << ','
+            << (s.score_source.empty() ? "lexical" : s.score_source) << ','
+            << s.semantic_score_ms << ',' << s.draft_score_ms << ','
+            << s.qg_source << '\n';
     }
     return Status::success();
 }
@@ -65,14 +69,17 @@ Status Reporter::write_report(const std::string& path,
     out << "- KV: " << env.kv_type << "\n";
     out << "- Command: `" << env.command << "`\n\n";
     out << "| task | case | TTFT ms | E2E ms | prefill tok/s | KV bytes | quality | dense | "
-           "prompt | selected | mode | budget | attn_top_k | repeats |\n";
-    out << "| --- | --- | ---: | ---: | ---: | ---: | ---: | --- | ---: | ---: | --- | ---: | ---: | ---: |\n";
+           "prompt | selected | mode | budget | attn_top_k | repeats | score_source | "
+           "semantic_ms | qg_source |\n";
+    out << "| --- | --- | ---: | ---: | ---: | ---: | ---: | --- | ---: | ---: | --- | ---: | ---: | ---: | --- | ---: | --- |\n";
     for (const auto& s : samples) {
         out << "| " << s.task << " | " << s.case_id << " | " << s.ttft_ms << " | " << s.e2e_ms
             << " | " << s.prefill_tokens_per_s << " | " << s.kv_bytes << " | " << s.quality
             << " | " << (s.dense ? "yes" : "no") << " | " << s.prompt_tokens << " | "
             << s.selected_tokens << " | " << s.mode << " | " << s.budget << " | "
-            << s.attn_top_k << " | " << s.repeats << " |\n";
+            << s.attn_top_k << " | " << s.repeats << " | "
+            << (s.score_source.empty() ? "lexical" : s.score_source) << " | "
+            << s.semantic_score_ms << " | " << s.qg_source << " |\n";
     }
     if (samples.empty()) {
         out << "\n_No samples._\n";

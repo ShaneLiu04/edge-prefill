@@ -387,3 +387,112 @@ TEST_CASE(save_head_profile_rejects_unwritable_path) {
     CHECK(fs::is_directory(dir));
     CHECK_ERR(save_head_profile(dir.string(), profile), ErrorCode::Io);
 }
+
+TEST_CASE(probe_source_calibration_text_deterministic) {
+    LlamaBackend backend;
+    if (!load_backend(&backend, 64)) {
+        std::cout << "SKIP probe_source_calibration_text_deterministic "
+                     "(EDGE_PREFILL_TEST_MODEL unset or load failed)\n";
+        return;
+    }
+
+    const std::string sha = "sha-ar005-t006-calib";
+    HeadClassifier classifier(0.10);
+
+    // CalibrationText with an empty text is rejected before any forward.
+    HeadProbeParams empty_text = small_params();
+    empty_text.source = ProbeSource::CalibrationText;
+    empty_text.calibration_text = "";
+    HeadProfile rejected;
+    CHECK_ERR(classifier.classify(&backend, empty_text, sha, &rejected),
+              ErrorCode::InvalidArgument);
+
+    // make_probe_tokens is internal to head_classifier.cpp, so the probe
+    // sequence is observed through the profile it produces: identical
+    // calibration texts must give identical (deterministic) profiles.
+    HeadProbeParams params = small_params();
+    params.source = ProbeSource::CalibrationText;
+    params.calibration_text =
+        "The lighthouse keeper counted seventeen ships while the storm gathered "
+        "over the harbor and the bells rang twice before midnight.";
+
+    HeadProfile first;
+    HeadProfile second;
+    CHECK_OK(classifier.classify(&backend, params, sha, &first));
+    CHECK_OK(classifier.classify(&backend, params, sha, &second));
+    CHECK_EQ(first.heads.size(), second.heads.size());
+    for (size_t i = 0; i < first.heads.size(); ++i) {
+        CHECK_EQ(first.heads[i].echo_score, second.heads[i].echo_score);
+        CHECK_EQ(first.heads[i].induction_score, second.heads[i].induction_score);
+        CHECK_EQ(first.heads[i].retrieval, second.heads[i].retrieval);
+    }
+
+    // A different calibration text must yield a different probe segment
+    // (its first block_len tokens), observable as differing flip rates on
+    // at least one head. If the source were ignored and the fixed-seed
+    // Random probe reused, this profile would equal `first` exactly.
+    HeadProbeParams other = small_params();
+    other.source = ProbeSource::CalibrationText;
+    other.calibration_text =
+        "Invoice totals 4471 82 903 were reconciled against ledger entries; "
+        "audit notes mention discrepancies in quarters three and seven.";
+    HeadProfile different;
+    CHECK_OK(classifier.classify(&backend, other, sha, &different));
+    CHECK_EQ(different.heads.size(), first.heads.size());
+    bool any_differs = false;
+    for (size_t i = 0; i < first.heads.size(); ++i) {
+        if (first.heads[i].echo_score != different.heads[i].echo_score ||
+            first.heads[i].induction_score != different.heads[i].induction_score) {
+            any_differs = true;
+            break;
+        }
+    }
+    CHECK(any_differs);
+}
+
+TEST_CASE(calibration_text_validation) {
+    // Empty and whitespace-only texts carry no probe signal.
+    CHECK_ERR(validate_calibration_text("", 32), ErrorCode::InvalidArgument);
+    CHECK_ERR(validate_calibration_text("   \t\n  ", 32), ErrorCode::InvalidArgument);
+
+    // Normal text passes.
+    CHECK_OK(validate_calibration_text(
+        "The river flows past the old stone bridge toward the sea.", 32));
+
+    // Text shorter than one block_len is legal: the probe takes the first
+    // block_len tokens and audits the truncation instead of failing.
+    CHECK_OK(validate_calibration_text("short text", 32));
+}
+
+TEST_CASE(probe_source_random_unchanged) {
+    // The new source field must default to Random so every existing AR004
+    // call site that never touches `source` keeps its exact behavior.
+    const HeadProbeParams defaults;
+    CHECK(defaults.source == ProbeSource::Random);
+
+    LlamaBackend backend;
+    if (!load_backend(&backend, 64)) {
+        std::cout << "SKIP probe_source_random_unchanged "
+                     "(EDGE_PREFILL_TEST_MODEL unset or load failed)\n";
+        return;
+    }
+
+    // Explicit Random must reproduce the default (AR004) probe token for
+    // token, and therefore the default profile field for field.
+    HeadProbeParams explicit_random = small_params();
+    explicit_random.source = ProbeSource::Random;
+    HeadClassifier classifier(0.10);
+    HeadProfile from_default;
+    HeadProfile from_random;
+    CHECK_OK(classifier.classify(&backend, small_params(), "sha-ar005-t006",
+                                 &from_default));
+    CHECK_OK(classifier.classify(&backend, explicit_random, "sha-ar005-t006",
+                                 &from_random));
+    CHECK_EQ(from_default.heads.size(), from_random.heads.size());
+    for (size_t i = 0; i < from_default.heads.size(); ++i) {
+        CHECK_EQ(from_default.heads[i].echo_score, from_random.heads[i].echo_score);
+        CHECK_EQ(from_default.heads[i].induction_score,
+                 from_random.heads[i].induction_score);
+        CHECK_EQ(from_default.heads[i].retrieval, from_random.heads[i].retrieval);
+    }
+}

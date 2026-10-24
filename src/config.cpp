@@ -205,6 +205,24 @@ Status parse_config_file(const std::string& path, Config* out) {
             out->model_path = value;
         } else if (key == "draft_model") {
             out->draft_model_path = value;
+        } else if (key == "embedding_model") {
+            out->embedding_model = value;
+        } else if (key == "selector_w_lexical") {
+            if (!parse_double(value, &d)) goto bad_value;
+            out->weights.lexical = d;
+            out->weights_overridden = true;
+        } else if (key == "selector_w_diversity") {
+            if (!parse_double(value, &d)) goto bad_value;
+            out->weights.diversity = d;
+            out->weights_overridden = true;
+        } else if (key == "selector_w_position") {
+            if (!parse_double(value, &d)) goto bad_value;
+            out->weights.position = d;
+            out->weights_overridden = true;
+        } else if (key == "selector_w_draft") {
+            if (!parse_double(value, &d)) goto bad_value;
+            out->weights.draft = d;
+            out->weights_overridden = true;
         } else if (key == "data_dir") {
             out->data_dir = value;
         } else if (key == "results_dir") {

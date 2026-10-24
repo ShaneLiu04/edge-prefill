@@ -14,10 +14,12 @@
 
 #include "edge_prefill/attention_sparsity.h"
 #include "edge_prefill/backend.h"
+#include "edge_prefill/embedding_scorer.h"
 #include "edge_prefill/head_profile.h"
 #include "edge_prefill/log.h"
 #include "edge_prefill/planner.h"
 #include "edge_prefill/selector.h"
+#include "edge_prefill/semantic_gate.h"
 #include "edge_prefill/sparse_prefill.h"
 
 namespace edge_prefill {
@@ -221,6 +223,7 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
     base.results_dir = cfg.out_dir;
     base.attn_top_k = cfg.attn_top_k;
     base.attn_top_k_layers = cfg.attn_top_k_layers;
+    base.weights = cfg.weights;
 
     LlamaBackend backend;
     auto st = LlamaBackend::init();
@@ -277,6 +280,18 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
         PrefixCache::create(base.prefix_cache_bytes, backend.fingerprint().to_key(), &cache);
     }
     SparsePrefiller prefilter(&backend, cache.get());
+
+    // AR005: explicit embedding configuration never degrades — a failed
+    // load fails the whole run so the semantic signal is either real or
+    // the run never starts.
+    EmbeddingScorer embed;
+    if (!cfg.embedding_model.empty()) {
+        auto embed_st = embed.load_model(cfg.embedding_model);
+        if (!embed_st.ok()) {
+            LlamaBackend::shutdown();
+            return embed_st;
+        }
+    }
 
     const auto wall_begin = std::chrono::steady_clock::now();
     // AR004 FR-5: dense ppl reference per (case, length). Computed once and
@@ -389,9 +404,29 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
                     sopts.recent_blocks = run_cfg.recent_blocks;
                     sopts.coverage_stride = run_cfg.coverage_stride;
                     sopts.weights = run_cfg.weights;
+                    // AR005: semantic-priority fusion defaults when the
+                    // embedding engine is active and the user has not
+                    // pinned weights (pure latency mode keeps the AR004
+                    // defaults — the encoding cost is the point there).
+                    if (embed.loaded() && mode != Mode::Latency &&
+                        !cfg.weights_overridden) {
+                        sopts.weights = semantic_priority_weights();
+                    }
                     Selection selection;
                     BlockSelector selector;
-                    st = selector.select(tokens, c.question, pieces, sopts, nullptr, &selection);
+                    EmbeddingSelectionScorer embed_adapter(
+                            embed.loaded() ? &embed : nullptr, &pieces,
+                            run_cfg.block_size);
+                    // AR005 FR-5: selection-stage scoring time, accounted
+                    // separately from prefill TTFT (net-cost honesty).
+                    const auto sel_begin = std::chrono::steady_clock::now();
+                    st = selector.select(tokens, c.question, pieces, sopts,
+                                         embed.loaded() ? &embed_adapter : nullptr,
+                                         &selection);
+                    const double select_ms =
+                            std::chrono::duration<double, std::milli>(
+                                    std::chrono::steady_clock::now() - sel_begin)
+                                    .count();
                     if (!st.ok()) continue;
 
                     // Derive attention gather indices for non-dense plans;
@@ -545,9 +580,12 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
                         }
                     }
 
-                    // AR004 FR-3: query-chunk gating replaces the scalar
-                    // gather; head matrix wins (exclusivity), pool rides
-                    // only on the scalar gather.
+                    // AR004 FR-3 / AR005 FR-2: query-chunk gating replaces
+                    // the scalar gather; head matrix wins (exclusivity),
+                    // pool rides only on the scalar gather. With the
+                    // embedding engine active the plan upgrades to the
+                    // per-group 2D matrix; degradation steps are audited.
+                    std::string qg_source;
                     if (cfg.query_gating && !popts.enable_head_adaptive &&
                         !selection.dense &&
                         selection.per_pos_scores.size() == selection.total_tokens) {
@@ -555,10 +593,64 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
                         qg_opts.query_chunk_size = cfg.query_chunk_size;
                         qg_opts.query_chunk_max = cfg.query_chunk_max;
                         qg_opts.top_k_per_group = cfg.query_top_k_per_group;
+                        if (embed.loaded()) {
+                            // AR005 FR-2: group texts are the raw
+                            // contiguous slices of the group token spans;
+                            // block texts the original 32-token blocks.
+                            std::vector<std::pair<uint32_t, uint32_t>> spans;
+                            std::string span_reason;
+                            if (AttentionSparsityController::build_group_spans(
+                                        selection, qg_opts, &spans, &span_reason)
+                                    .ok() &&
+                                !spans.empty()) {
+                                std::vector<std::string> group_texts;
+                                group_texts.reserve(spans.size());
+                                for (const auto& span : spans) {
+                                    std::string text;
+                                    for (uint32_t i = span.first; i < span.second; ++i) {
+                                        text += pieces[i];
+                                    }
+                                    group_texts.push_back(std::move(text));
+                                }
+                                const uint32_t bs = run_cfg.block_size;
+                                const uint32_t n_prompt_blocks =
+                                        (selection.total_tokens + bs - 1) / bs;
+                                std::vector<std::string> block_texts(n_prompt_blocks);
+                                for (uint32_t b = 0; b < n_prompt_blocks; ++b) {
+                                    const uint32_t begin = b * bs;
+                                    const uint32_t end = std::min(
+                                            selection.total_tokens, begin + bs);
+                                    for (uint32_t i = begin; i < end; ++i) {
+                                        block_texts[b] += pieces[i];
+                                    }
+                                }
+                                std::vector<std::vector<double>> matrix;
+                                auto score_st = embed.score_group_block(
+                                        group_texts, block_texts, &matrix);
+                                if (score_st.ok() && matrix.size() == spans.size()) {
+                                    selection.per_group_block_scores =
+                                            std::move(matrix);
+                                } else {
+                                    log_warn("semantic qg matrix unavailable (" +
+                                             score_st.message +
+                                             "); falling back to 1D scores");
+                                }
+                            } else {
+                                log_warn("group spans unavailable (" + span_reason +
+                                         "); falling back to 1D scores");
+                            }
+                        }
+                        const uint32_t n_prompt_blocks =
+                                selection.per_group_block_scores.empty()
+                                        ? 0
+                                        : (selection.total_tokens +
+                                           run_cfg.block_size - 1) /
+                                                  run_cfg.block_size;
                         std::string qg_reason;
                         auto qst = AttentionSparsityController::build_query_gated(
-                                selection, selection.per_pos_scores, qg_opts,
-                                &popts.qg_group_rows, &popts.qg_bounds,
+                                selection, selection.per_pos_scores,
+                                selection.per_group_block_scores, n_prompt_blocks,
+                                qg_opts, &popts.qg_group_rows, &popts.qg_bounds,
                                 &qg_reason);
                         if (!qst.ok()) {
                             log_warn("query gating plan rejected: " + qst.message);
@@ -567,6 +659,9 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
                         } else {
                             popts.enable_query_gating = true;
                             popts.enable_pool_blocks = false;
+                            qg_source = selection.per_group_block_scores.empty()
+                                                ? "lexical-1d"
+                                                : "embedding-2d";
                             log_debug(qg_reason);
                         }
                     }
@@ -678,6 +773,11 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
                     sample.ppl_sparse = sample_ppl_sparse;
                     sample.query_gating = stats.query_gating;
                     sample.qg_groups = stats.qg_groups;
+                    // AR005 FR-5 audit columns.
+                    sample.score_source = selection.score_source;
+                    sample.semantic_score_ms = embed.loaded() ? select_ms : 0.0;
+                    sample.draft_score_ms = 0.0;
+                    sample.qg_source = qg_source;
                     log_info("case=" + sample.case_id + " mode=" + sample.mode +
                              " quality=" + std::to_string(sample.quality) +
                              " generated=" + generated);

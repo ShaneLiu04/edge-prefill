@@ -481,4 +481,16 @@ Status validate_head_profile(const HeadProfile& profile, int32_t n_layer,
     return Status::success();
 }
 
+Status validate_calibration_text(const std::string& text, uint32_t block_len) {
+    if (block_len == 0) {
+        return Status::error(ErrorCode::InvalidArgument,
+                             "probe block_len must be >= 1");
+    }
+    for (unsigned char c : text) {
+        if (!std::isspace(c)) return Status::success();
+    }
+    return Status::error(ErrorCode::InvalidArgument,
+                         "calibration text is empty or whitespace-only");
+}
+
 } // namespace edge_prefill

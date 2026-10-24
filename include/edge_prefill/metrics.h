@@ -43,6 +43,16 @@ struct Sample {
     // count (0 when off / fell back).
     bool query_gating = false;
     uint32_t qg_groups = 0;
+    // AR005 FR-5 audit: which engine produced the selection scores
+    // ("lexical"/"draft"/"embedding"), the selection-stage scoring time
+    // (semantic encoding when the embedding engine is active; added to
+    // sparse TTFT for net speedup accounting), the draft forward time
+    // when a draft model scored selection, and the query-gating score
+    // path ("lexical-1d"/"embedding-2d"; empty when gating is off).
+    std::string score_source;
+    double semantic_score_ms = 0.0;
+    double draft_score_ms = 0.0;
+    std::string qg_source;
 };
 
 class Reporter {
