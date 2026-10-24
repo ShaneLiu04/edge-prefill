@@ -12,11 +12,11 @@
 | ID | 任务描述 | 依赖 | 状态 | 备注 |
 |----|---------|------|------|------|
 | T001 | EmbeddingScorer 嵌入引擎（bge-small GGUF，多 seq 并行编码，池化 MEAN）+ score_group_block/score_query_blocks 接口 + build_group_spans 组跨度推导；单测（几何/校验/余弦性质/跨度一致性）+ 真实模型 needle 排名断言（S1） | - | passing | 2026-10-24 完成，FR-1/FP1/FP2 |
-| T002 | build_query_gated 2D 重载：每组本组分数因果 top-k；空矩阵回退 1D 与 v1 字节等价回归；反退化断言测试；矩阵尺寸/非有限校验 | T001 | pending | FR-2/FP3 |
-| T003 | 管线接线：Selection 加 per_group_block_scores；planner/main/benchmark/Config 键（embedding_model + 既有 query_gating 自动升 2D，无新增 gating 键）+ CLI + qg_source 审计列 + semantic_score_ms/draft_score_ms 统计 | T002 | pending | FR-2/FR-5 |
-| T004 | 语义优先选择：EmbeddingSelectionScorer 适配器（DraftScorer 多态，选择器零改动）+ 语义优先默认权重 + needle 块进选择集真实模型守护测试（32K budget 0.15）+ 无引擎回归字节等价 | T001 | pending | FR-3/FP4 |
-| T005 | draft 模型复现集成：download_model.sh --draft（0.5B，SHA256 校验）+ 主模型自任 draft 兜底文档化 + 净 TTFT 记账落地 | - | pending | FR-5 |
-| T006 | 任务内 head 校准：classify-heads --calibration-file；profile 格式不变；真实任务数据校准测试 | - | pending | FR-4 |
+| T002 | build_query_gated 2D 重载：每组本组分数因果 top-k；空矩阵回退 1D 与 v1 字节等价回归；反退化断言测试；矩阵尺寸/非有限校验 | T001 | passing | FR-2/FP3 代码与用例已落地（提交 c57b58b） |
+| T003 | 管线接线：Selection 加 per_group_block_scores；planner/main/benchmark/Config 键（embedding_model + 既有 query_gating 自动升 2D，无新增 gating 键）+ CLI + qg_source 审计列 + semantic_score_ms/draft_score_ms 统计 | T002 | passing | FR-2/FR-5 代码与用例已落地（提交 c57b58b） |
+| T004 | 语义优先选择：EmbeddingSelectionScorer 适配器（DraftScorer 多态，选择器零改动）+ 语义优先默认权重 + needle 块进选择集真实模型守护测试（32K budget 0.15）+ 无引擎回归字节等价 | T001 | passing | FR-3/FP4 代码与真实模型用例已落地（提交 c57b58b） |
+| T005 | draft 模型复现集成：download_model.sh --draft（0.5B，SHA256 校验）+ 主模型自任 draft 兜底文档化 + 净 TTFT 记账落地 | - | passing | FR-5：download_model.sh --draft/--embed/--all + README 复现条目；draft_score_ms/semantic_score_ms 净记账 |
+| T006 | 任务内 head 校准：classify-heads --calibration-file；profile 格式不变；真实任务数据校准测试 | - | passing | FR-4 代码与真实模型校准用例已落地（提交 c57b58b） |
 | T007 | CPU 复合突破网格：budget{0.15,0.25,0.35}×attn{12,24}×pool×qg-v2 于 16K/32K + multineedle qg-v2 + 4K/8K 源头修复验证；隔离进程 --repeats 3 全量入库 | T003,T004,T005 | pending | FR-6 |
 | T008 | GPU 回归 + qg-v2 GPU 抽查：16K/32K GPU 矩阵，≥10× 回归守护 | T007 | pending | FR-6 |
 | T009 | repro.sh 一键套件：环境探测/下载校验/构建(CPU/CUDA)/smoke|matrix|full/图表/期望对照/非零退出；README 第一入口改写；LTO/native 构建开关 | T005,T007,T010 | pending | FR-7 |
@@ -44,6 +44,13 @@
 - 实现要点：池化=GGUF 自带池化头（bge=CLS；causal 无池化→Unsupported），已同步 srs/design/组件详设三处文档；llama_tokenize 空缓冲返回负所需长度（须取反）；encoder 整批不拆分，n_batch/n_ubatch=512×8
 - 覆盖率：lcov 工具链未配置，降级为用例映射自查（6.1/6.2/6.3-S1 全部用例落地；OOM 分支按 6.2 豁免声明处理）
 - 备注：bge-small-en-v1.5-q8_0.gguf 已下载至 D:\edge-llm\models\，SHA256=f046db1dc724cf4f6f0a0c5917e922823b73eb1d27b8f9a9c2797f7866974804（ggml-org ModelScope 通道）
+
+### 2026-10-24 会话记录（T002-T006 状态同步与 T005 落地）
+
+- 完成任务：T002/T003/T004/T006 状态同步（代码与用例已在提交 c57b58b 落地，本会话按代码核验后置 passing）；T005 draft/embedding 模型下载与复现条目落地
+- 修改文件：scripts/download_model.sh（--draft/--embed/--all 三模式 + SHA256 校验 + 主模型自任 draft 兜底说明）、README.md（draft/embedding 模型 SHA256 与硬错语义）、tasks.md（状态表）
+- 测试：ctest build-wsl 1/1 通过（快速模式 0.38s 零回归）
+- 实现要点：显式 draft/embedding 路径加载失败=硬错不降级；净 TTFT 记账（semantic_score_ms 独立于 prefill 计时）
 
 ## 阶段门控记录
 
