@@ -681,4 +681,65 @@ Status AttentionSparsityController::build_query_gated(
     return Status::success();
 }
 
+Status AttentionSparsityController::build_group_spans(
+        const Selection& selection,
+        const QueryGatingOptions& opts,
+        std::vector<std::pair<uint32_t, uint32_t>>* spans,
+        std::string* reason) {
+    if (!spans || !reason) {
+        return Status::error(ErrorCode::InvalidArgument, "null group span output");
+    }
+    spans->clear();
+    reason->clear();
+
+    if (opts.query_chunk_size == 0) {
+        return Status::error(ErrorCode::InvalidArgument, "query_chunk_size is 0");
+    }
+    if (opts.query_chunk_max == 0) {
+        return Status::error(ErrorCode::InvalidArgument, "query_chunk_max is 0");
+    }
+    if (selection.dense) {
+        *reason = "dense";
+        return Status::success();
+    }
+    if (selection.token_indices.empty()) {
+        *reason = "no-rows";
+        return Status::success();
+    }
+    // Out-of-range positions would break the row-to-position mapping below.
+    for (uint32_t pos : selection.token_indices) {
+        if (pos >= selection.total_tokens) {
+            return Status::error(ErrorCode::InvalidArgument, "token index out of range");
+        }
+    }
+
+    // Mirror the v1 partition exactly (build_query_gated): row-space
+    // chunks of query_chunk_size rows, degrading to a single global group
+    // when the group count would exceed query_chunk_max.
+    const uint32_t n_rows = static_cast<uint32_t>(selection.token_indices.size());
+    uint32_t n_groups = (n_rows + opts.query_chunk_size - 1) / opts.query_chunk_size;
+    uint32_t eff_chunk = opts.query_chunk_size;
+    bool capped = false;
+    if (n_groups > opts.query_chunk_max) {
+        n_groups = 1;
+        eff_chunk = n_rows;
+        capped = true;
+    }
+
+    const std::vector<uint32_t>& toks = selection.token_indices;
+    for (uint32_t g = 0; g < n_groups; ++g) {
+        const uint32_t lo = std::min(g * eff_chunk, n_rows);
+        const uint32_t hi = std::min((g + 1) * eff_chunk, n_rows);
+        // Span = original prompt positions covered by the group's rows.
+        // token_indices is ascending, so [lo, hi) rows map to the closed
+        // token range [toks[lo], toks[hi-1]]; the half-open end is +1.
+        spans->emplace_back(toks[lo], toks[hi - 1] + 1);
+    }
+
+    *reason = "group-spans: groups=" + std::to_string(n_groups) +
+              (capped ? " (capped to global set)" : "") +
+              " rows=" + std::to_string(n_rows);
+    return Status::success();
+}
+
 } // namespace edge_prefill

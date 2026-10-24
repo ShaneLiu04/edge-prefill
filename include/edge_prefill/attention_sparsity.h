@@ -188,6 +188,20 @@ public:
                                     std::vector<std::vector<int32_t>>* group_rows,
                                     std::vector<int32_t>* q_bounds,
                                     std::string* reason);
+
+    // AR005 FR-1: group span derivation for the semantic gating matrix.
+    // Maps each query group of the v1 partition (row-space chunks of
+    // query_chunk_size rows, degrading to a single global group beyond
+    // query_chunk_max) to its token-position span [lo, hi) — the original
+    // prompt positions covered by the group's rows, so the caller can
+    // build the group text as the raw contiguous slice. Spans are
+    // ordered, non-overlapping, and together cover every selected token
+    // position exactly once. Dense selections and empty row spaces
+    // return Ok with empty spans and a non-empty reason.
+    static Status build_group_spans(const Selection& selection,
+                                    const QueryGatingOptions& opts,
+                                    std::vector<std::pair<uint32_t, uint32_t>>* spans,
+                                    std::string* reason);
 };
 
 } // namespace edge_prefill
