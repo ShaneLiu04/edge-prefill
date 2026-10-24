@@ -120,6 +120,18 @@ docs/           architecture.md, experiments.md
 - Benchmark model: Qwen2.5-1.5B-Instruct Q4_K_M GGUF,
   SHA256 `6a1a2eb6d15622bf3c96857206351ba97e1af16c30d7a74ee38970e434e9407e`
   (`scripts/download_model.sh` verifies the hash and refuses mismatches).
+- Draft model (optional, AR005): Qwen2.5-0.5B-Instruct Q4_K_M GGUF,
+  SHA256 `74a4da8c9fdbcd15bd1f6d01d621410d31c6fc00986f5eb687824e7b93d7a9db`
+  (`scripts/download_model.sh --draft`). Fallback: `--draft-model` may point
+  at the main model file itself — the vocab matches, so `LlamaDraftScorer`
+  accepts it; only the draft forward gets slower. The explicit draft path
+  failing to load is a hard error, never a silent downgrade.
+- Embedding model (AR005): bge-small-en-v1.5 Q8_0 GGUF,
+  SHA256 `f046db1dc724cf4f6f0a0c5917e922823b73eb1d27b8f9a9c2797f7866974804`
+  (`scripts/download_model.sh --embed`). Activates with `--embedding-model`;
+  a failed load is a hard error, and every request records
+  `score_source` / `semantic_score_ms` / `qg_source` audit columns so
+  speedups stay net of the scoring overhead.
 - No performance number without the raw CSV and the exact command.
 - Prefill-only FFN skip and attention sparsity are lossy; every latency claim
   carries its quality metric in the same report.
