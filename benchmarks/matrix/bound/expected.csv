@@ -1,0 +1,7 @@
+dataset,mode,min_quality,min_speedup
+len4k,boundp16,0.90,2.0
+len8k,boundp16,0.90,7.0
+multineedle,boundp16,0.75,2.5
+len16k,boundp16,0.90,5.0
+len16k,boundp24,0.90,5.0
+len32k,boundp24-l32,0.90,4.0

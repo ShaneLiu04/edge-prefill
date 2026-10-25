@@ -47,10 +47,36 @@ with k=32 still gathers the sink + recent anchors because they head the pool.
 - `llama_set_prefill_attn_top_k` — scalar top-k gather
 - `llama_set_prefill_attn_ranked_rows` — pool + per-head matrix gather
   (matrix values: -1 dense, k>0 rows from the pool prefix)
+- `llama_set_prefill_query_gated` — per-query-chunk row masks (AR005)
+- `llama_set_prefill_qg_bound` / `llama_get_prefill_qg_bound` — in-graph
+  query-aware page gating (AR006): per ubatch, per layer, the graph builds
+  K page means, scores `q · mean(K_page)`, keeps local ∪ top-k pages and
+  gathers once; no host-side selection and no embedding model
 - `llama_set_prefill_skip_ffn_mask` — per-layer FFN skip during prefill
 
 Design contracts for AR004 extensions (pool blocks / query gating) live in
-`specs/changes/AR004-branch-gated-sparse-prefill-and-gitee-repro/design.md`.
+`specs/changes/AR004-branch-gated-sparse-prefill-and-gitee-repro/design.md`;
+the AR006 contract is in `specs/changes/AR006-in-graph-query-aware-sparse-prefill/design.md`.
+
+## Two gate placement options (AR005 vs AR006)
+
+- **Host-side selection** (AR004/AR005): the selector ranks rows/pages and the
+  patch gathers them. Costs one selection pass; the AR005 semantic variant
+  also pays an embedding call (~1.1 s at 4K) before TTFT can start.
+- **In-graph gating** (AR006): selection happens inside the prefill graph per
+  ubatch, so there is no extra host pass, no embedding, and no sync. The
+  graph pays one page-mean reduction plus one top-k over `n_pages` per layer.
+  In exchange the selection is per-ubatch (not per 128-token chunk), heads
+  share the page set (ggml masks broadcast over heads), and the gate is only
+  active when `n_kv` exceeds the local window (short prompts stay local-only).
+
+## Edge accounting and the dense invariant
+
+`budget=1.0`, `qg_bound=false`, `query_gating=false`, `attn_top_k=0` and
+`skip_ffn_mask=0` must remain bit-equivalent to dense. The AR006 arming call
+clears every other sparse path in the context so exactly one mechanism owns
+the attention graph; disabling it restores the dense graph, verified by
+`bound_gating_execution_and_restore`.
 
 ## Chunked prefill
 

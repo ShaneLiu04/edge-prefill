@@ -1,0 +1,5 @@
+task,case,ttft_ms,e2e_ms,prefill_tps,kv_bytes,quality,dense,prompt_tokens,selected_tokens,mode,budget,attn_top_k,repeats,ppl_dense,ppl_sparse,query_gating,qg_groups,score_source,semantic_score_ms,draft_score_ms,qg_source
+niah,niah-01@3918,28118.81345,36251.74635,36.20384672,29201016,1,0,3962,1018,balanced,0.25,0,1,0,0,1,8,embedding,3670.48066,0,embedding-2d
+niah,niah-02@3885,29854.65084,43201.3246,32.99340413,28254444,1,0,3929,985,balanced,0.25,0,1,0,0,1,8,embedding,9886.789631,0,embedding-2d
+niah,niah-03@3902,27601.75461,39599.62305,36.30230911,28742072,1,0,3946,1002,balanced,0.25,0,1,0,0,1,8,embedding,3489.266769,0,embedding-2d
+niah,niah-04@3904,30869.34104,41140.78611,32.5243706,28799440,1,0,3948,1004,balanced,0.25,0,1,0,0,1,8,embedding,3619.244308,0,embedding-2d

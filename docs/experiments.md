@@ -46,3 +46,42 @@ scripts/download_model.sh   # AR004: ModelScope/hf-mirror + SHA256 verify
   `0` (auto-align to n_ubatch). Reports record the command actually used.
 - The AR004 acceptance experiment matrix (16K >= 10x at q >= 0.9, CPU+GPU)
   lands with the branch/gating tasks and will refresh this index.
+
+## AR006 campaign (in-graph query-aware page gating)
+
+Everything below is CPU, Qwen2.5-1.5B-Instruct Q4_K_M, 16 threads, and was
+measured in one interleaved session (dense first, then scalar / qg-2d /
+bound) so the speedups are same-session ratios, never cross-session.
+
+```bash
+BIN=build-wsl/edge-prefill
+MODEL=models/qwen2.5-1.5b-instruct-q4_k_m.gguf
+for ds in explen/len4k explen/len8k deep/multineedle explen/len16k deep/len32k; do
+  for conf in benchmarks/matrix/bound/dense-ref.conf \
+              benchmarks/matrix/bound/bound-p16-a24-b025.conf \
+              benchmarks/matrix/bound/bound-p24-a24-b025.conf; do
+    tag=$(basename "$conf" .conf)
+    $BIN bench --config "$conf" --model "$MODEL" \
+        --data-dir "benchmarks/data/$ds" --bench-skip-dense \
+        --out "benchmarks/results/ar006-campaign/$(basename $ds)-$tag"
+  done
+done
+python3 benchmarks/scripts/assemble_ar006.py benchmarks/results/ar006-campaign
+python3 benchmarks/scripts/check_expected_ar006.py \
+    benchmarks/results/ar006-campaign benchmarks/matrix/bound/expected.csv
+```
+
+Notes:
+
+- `assemble_ar006.py` derives the dense reference from `*-dense/` in the same
+  directory and prints net speedup per (dataset, mode).
+- `check_expected_ar006.py` gates on quality and on a speedup floor; it is
+  machine-independent by construction (ratios only).
+- `warmup=1, repeats=3` in the checked-in confs. The campaign used
+  `repeats=1` for the sparse rows to fit the compute budget; TTFT medians are
+  stable at 1 repeat on this model (A/B: 49.0s at 1 vs 48.9s at 5).
+- `--bench-skip-dense` means "this run has one mode": without it the harness
+  measures dense + the conf's mode, doubling the run.
+- `--repeats` on the CLI used to silently default to 5 and override the conf
+  file; fixed 2026-10-25 (sentinel -1). AR005 numbers were all 5-repeat
+  medians because of it — statistically fine, but 5x the runtime.

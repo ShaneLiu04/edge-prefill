@@ -168,3 +168,59 @@ profile-free 池与金字塔先验；GQA 头共享行集由 set_input 跨头复�
 | query 门控 v1 无增益 | mn 消融 0/0/0 vs 0/0/0.2，fig4，1D 分数局限分析 |
 | CPU 16K 最优 4.87×（50% budget） | `matrix.md`，CPU 达不到 10× 诚实记录 |
 | 环境非受控（宿主负载） | T002 首轮污染套件保留 `ar004-t002/`，隔离重跑 `ar004-t002-final/` |
+
+---
+
+# AR006 增补（v3）：图内查询感知门控 —— Quest × MoBA × NSA 在预填充内的合流
+
+AR004/AR005 的门控都在 **host 侧**：先选 token/块，再用补丁 gather。AR006 把门控搬进
+**prefill 图内部**（每 ubatch、每层），从而同时干掉三样成本：嵌入打分（1.1s/次）、
+逐组多次 gather、以及 host↔device 同步。全部数字来自 enchmarks/results/ar006-campaign/
+同一台机器同一会话（dense/scalar/qg/bound 交错测量，比值可比）。
+
+## 8.1 SOTA 核心思想
+
+| 来源 | 机制 | 我们的取用 |
+|---|---|---|
+| Quest (arXiv 2406.10774) | decode 期用页级 **精确界** u=Σ_d max(q·kmax, q·kmin) 选页 | 页粒度、当前查询打分；**上界打分经实测否决**（见 8.3） |
+| MoBA (arXiv 2402.19473) | 块级 gate，块内 **K 均值** 作为专家表示，当前块必留 | 打分函数 q·mean(K_page)；local 窗必留 |
+| NSA (arXiv 2502.11089) | 压缩 / 选中 / 滑窗 三分支 | 滑窗≈local+sink；选中≈top-k 页；压缩池化沿用 AR004 |
+| DuoAttention / MInference | head 分流式/检索两类 | 作为后续 head 路由依据（ggml 掩码只广播 head 维，需拆图，暂缓） |
+
+## 8.2 本项目映射与改造
+
+- **位置**：llama-graph.cpp::build_attn（非 FlashAttn、非 SWA 层）新增分支；K 页均值
+  ggml_pool_1d(AVG, 32) 由本层真实 K 视图导出，**无任何额外模型**；
+- **分片**：以 ubatch 为上界（MoBA 的 chunk 门控语义），q 取 ubatch 末 token 在每组
+  第一个 query head 上的投影（GQA 对齐，group 内并集 → 全头掩码可表达）；
+- **选择**：	op_k 在图内完成（ggml 原生 kernel）；**页→行** 用预计算
+  
+ow_table[32,n_pages] + get_rows 查表展开——ggml 没有 F32→I32 cast 路径，
+  range*32+add 这类整数指数运算不可用（T001 探针结论）；
+- **单次 gather**：local（sink 页 + 尾部窗口）∪ selected 一次 get_rows；
+  可见性掩码 = 每图构建时预转置一次的因果 mask 行 gather（逐层转置会多搬 2×n_tok×n_kv 字节）；
+- **互斥与恢复**：C API llama_set_prefill_qg_bound arming 时清理其余稀疏路径，
+  关闭后 dense 路径逐位不变（单测 ound_gating_execution_and_restore）。
+
+## 8.3 实测证据（同一会话、同机、交错测量）
+
+| 观察 | 数据 | 结论 |
+|---|---|---|
+| 精确界排序失败 | 16K niah-01 p16：quality 0（生成 1234567890） | 上界对 key 范数大的页系统性高估，与 softmax 质量错位 → 否决 |
+| 门控开销本身不是瓶颈 | 同上、sel_pages=0（只留 local）ttft 290s ≈ dense 312s | 失败在**信号**不在机制；页均值元数据几乎免费 |
+| MoBA 页均值可用 | campaign 16K：p16 6.83x q=1.0、p24 6.85x q=1.0 | 页均值是免训练可用的门控信号 |
+| 8K 最优区间 | campaign 8K：p16 9.38x q=1.0（scalar 9.73x，qg-2d 8.77x） | 门控≈标量 gather，但 sem 1.1s→0 |
+| 多针任务门控胜出 | mn：p16 3.77x q=0.83 vs scalar 2.83x q=0.67 | local 窗保住针的近邻，纯 top-k 行表会丢 |
+| 32K 默认窗覆盖不足 | 32K p16 q=0.0、p24 q=0.25；local_rows=32 时 5.64x q=1.0 | 页预算买不回覆盖；32K 需加宽 local，加速来自 local 不是选择 |
+| 32K 成本=页均值重扫 | ttft 随 ubatch 数增长；门控把整段 K 经 cont(permute) 复制（95MB×28×61≈160GB 流量） | 下一步：view+mul_mat+page-sum 去掉拷贝、按层间隔门控 |
+
+（上表数字来自 enchmarks/results/ar006-campaign/matrix.md（同会话 dense 参照）。
+本机绝对延迟在会话间波动可达 3×，故只引用同会话比值；32K 与 16K 的 SRS 目标未达成，
+根因与下一步见 REPORT.md。）
+
+## 8.4 局限
+
+- 每头掩码在 ggml 中不可表达（KQ mask 广播 head 维）→ 我们做**全头并集**选择，
+  比逐头最优更保守（多选）；
+- head 路由（检索/流式两分支）需要两次 attention 子图，收益待 32K+ 实测后评估；
+- 页尺寸固定 32（对齐 AR004/AR005 块），更细的页会增加 row_table 与 top-k 宽度。

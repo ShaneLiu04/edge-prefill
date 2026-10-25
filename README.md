@@ -17,10 +17,17 @@ serving. EdgePrefill plans and executes a sparse prefill:
 3. **Attention top-k (AR002/AR003)** — attention layers gather only the
    highest-ranked KV rows; per-head adaptive matrices come from an offline
    head-classification probe (`classify-heads`).
-4. **Branch-gated sparse prefill (AR004, in progress)** — NSA/MoBA-style
+4. **Branch-gated sparse prefill (AR004)** — NSA/MoBA-style
    compressed branches (representative-token injection + pooled V-rows),
    per-head query gating, large-chunk scheduling, and head pattern routing
    (MInference-style) / pyramid layer prior (PyramidKV-style).
+5. **In-graph query-aware page gating (AR006)** — the gate moves *inside*
+   the prefill graph: per ubatch, per layer, K pages are reduced to means,
+   scored against the current query (MoBA-style), and the top-k pages plus
+   a local window are gathered once. No embedding model, no host-side
+   selection, `semantic_score_ms = 0` on the gated path. Page scoring by
+   Quest-style exact bounds was implemented, measured and rejected (biased
+   toward large-norm keys); see `docs/research.md` §8.
 
 Sparse paths are lossy by construction. Every benchmark report pairs latency
 with a quality metric (needle accuracy, QA overlap, or PPL retention), and
@@ -82,24 +89,37 @@ EDGE_PREFILL_TEST_MODEL=/path/to/model.gguf ./build/edge_prefill_tests
 | `--kv-type f16\|q8_0\|q4_0` | KV cache precision | f16 |
 | `--skip-ffn <spec>` | FFN layer skip mask for prefill | — |
 | `--chunk-size N` | 0 = auto-align to n_ubatch (AR004) | 0 |
+| `--qg-bound on\|off` | in-graph query-aware page gating (AR006) | off |
+| `--qg-sel-pages N` | pages kept per ubatch by the gate (quality knob) | 16 |
+| `--qg-local-rows N` | local window rows around the ubatch (0 = ubatch span) | 0 |
+| `--qg-pool-pages N` | pool pages folded into the gated branch | 0 |
 | `--threads N` | CPU threads | physical cores |
 | `--n-gpu-layers N` | GPU offload (99 = full) | 0 |
 
 ## Expected results
 
-Numbers below are from this repository's raw runs (16 threads, Xeon Gold
-6234, Qwen2.5-1.5B-Instruct Q4_K_M; full commands + CSV in
-`benchmarks/results/exp*/`). The AR004 refresh (branch + gating) is in
-progress; the table reflects committed, reproducible runs.
+Real runs only: Qwen2.5-1.5B-Instruct Q4_K_M, 16 threads, Xeon Gold 6234,
+one interleaved session per dataset (dense measured right before its sparse
+siblings). Raw CSV + env JSON + the exact config live in
+`benchmarks/results/ar006-campaign/`; the full write-up with the honest
+acceptance status is `benchmarks/results/ar006-campaign/REPORT.md`.
 
-| Setup | Prompt | TTFT | vs dense | Quality |
+| Setup | Prompt | TTFT | vs dense | Quality (needle) |
 | --- | ---: | ---: | ---: | --- |
-| dense | 16K | 165.6 s | 1.0x | 1.0 |
-| selection b=0.25 | 16K | 27.2 s | 6.1x | needle hit (old metric) |
-| head-adaptive k=96 | 16K | see `exp-head-16k` | ~6x | see report |
+| dense | 8K | 118.9 s | 1.0x | 1.00 |
+| in-graph gate p16 (AR006) | 8K | 11.6 s | **9.4x** | 1.00 |
+| dense | 16K | 161.8 s | 1.0x | 1.00 |
+| in-graph gate p16 (AR006) | 16K | 23.7 s | **6.8x** | 1.00 |
+| AR005 qg-2d + embedding | 16K | 25.1 s | 6.4x | 1.00 |
+| in-graph gate p24 + local32 | 32K | 67.9 s | **5.7x** | 1.00 |
+| in-graph gate p16 | multi-needle | 17.1 s | 3.8x | 0.83 (scalar: 2.8x / 0.67) |
 
-AR004 acceptance target (tracked in `specs/changes/AR004-*`): 16K TTFT
->= 10x dense with quality >= 0.9, reported with raw CSV.
+The gated path runs without an embedding model (`semantic_score_ms = 0`).
+Absolute TTFT depends on the host (this session ran up to 3x slower than the
+AR004 session on the same CPU); compare ratios measured in one session, and
+use `benchmarks/scripts/check_expected_ar006.py` for the machine-independent
+gate. AR006 does **not** reach 10x at 32K on CPU with the current page-mean
+implementation — the reason and the next increments are in the REPORT.
 
 ## Repository layout
 
