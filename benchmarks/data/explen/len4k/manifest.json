@@ -1,0 +1,38 @@
+{
+  "cases": 4,
+  "rows": [
+    {
+      "answer": "MAGENTA-FALCON-7000",
+      "context_path": "contexts/niah-01.txt",
+      "context_sha256": "ed6fd3a4fe85e5d375e29f831f7fd382861987ac87f79b17cfa0e40064640767",
+      "id": "niah-01",
+      "question": "What is the secret passcode for vault 1?",
+      "task": "niah"
+    },
+    {
+      "answer": "COBALT-HERON-7137",
+      "context_path": "contexts/niah-02.txt",
+      "context_sha256": "f6a167d18f3a65df985e5edc8847b3cb61d744bb0a7e62053c6f3a294b76f066",
+      "id": "niah-02",
+      "question": "What is the secret passcode for vault 2?",
+      "task": "niah"
+    },
+    {
+      "answer": "AMBER-RAVEN-7274",
+      "context_path": "contexts/niah-03.txt",
+      "context_sha256": "1b84d0aa53e816cc8e4e500d7cb3a978112c84f3e129f476ff96a05510ed0bc7",
+      "id": "niah-03",
+      "question": "What is the secret passcode for vault 3?",
+      "task": "niah"
+    },
+    {
+      "answer": "VIOLET-PANTHER-7411",
+      "context_path": "contexts/niah-04.txt",
+      "context_sha256": "03da9de398fa58c3c64c5e0c9d2fbb53954dc2c0525c6686b4c6500b44f99eb4",
+      "id": "niah-04",
+      "question": "What is the secret passcode for vault 4?",
+      "task": "niah"
+    }
+  ],
+  "sha256": "095617e4a1fc0ac889ae17d2c73c637218a9b699f0a5807329f352f47b15fd3a"
+}
