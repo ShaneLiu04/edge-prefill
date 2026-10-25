@@ -1,0 +1,7 @@
+id	task	context_path	question	answer
+mn-01-n1	niah	contexts/mn-01.txt	What is the secret passcode for vault 1?	MAGENTA-FALCON-7100
+mn-01-n2	niah	contexts/mn-01.txt	What is the secret passcode for vault 2?	COBALT-HERON-7231
+mn-01-n3	niah	contexts/mn-01.txt	What is the secret passcode for vault 3?	AMBER-RAVEN-7362
+mn-02-n4	niah	contexts/mn-02.txt	What is the secret passcode for vault 4?	VIOLET-PANTHER-7493
+mn-02-n5	niah	contexts/mn-02.txt	What is the secret passcode for vault 5?	CRIMSON-LYNX-7624
+mn-02-n6	niah	contexts/mn-02.txt	What is the secret passcode for vault 6?	TEAL-OTTER-7755
