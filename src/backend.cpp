@@ -545,6 +545,29 @@ int32_t LlamaBackend::qg_count() const {
     return ctx_ ? llama_get_prefill_qg_count(ctx_) : 0;
 }
 
+Status LlamaBackend::set_qg_bound(bool enabled, uint32_t sel_pages,
+                                  uint32_t local_rows, uint32_t pool_pages) {
+    if (!ctx_) return Status::error(ErrorCode::InvalidArgument, "context is not created");
+    const int32_t rc = llama_set_prefill_qg_bound(
+            ctx_, enabled ? 1 : 0, static_cast<int32_t>(sel_pages),
+            static_cast<int32_t>(local_rows), static_cast<int32_t>(pool_pages));
+    if (rc == 9) {
+        return Status::error(ErrorCode::Unsupported,
+                             "llama_set_prefill_qg_bound unsupported by this build");
+    }
+    if (rc != 0) {
+        return Status::error(ErrorCode::InvalidArgument,
+                             "llama_set_prefill_qg_bound rejected sel_pages=" +
+                                 std::to_string(sel_pages) + " local_rows=" +
+                                 std::to_string(local_rows));
+    }
+    return Status::success();
+}
+
+bool LlamaBackend::qg_bound() const {
+    return ctx_ ? llama_get_prefill_qg_bound(ctx_) != 0 : false;
+}
+
 int32_t LlamaBackend::n_vocab() const {
     return vocab_ ? llama_vocab_n_tokens(vocab_) : 0;
 }
