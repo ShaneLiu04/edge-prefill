@@ -1,5 +1,7 @@
 #include "edge_prefill/attention_sparsity.h"
 
+#include "edge_prefill/log.h"
+
 #include <algorithm>
 #include <cmath>
 #include <map>
@@ -653,11 +655,22 @@ Status AttentionSparsityController::build_query_gated(
         q_bounds->push_back(static_cast<int32_t>(hi));
 
         // Mandatory blocks: the sink block (row 0 — guarantees every
-        // query sees at least one row, the NaN guard) and the recent
-        // block (the rows directly preceding the group).
+        // query sees at least one row, the NaN guard), every block that
+        // intersects the group's own query span [lo, hi), and the recent
+        // block (the rows directly preceding the group). Own-span rows
+        // are non-negotiable: without its local context a token's hidden
+        // state is incoherent, which corrupts the KV cache for every
+        // higher layer and derails decode even when retrieval works.
         std::set<uint32_t> mandatory;
         const uint32_t sink_block = selection.token_indices.front() / bs;
         mandatory.insert(sink_block);
+        for (uint32_t b = 0; b < n_blocks; ++b) {
+            if (blk_count[b] == 0) continue;
+            const uint32_t fr = blk_first_row[b];
+            if (fr < hi && fr + blk_count[b] > lo) {
+                mandatory.insert(b);
+            }
+        }
         if (lo > 0) {
             // Block containing row lo-1: the last block whose first row
             // is <= lo-1.
@@ -719,6 +732,23 @@ Status AttentionSparsityController::build_query_gated(
         // but the contract promises forced sink+recent; keep the guard.
         if (rows.empty()) {
             rows.push_back(0);
+        }
+        // AR005 debug: dump each group's row set so multi-group quality
+        // issues can be traced to the scored plan instead of the graph.
+        if (log_level() >= LogLevel::Debug) {
+            std::string dump = "qg rows g" + std::to_string(g) +
+                               " n=" + std::to_string(rows.size()) + " [";
+            for (size_t i = 0; i < rows.size(); ++i) {
+                if (i) dump += ',';
+                if (i >= 8 && i + 8 < rows.size()) {
+                    dump += "...";
+                    i = rows.size() - 9;
+                    continue;
+                }
+                dump += std::to_string(rows[i]);
+            }
+            dump += "]";
+            log_debug(dump);
         }
         group_rows->push_back(std::move(rows));
     }

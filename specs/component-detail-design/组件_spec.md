@@ -134,7 +134,9 @@ EdgePrefill 负责端侧 LLM 的 **prefill 阶段优化**：在真实 GGUF 模�
   attention 下禁用。
 - Query-chunk 门控（AR004，MoBA 式）通过 `llama_set_prefill_qg_count/
   qg_rows/qg_bounds` 控制：graph 按查询分片（默认 128 token/片，≤16 片）循环
-  gather-attend-concat；每分片行集必含 sink+recent；与 head 矩阵路径互斥
+  gather-attend-concat；每分片行集必含 sink+recent+**该分片自身查询跨度行**（AR005 修复：
+  缺自身局部上下文会使隐藏态失真并污染更高层 KV cache，实测 4K needle 由 0.5 提升至 1.0）；
+  与 head 矩阵路径互斥
   （矩阵优先，`query-gating-skipped`）；超限/无 draft 分数回退全局集合并审计；
   patch 缺失回退全局集合；flash attention 下禁用。
 - Head 模式路由与金字塔先验（AR004，MInference/PyramidKV 式）为纯规划层：

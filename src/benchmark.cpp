@@ -286,7 +286,7 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
     // the run never starts.
     EmbeddingScorer embed;
     if (!cfg.embedding_model.empty()) {
-        auto embed_st = embed.load_model(cfg.embedding_model);
+        auto embed_st = embed.load_model(cfg.embedding_model, cfg.embed_threads);
         if (!embed_st.ok()) {
             LlamaBackend::shutdown();
             return embed_st;
@@ -385,7 +385,13 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
                     Config run_cfg = base;
                     run_cfg.mode = mode;
                     run_cfg.budget = budget;
-                    run_cfg.budget_overridden = false;
+                    // The loop budget is authoritative for a bench grid:
+                    // without this the planner silently falls back to the
+                    // mode default (0.5 for balanced, then the 4096-token
+                    // clamp), which masked every conf/CLI budget request
+                    // since AR002. Dense stays 1.0 - the planner checks
+                    // mode==Dense before the override.
+                    run_cfg.budget_overridden = true;
                     PlannerInput pin;
                     pin.n_tokens = static_cast<uint32_t>(tokens.size());
                     pin.mode = mode;
@@ -423,10 +429,6 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
                     st = selector.select(tokens, c.question, pieces, sopts,
                                          embed.loaded() ? &embed_adapter : nullptr,
                                          &selection);
-                    const double select_ms =
-                            std::chrono::duration<double, std::milli>(
-                                    std::chrono::steady_clock::now() - sel_begin)
-                                    .count();
                     if (!st.ok()) continue;
 
                     // Derive attention gather indices for non-dense plans;
@@ -665,6 +667,16 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
                             log_debug(qg_reason);
                         }
                     }
+
+                    // AR005 FR-5: the selection-stage clock stops after the
+                    // 2D group-block matrix build (when armed): the matrix is
+                    // selection work, and charging it to prefill would
+                    // fabricate speedup. semantic_score_ms therefore covers
+                    // select() + any embedding-side matrix construction.
+                    const double select_ms =
+                            std::chrono::duration<double, std::milli>(
+                                    std::chrono::steady_clock::now() - sel_begin)
+                                    .count();
 
                     // Untimed warmup runs stabilize caches and page in model
                     // weights so the timed repeats measure steady state.
