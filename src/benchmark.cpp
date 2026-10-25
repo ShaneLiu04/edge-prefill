@@ -587,8 +587,23 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
                     // pool rides only on the scalar gather. With the
                     // embedding engine active the plan upgrades to the
                     // per-group 2D matrix; degradation steps are audited.
+                    // AR006: bound gating takes precedence and needs no
+                    // plan-level row sets at all.
                     std::string qg_source;
-                    if (cfg.query_gating && !popts.enable_head_adaptive &&
+                    if (cfg.qg_bound && !popts.enable_head_adaptive &&
+                        !selection.dense) {
+                        popts.enable_qg_bound = true;
+                        popts.qg_sel_pages = cfg.qg_sel_pages;
+                        popts.qg_local_rows = cfg.qg_local_rows;
+                        popts.qg_pool_pages = cfg.qg_pool_pages;
+                        popts.enable_query_gating = false;
+                        popts.enable_pool_blocks = false;
+                        qg_source = "attention-bound";
+                        log_debug("bound gating plan: sel_pages=" +
+                                  std::to_string(cfg.qg_sel_pages) +
+                                  " local_rows=" +
+                                  std::to_string(cfg.qg_local_rows));
+                    } else if (cfg.query_gating && !popts.enable_head_adaptive &&
                         !selection.dense &&
                         selection.per_pos_scores.size() == selection.total_tokens) {
                         QueryGatingOptions qg_opts;

@@ -359,6 +359,18 @@ Status parse_config_file(const std::string& path, Config* out) {
         } else if (key == "query_top_k") {
             if (!parse_u64(value, &u) || u > 0xffffffffull) goto bad_value;
             out->query_top_k_per_group = static_cast<uint32_t>(u);
+        } else if (key == "qg_bound") {
+            if (!parse_bool(value, &b)) goto bad_value;
+            out->qg_bound = b;
+        } else if (key == "qg_sel_pages") {
+            if (!parse_u64(value, &u) || u > 128) goto bad_value;
+            out->qg_sel_pages = static_cast<uint32_t>(u);
+        } else if (key == "qg_local_rows") {
+            if (!parse_u64(value, &u) || u > 32768) goto bad_value;
+            out->qg_local_rows = static_cast<uint32_t>(u);
+        } else if (key == "qg_pool_pages") {
+            if (!parse_u64(value, &u) || u > 4096) goto bad_value;
+            out->qg_pool_pages = static_cast<uint32_t>(u);
         } else {
             return Status::error(ErrorCode::InvalidArgument, "unknown config key: " + key);
         }
