@@ -1565,3 +1565,83 @@ TEST_CASE(qg_capi_validation) {
 
     LlamaBackend::shutdown();
 }
+
+// AR006: the bound-gating C API validates budgets and takes ownership of
+// the sparse attention state (arming clears the row-list qg path).
+TEST_CASE(bound_gating_capi_validation) {
+    Loaded loaded;
+    if (!load(&loaded)) {
+        std::cout << "SKIP bound_gating_capi_validation (EDGE_PREFILL_TEST_MODEL unset)\n";
+        return;
+    }
+
+    CHECK_ERR(loaded.backend.set_qg_bound(true, 129, 0, 0), ErrorCode::InvalidArgument);
+    CHECK_ERR(loaded.backend.set_qg_bound(true, 0, 1025, 0), ErrorCode::InvalidArgument);
+    CHECK(!loaded.backend.qg_bound());
+
+    CHECK_OK(loaded.backend.set_qg_bound(true, 4, 0, 0));
+    CHECK(loaded.backend.qg_bound());
+    // Arming clears the row-list plan so exactly one mechanism is live.
+    CHECK_EQ(loaded.backend.qg_count(), 0);
+
+    CHECK_OK(loaded.backend.set_qg_bound(false, 0, 0, 0));
+    CHECK(!loaded.backend.qg_bound());
+
+    LlamaBackend::shutdown();
+}
+
+// AR006: bound gating runs on a real model, reports the audit flag, keeps
+// logits finite and deterministic, and leaves no state behind (the dense
+// path after a gated prefill is bit-identical to the untouched one).
+TEST_CASE(bound_gating_execution_and_restore) {
+    Loaded loaded;
+    SparseScenario scenario;
+    if (!setup_sparse_scenario(&loaded, &scenario)) {
+        std::cout << "SKIP bound_gating_execution_and_restore (EDGE_PREFILL_TEST_MODEL unset)\n";
+        return;
+    }
+
+    Selection selection = scenario.selection;
+    selection.attention_indices = scenario.indices;
+    selection.attention_top_k = static_cast<uint32_t>(scenario.indices.size());
+
+    std::unique_ptr<PrefixCache> cache;
+    SparsePrefiller prefiller(&loaded.backend, cache.get());
+
+    // Reference: plain sparse execution (scalar gather off too).
+    SparsePrefiller::Options opts_ref = exec_options();
+    opts_ref.enable_attn_sparse = false;
+    PrefillStats ref_stats;
+    CHECK_OK(prefiller.prefill(loaded.tokens, selection, opts_ref, &ref_stats));
+    const std::vector<float> ref_logits = logits_of(loaded.backend);
+    CHECK(!ref_logits.empty());
+
+    SparsePrefiller::Options opts = exec_options();
+    opts.enable_qg_bound = true;
+    opts.qg_sel_pages = 4;
+    opts.qg_local_rows = 0;
+    PrefillStats stats;
+    CHECK_OK(prefiller.prefill(loaded.tokens, selection, opts, &stats));
+    CHECK(stats.query_gating);
+    CHECK(!stats.attn_fallback);
+    const std::vector<float> bound_logits = logits_of(loaded.backend);
+    CHECK_EQ(bound_logits.size(), ref_logits.size());
+    for (float v : bound_logits) CHECK(std::isfinite(v));
+
+    // Deterministic across repeated prefills.
+    PrefillStats stats2;
+    CHECK_OK(prefiller.prefill(loaded.tokens, selection, opts, &stats2));
+    const std::vector<float> bound_logits2 = logits_of(loaded.backend);
+    CHECK_EQ(argmax(bound_logits), argmax(bound_logits2));
+
+    // Restore: the dense path after gating matches the reference run.
+    PrefillStats after_stats;
+    CHECK_OK(prefiller.prefill(loaded.tokens, selection, opts_ref, &after_stats));
+    const std::vector<float> after_logits = logits_of(loaded.backend);
+    CHECK_EQ(after_logits.size(), ref_logits.size());
+    for (size_t i = 0; i < after_logits.size(); ++i) {
+        CHECK_EQ(after_logits[i], ref_logits[i]);
+    }
+
+    LlamaBackend::shutdown();
+}
