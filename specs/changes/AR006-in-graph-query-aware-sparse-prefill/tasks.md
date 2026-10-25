@@ -22,8 +22,8 @@
 | T009 | GPU 关键格点守护（RTX5000，n_gpu_layers=99） | T008 | pending | top_k/get_rows 后端可用性待验 |
 | T010 | 7B/14B 配置模板 + `docs/server-repro.md` + `expected.csv` | T008 | passing | `benchmarks/matrix/bound/{dense-ref,bound-p16,bound-p24}.conf`、`bound/models/qwen2.5-{7b,14b}-*.conf`、`bound/expected.csv` + `check_expected_ar006.py`（5/5 通过） |
 | T011 | README 一键复现改造 + docs（architecture v0.5 / research v3） | T008 | passing | README（AR006 能力 + CLI + 结果表）、architecture §gate placement、research §8、experiments AR006 节、组件详设 §4c/变更记录 |
-| T012 | Review：-Werror、全量回归、dense 等价、无 mock 审计 | T008-T011 | pending | |
-| T013 | ST 验收 + 归档 + tag `ar006-v1.0` + Gitee 推送 | T012 | pending | |
+| T012 | Review：-Werror、全量回归、dense 等价、无 mock 审计 | T008-T011 | passing | 无模型全量 138 PASS/39 SKIP/0 FAIL（干净克隆复跑一致）、真机定向 13 用例 PASS、-Werror 零警告、patch 对 pristine PIN clean、无 mock（真实 GGUF 全链路） |
+| T013 | ST 验收 + 归档 + tag `ar006-v1.0` + Gitee 推送 | T012 | passing | 验收矩阵见 REPORT.md（2 项达成、2 项未达成均记录根因）；tag `ar005-v1.0`/`ar006-v1.0` 已推；Gitee master=396d690（split-push 30 段，树与原始提交一致）；干净克隆 cmake+构建+测试通过 |
 
 ## 关键路径与门
 
