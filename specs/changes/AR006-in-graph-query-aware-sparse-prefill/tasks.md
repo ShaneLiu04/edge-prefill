@@ -18,10 +18,10 @@
 | T005 | 规划侧三分支预算：`qg_local_rows`/`qg_sel_pages`/`qg_pool_pages` 配置键、审计列、降级链 | T004 | passing | 配置键+CLI+审计（qg_source=attention-bound, sem=0）；pool 仍走 AR004 路径（qg_pool_pages 预留） |
 | T006 | embedding 降级为可选：默认 `qg_source=attention-bound`、`semantic_score_ms==0`；保留 2D 回归 | T003 | passing | 默认路径 sem=0 实测；embedding-2d 路径保留（campaign 中 qgv2 对照） |
 | T007 | head 路由 auto：由真实页统计导出 retrieval/streaming 分类（确定性、可写 profile），off 时逐字段等价 | T003 | pending | 设计预留（per-head mask 不可行 → 需拆两次 attention），优先级低于全量验证 |
-| T008 | 真实模型实测矩阵：4K/8K/16K/32K/mn，1.5B CPU 16 线程，含 AR005 对照与净记账 | T005,T006 | in_progress | campaign 运行中（dense/scalar/qgv2/boundp16[/p24]，warmup0 repeats1，32K 头条 r2） |
+| T008 | 真实模型实测矩阵：4K/8K/16K/32K/mn，1.5B CPU 16 线程，含 AR005 对照与净记账 | T005,T006 | passing | 见 `benchmarks/results/ar006-campaign/REPORT.md`；8K 9.4x/q=1.0，16K 6.8x/q=1.0（vs qg-2d 6.4x，sem 1~10s→0），mn 3.8x/q=0.83（scalar 2.8x/0.67），32K 默认 local 质量失败、`local_rows=32` 时 5.7x/q=1.0；16K/32K 的 ≥8x/≥10x 目标未达成，根因已记录 |
 | T009 | GPU 关键格点守护（RTX5000，n_gpu_layers=99） | T008 | pending | top_k/get_rows 后端可用性待验 |
-| T010 | 7B/14B 配置模板 + `docs/server-repro.md` + `expected.csv` | T008 | pending | |
-| T011 | README 一键复现改造 + docs（architecture v0.5 / research v3） | T008 | pending | |
+| T010 | 7B/14B 配置模板 + `docs/server-repro.md` + `expected.csv` | T008 | passing | `benchmarks/matrix/bound/{dense-ref,bound-p16,bound-p24}.conf`、`bound/models/qwen2.5-{7b,14b}-*.conf`、`bound/expected.csv` + `check_expected_ar006.py`（5/5 通过） |
+| T011 | README 一键复现改造 + docs（architecture v0.5 / research v3） | T008 | passing | README（AR006 能力 + CLI + 结果表）、architecture §gate placement、research §8、experiments AR006 节、组件详设 §4c/变更记录 |
 | T012 | Review：-Werror、全量回归、dense 等价、无 mock 审计 | T008-T011 | pending | |
 | T013 | ST 验收 + 归档 + tag `ar006-v1.0` + Gitee 推送 | T012 | pending | |
 
@@ -41,6 +41,30 @@
 - `failed`：测试失败，需修复
 
 ## 进度记录
+
+### 2026-10-25 开发会话 2（测量基础设施纠错 + 战役）
+
+- **修 `--repeats` 覆盖 conf 的缺陷**（`src/main.cpp`）：`Args::repeats` 默认值是 5 且
+  `if (args.repeats > 0)` 恒真，导致命令行未给出时也会覆盖 conf 的 `repeats`，
+  矩阵跑一律 5 次（时间 ×5，且 CSV 记录与实际意图不符）。改为哨兵 -1（=未给出）。
+  这是测量基础设施 bug，不影响正确性，但影响本轮与 AR005 的运行时假设；AR005 数字
+  因此是“5 次中位数”，统计上更稳，保留并在文档注明。
+- **WSL 空闲关机**：`wsl -e` 会话全部退出后发行版会在数秒内关闭，nohup/setsid
+  后台任务一并被杀（`dmesg` 可见 “Distribution init process exited”）。对策：
+  用 `keepAliveOnTimeout` 的前台调用 + 一个常驻 keepalive 会话跑战役。
+- **Dense 计时基线核查（A/B 实测，4K niah-01）**：repeats/warmup 组合
+  (1,0)/(5,0)/(3,1)/(1,1) 的 ttft 分别为 49.0/48.9/48.4/48.6s —— 与 warmup/repeats
+  无关，是稳定的机器状态；同会话 scalar(0.25) 6.2s。据此确认：稀疏路径的加速主要来自
+  选择级稀疏（进入 KV/transformer 的 token 只有 ~25%），而非仅仅 attention 行 gather；
+  4K 上 bound 的 local 窗覆盖全部已入 KV 行（k_sel=0）→ 数学等价 dense，质量 1.0，
+  但比 scalar 慢 2~3×（local 全量 gather + 掩码行 gather 的固定开销）。结论：
+  4K/8K 不是 bound 的目标区间，验收看 16K/32K。
+- 战役（`benchmarks/results/ar006-campaign/`）：dense/scalar/qgv2/boundp16[/p24]
+  × len4k/len8k/multineedle/len16k/len32k，同会话交错测量；汇总脚本
+  `benchmarks/scripts/assemble_ar006.py`，质量门 `check_expected_ar006.py`。
+- 4K 首批数据（同会话）：dense 60.6s（5 次中位）、scalar 6.2s（q=1.0）、
+  qgv2 28.1s（sem 3.5~9.9s，q=1.0）、bound p16 13.9s（q=1.0）→ 净加速 4.4×，
+  且 sem=0：门控路径已把嵌入从关键路径移除。
 
 ### 2026-10-25 开发会话 1（图内门控核心落地）
 

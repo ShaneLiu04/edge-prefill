@@ -269,3 +269,36 @@ sparse_prefill: 分块 prefill（AR004 chunk scheduler 不变）
   `docs/server-repro.md`、`benchmarks/matrix/expected.csv`；
 - 结果：`benchmarks/results/ar006-*`（raw.csv/report.md/env.json/matrix.csv/md）；
 - 发布：tag `ar006-v1.0` + Gitee 同步。
+
+---
+
+---
+
+## 9. 实现对照（as-built，2026-10-25）
+
+实现与第 1~5 节的设计有四处经实测修正的偏差，全部以真实运行数据为依据：
+
+1. **打分函数：精确界 → 页均值。** 设计选的是 Quest 式 `u = sum_d max(q*kmax, q*kmin)`。
+   实现完成后 16K 实测 quality=0（页选择偏向大范数 key）；同时 `sel_pages=0` 的
+   对照 wall(290s) 约等于 dense(312s)，证明开销不在机制而在信号。已改为
+   `score = q * mean(K_page)`（MoBA 门控），16K p16/p24/p32 quality=1.0。
+   代码里保留注释说明否决原因；上界实现已删除。
+2. **页→行展开：整数指数运算 → row_table 查表。** 设计假设可用 `arange*32+add`
+   产生行号，但 ggml 没有 F32→I32 cast（T001 探针确认），该路径不可达。
+   实现改为 host 侧一次性写 `row_table[32,n_pages]`（元素 `(r,p)=p*32+r`），
+   图上 `get_rows(row_table, sel)` 展开为 `[32,k_sel]` 后 reshape 成行号序列。
+3. **掩码转置：逐层 → 每图一次。** 设计放在 attention 调用处；实现中逐层
+   `permute+cont` 会多搬 2*n_tok*n_kv 字节/层，改为 `llama-graph.h` 新增
+   `bound_mask_p`，在 set_input 阶段预转置一次，门控分支只做限行 gather。
+4. **head 路由（FR-6）暂缓。** ggml 的 KQ mask 只广播到 head 维，逐头不同页集
+   需要拆两次 attention 子图；首版用“全头并集 + MAX 归约”保守实现（多选不少选），
+   T007 保持 pending 并在 SRS 标注为后续工作。
+
+另外两条实现细节，避免 ST 阶段误读：
+
+- **local 窗口语义**：`qg_local_rows=0` 表示窗口 = ubatch 自身跨度 `n_tok`
+  （不是 0 行）；`local_start_page` 同时用于 bias（排除 local 页）与 local 行集，
+  两者必须一致，否则同一页会同时进入 local 与 selected。
+- **4K/8K 退化**：当 `local_start_page==0`（local 覆盖全部 KV）时不建 selected
+  分支（`k_sel=0`），图等价于 local-only gather。这是质量安全网，也解释了
+  4K/8K 上不应出现加速。

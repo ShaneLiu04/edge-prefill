@@ -161,6 +161,35 @@ EdgePrefill 负责端侧 LLM 的 **prefill 阶段优化**：在真实 GGUF 模�
   `recommended.conf`；禁止代理指标与伪造结果。
 - `Reporter` 输出 `raw.csv`、`report.md`、`env.json`，每行样本可追溯到命令与环境。
 
+
+## 4c. 图内页门控契约（AR006）
+
+**所有权与互斥**：一个 context 同一时刻只有一个稀疏机制拥有 attention 图。
+`llama_set_prefill_qg_bound(ctx, enabled, sel_pages, local_pages, pool_pages)` 成功
+arming 时清空行集 qg（qg_count/qg_rows/qg_bounds）、scalar attn_top_k、head 矩阵、
+ranked pool、pool blocks，并 bump `prefill_edge_epoch`；任意 `enabled=0` 调用清空字段。
+`llama_get_prefill_qg_bound` 返回 enabled（0/1）。预算校验：`sel_pages<=128`、
+`local_pages<=1024`、`pool_pages>=0`，越界返回 9（Unsupported）之前的 2（InvalidArgument）。
+
+**图语义**：门控在 `build_attn`（非 FlashAttn、非 SWA、`n_head_kv(il)==k->ne[1]`、
+无 sinks/`kq_b`、单流）内生效。页宽固定 32 行。打分 `score(q,p)=q·mean(K_page)`，
+q 取 ubatch 末 token 在每组首个 query head 的投影；归约到全头并集（MAX）。
+页选择 `top_k(score + bias, sel_pages)`，bias 把 local 页与第 0 页（sink）设为 -inf。
+visible 集合 = local（sink 页 + 尾部窗口，窗口 = `local_pages*32` 或 ubatch 跨度）
+∪ selected；K/V 与掩码各一次 `get_rows`，K/V 沿 ne2、mask 沿 ne0 concat。
+
+**退化与等价**：
+- `n_kv < 32`（不足一页）或 `local_start_page == 0`（local 覆盖全部缓存）→ 不建
+  门控节点，走 stock attention（数学等价，避免 gather 开销）；这是 4K/8K 短提示的
+  预期行为。
+- `sel_pages=0` → local-only。
+- `qg_bound=0` 或未 arming → 图与 dense 逐字节一致（`bound_gating_execution_and_restore`
+  验证恢复后与原 dense 逐位相同）。
+
+**审计**：`Sample.qg_source="attention-bound"`、`semantic_score_ms=0`（无嵌入）、
+`attn_fallback` 反映是否回退 dense。规划侧 `Options.enable_qg_bound` 失败时降级到
+行集 qg → scalar → dense 并记录 reason，绝不静默。
+
 ## 4b. 错误、审计与 CLI 契约
 
 | 项 | 契约 |
@@ -208,4 +237,5 @@ EdgePrefill 负责端侧 LLM 的 **prefill 阶段优化**：在真实 GGUF 模�
 | 2026-10-20 | 升级为 AR002：加入 draft 模型、attention 全局/分层 top-k、Radix 前缀缓存、按层 KV 精度、自动调优与 Pareto 基准 | AR002 |
 | 2026-10-21 | 升级为 AR003：加入 head 级自适应稀疏（ranked 池 + 层×头 top-k 矩阵 patch、消融式 head 分类器）、在线质量风险控制器、TuneSearchSpace 增 head_adaptive 维度、Sample 增 risk_level/head_adaptive/retrieval_heads、classify-heads CLI 契约、sync_gitee.sh 交付 | AR003 |
 | 2026-10-22 | 升级为 AR004：加入压缩上下文分支（pool_blocks patch + 代表注入）、query-chunk 门控（qg_count/qg_rows/qg_bounds patch）、head 模式路由与金字塔先验、chunk_size=0 自动对齐 n_ubatch 语义、Gitee 开放复现契约（download_model.sh 双通道+SHA256、结果 CSV/图入库） | AR004 |
+| 2026-10-25 | 升级为 AR006：加入图内查询感知页门控（patch 侧 `llama_set_prefill_qg_bound`，每 ubatch 每层 K 页均值打分 + 图内 top-k + single-union gather，无嵌入、`semantic_score_ms=0`）、页→行 row_table 查表（ggml 无 F32→I32 cast）、每图一次 mask 预转置、local 覆盖全缓存时自动跳过门控（短提示等价 dense）、稀疏路径互斥单一 owner 与 RAII 恢复；新增 `qg_bound/qg_sel_pages/qg_local_rows/qg_pool_pages` 配置键与 CLI | AR006 |
 | 2026-10-24 | 升级为 AR005：加入嵌入模型语义引擎（bge-small GGUF，EmbeddingScorer + EmbeddingSelectionScorer 多态适配，零 patch）、qg v2 组×块 2D 门控（每组本组分数因果 top-k，1D 回退字节等价）、head 任务内校准（--calibration-file 真实文本探针）、Selection 增 per_group_block_scores/score_source、Sample 增 semantic_score_ms 净值记账、语义降级链（embedding→qg v1→scalar→dense 逐级审计） | AR005 |
