@@ -914,13 +914,14 @@ TEST_CASE(query_gated_2d_anti_degradation) {
     const uint32_t recent_b =
             block_of_row(br, group_b * opts.query_chunk_size - 1);
 
-    // Two full blocks causally visible from both groups, distinct from
-    // every mandatory anchor of the two groups.
+    // Two full blocks fully before group A's span: outside both groups'
+    // own spans (so not mandatory for either), causally visible from both
+    // — only the scored budget decides which one each group packs.
     std::vector<uint32_t> cand;
     for (uint32_t b = 0; b < n_prompt_blocks; ++b) {
         if (br.count[b] != 32) continue;
-        if (br.first[b] >= (group_a + 1) * opts.query_chunk_size) continue;
-        if (b == sink_block || b == recent_a || b == recent_b) continue;
+        if (br.first[b] + br.count[b] > group_a * opts.query_chunk_size) continue;
+        if (b == sink_block || b == recent_a) continue;
         cand.push_back(b);
     }
     CHECK(cand.size() >= 2);
@@ -1156,21 +1157,47 @@ TEST_CASE(query_gated_2d_causal_and_budget_consistency) {
     CHECK_EQ(bounds.front(), 0);
     CHECK_EQ(static_cast<uint32_t>(bounds.back()), n_rows);
 
+    // AR005 fix: the group's own query span is mandatory (a query must see
+    // its local context). For group 0 the own span is the causal prefix,
+    // so every causally eligible block is mandatory and the scored budget
+    // has nothing left to pack.
+    std::vector<int32_t> own0;
+    for (uint32_t b = 0; b < n_prompt_blocks; ++b) {
+        if (br.count[b] == 0) continue;
+        if (br.first[b] >= hi0) continue;
+        for (uint32_t r = br.first[b]; r < br.first[b] + br.count[b]; ++r) {
+            own0.push_back(static_cast<int32_t>(r));
+        }
+    }
+    CHECK(!own0.empty());
+    CHECK_EQ(groups[0], own0);
     CHECK(rows_touch_block(groups[0], br, block_w));
-    CHECK(!rows_touch_block(groups[0], br, block_v));
+    CHECK(rows_touch_block(groups[0], br, block_v));
     CHECK(!rows_touch_block(groups[0], br, block_z));
-    // Exactly the sink block plus W: the budget admits nothing else.
-    CHECK_EQ(groups[0].size(),
-             static_cast<size_t>(br.count[sink_block] + br.count[block_w]));
     CHECK_EQ(groups[0].front(), 0);
 
-    // Sink and recent anchors stay mandatory for later groups.
+    // Sink and recent anchors stay mandatory for later groups, and their
+    // own span is fully present.
     CHECK_EQ(groups[1].front(), 0);
     bool has_recent = false;
     for (int32_t r : groups[1]) {
         if (r == bounds[1] - 1) has_recent = true;
     }
     CHECK(has_recent);
+    size_t own1_rows = 0;
+    for (uint32_t b = 0; b < n_prompt_blocks; ++b) {
+        if (br.count[b] == 0) continue;
+        const uint32_t fr = br.first[b];
+        if (fr < static_cast<uint32_t>(bounds[2]) &&
+            fr + br.count[b] > static_cast<uint32_t>(bounds[1])) {
+            own1_rows += br.count[b];
+            CHECK(rows_touch_block(groups[1], br, b));
+        }
+    }
+    CHECK(own1_rows > 0);
+    CHECK(groups[1].size() >= own1_rows);
+    CHECK(groups[1].size() <= own1_rows + br.count[sink_block] + 32 +
+                                 opts.top_k_per_group);
 }
 
 // AR005 FR-2: a group whose causal window leaves no eligible block still
@@ -1203,14 +1230,20 @@ TEST_CASE(query_gated_2d_empty_rowset_forces_row_zero) {
             n_prompt_blocks, opts, &groups, &bounds, &reason));
     CHECK_EQ(groups.size(), static_cast<size_t>(n_groups));
 
-    // Group 0: only the sink block is causally visible, so its row set is
-    // exactly the sink rows — non-empty and anchored at row 0.
-    CHECK(!groups[0].empty());
-    CHECK_EQ(groups[0].front(), 0);
-    CHECK_EQ(groups[0].size(), static_cast<size_t>(br.count[sink_block]));
-    for (int32_t r : groups[0]) {
-        CHECK(static_cast<uint32_t>(r) < br.count[sink_block]);
+    // Group 0: its own span [0, 32) is mandatory, so the row set is
+    // exactly the rows of every block intersecting that span — non-empty
+    // and anchored at row 0 even with an all-zero score matrix.
+    std::vector<int32_t> own0;
+    for (uint32_t b = 0; b < n_prompt_blocks; ++b) {
+        if (br.count[b] == 0) continue;
+        if (br.first[b] >= opts.query_chunk_size) continue;
+        for (uint32_t r = br.first[b]; r < br.first[b] + br.count[b]; ++r) {
+            own0.push_back(static_cast<int32_t>(r));
+        }
     }
+    CHECK(!own0.empty());
+    CHECK_EQ(groups[0], own0);
+    CHECK_EQ(groups[0].front(), 0);
     // Every group keeps the mandatory sink row 0.
     for (size_t g = 0; g < groups.size(); ++g) {
         CHECK(!groups[g].empty());
