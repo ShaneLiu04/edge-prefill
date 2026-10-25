@@ -1,0 +1,154 @@
+{
+  "model_sha256": "6a1a2eb6d15622bf3c96857206351ba97e1af16c30d7a74ee38970e434e9407e",
+  "quality_floor": 0.95,
+  "margin": 1.0,
+  "generated": "2026-10-25T16:59:57Z",
+  "points": [
+    {
+      "dataset": "explen/len4k",
+      "length": 3962,
+      "budget": 0.05,
+      "signal": "lexical",
+      "quality": 0.5,
+      "min_quality": 0.0,
+      "ttft_ms": 3022.0
+    },
+    {
+      "dataset": "explen/len4k",
+      "length": 3962,
+      "budget": 0.08,
+      "signal": "lexical",
+      "quality": 1.0,
+      "min_quality": 1.0,
+      "ttft_ms": 3696.3
+    },
+    {
+      "dataset": "explen/len4k",
+      "length": 3962,
+      "budget": 0.12,
+      "signal": "lexical",
+      "quality": 1.0,
+      "min_quality": 1.0,
+      "ttft_ms": 3634.6
+    },
+    {
+      "dataset": "explen/len8k",
+      "length": 7826,
+      "budget": 0.05,
+      "signal": "lexical",
+      "quality": 1.0,
+      "min_quality": 1.0,
+      "ttft_ms": 3349.4
+    },
+    {
+      "dataset": "explen/len8k",
+      "length": 7826,
+      "budget": 0.08,
+      "signal": "lexical",
+      "quality": 1.0,
+      "min_quality": 1.0,
+      "ttft_ms": 5881.5
+    },
+    {
+      "dataset": "explen/len8k",
+      "length": 7826,
+      "budget": 0.12,
+      "signal": "lexical",
+      "quality": 1.0,
+      "min_quality": 1.0,
+      "ttft_ms": 7667.2
+    },
+    {
+      "dataset": "explen/len16k",
+      "length": 15603,
+      "budget": 0.05,
+      "signal": "lexical",
+      "quality": 1.0,
+      "min_quality": 1.0,
+      "ttft_ms": 6993.1
+    },
+    {
+      "dataset": "explen/len16k",
+      "length": 15603,
+      "budget": 0.08,
+      "signal": "lexical",
+      "quality": 1.0,
+      "min_quality": 1.0,
+      "ttft_ms": 11001.8
+    },
+    {
+      "dataset": "explen/len16k",
+      "length": 15603,
+      "budget": 0.12,
+      "signal": "lexical",
+      "quality": 0.5,
+      "min_quality": 0.0,
+      "ttft_ms": 15747.6
+    },
+    {
+      "dataset": "deep/len32k",
+      "length": 31125,
+      "budget": 0.05,
+      "signal": "lexical",
+      "quality": 0.8929,
+      "min_quality": 0.5714,
+      "ttft_ms": 13683.0
+    },
+    {
+      "dataset": "deep/len32k",
+      "length": 31125,
+      "budget": 0.08,
+      "signal": "lexical",
+      "quality": 0.6667,
+      "min_quality": 0.0,
+      "ttft_ms": 14811.6
+    },
+    {
+      "dataset": "deep/len32k",
+      "length": 31125,
+      "budget": 0.12,
+      "signal": "lexical",
+      "quality": 0.75,
+      "min_quality": 0.0,
+      "ttft_ms": 26939.6
+    }
+  ],
+  "recommendation": {
+    "3962": {
+      "budget": 0.08,
+      "signal": "lexical",
+      "quality": 1.0,
+      "min_quality": 1.0,
+      "note": "floor-met",
+      "measured_budget": 0.08,
+      "measured_ttft_ms": 3696.3
+    },
+    "7826": {
+      "budget": 0.05,
+      "signal": "lexical",
+      "quality": 1.0,
+      "min_quality": 1.0,
+      "note": "floor-met",
+      "measured_budget": 0.05,
+      "measured_ttft_ms": 3349.4
+    },
+    "15603": {
+      "budget": 0.05,
+      "signal": "lexical",
+      "quality": 1.0,
+      "min_quality": 1.0,
+      "note": "floor-met",
+      "measured_budget": 0.05,
+      "measured_ttft_ms": 6993.1
+    },
+    "31125": {
+      "budget": 0.05,
+      "signal": "lexical",
+      "quality": 0.893,
+      "min_quality": 0.571,
+      "note": "floor-missed",
+      "measured_budget": 0.05,
+      "measured_ttft_ms": 13683.0
+    }
+  }
+}

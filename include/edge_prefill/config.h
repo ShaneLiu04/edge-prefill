@@ -49,7 +49,17 @@ struct Config {
     uint32_t min_dense_tokens = 512;
     uint32_t sink_blocks = 1;
     uint32_t recent_blocks = 2;
-    uint32_t coverage_stride = 8;
+    // AR007: 0 means auto (coverage sample count derived from the budget);
+    // any value > 1 pins the maximum stride-bucket density.
+    uint32_t coverage_stride = 0;
+    // AR007 FR-2/FR-3 selection quality knobs.
+    double anchor_ratio = 0.35;
+    double anchor_stride_scale = 1.0;
+    double mmr_threshold = 0.60;
+    double mmr_lambda = 0.50;
+    // AR007 FR-3: measured budget-vs-quality curve. Empty disables the
+    // length-adaptive budget (behavior falls back to the mode default).
+    std::string budget_curve;
     uint32_t repeats = 5;
     uint32_t warmup = 1;
 
@@ -150,6 +160,10 @@ struct Plan {
     // dense-fallback plan because dense prefill never gathers.
     uint32_t attention_top_k = 0;
     bool dense_fallback = false;
+    // AR007 FR-3: where the admission budget came from —
+    // "override" (user/conf), "model" (measured curve), "clamp" (memory
+    // ceiling), "default" (mode default, no curve).
+    std::string budget_source = "default";
     std::vector<std::string> reasons;
 
     std::string to_json() const;

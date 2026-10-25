@@ -48,6 +48,11 @@ struct Selection {
     // fallback or draft-disabled) or DraftScorer::source() ("draft",
     // "embedding"). Audited per request; never fabricated.
     std::string score_source = "lexical";
+    // AR007 FR-2/FR-3 audit: how many structural anchors were forced in
+    // and how many candidates the MMR pass down-weighted. Both are zero
+    // for dense selections.
+    uint32_t anchor_blocks = 0;
+    uint32_t mmr_penalized = 0;
     std::string reason;
 
     std::string to_json() const;
@@ -60,6 +65,17 @@ struct SelectionOptions {
     uint32_t sink_blocks = 1;
     uint32_t recent_blocks = 2;
     uint32_t coverage_stride = 8;
+    // AR007 FR-2: structural anchors. anchor_ratio caps how much of the
+    // token budget the anchors may consume; anchor_stride_scale multiplies
+    // the coverage-sample count derived from the budget (>= 4 samples are
+    // always placed so no region of the prompt is invisible).
+    double anchor_ratio = 0.35;
+    double anchor_stride_scale = 1.0;
+    // AR007 FR-3: MMR de-duplication. Candidates whose token-set Jaccard
+    // similarity to the already selected blocks exceeds mmr_threshold are
+    // down-weighted by score * (1 - lambda * excess).
+    double mmr_threshold = 0.60;
+    double mmr_lambda = 0.50;
     SelectorWeights weights;
 };
 

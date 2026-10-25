@@ -4,6 +4,8 @@
 #   ./repro.sh smoke    # ~<30 min on 16 cores: build + unit tests + 4K grid
 #   ./repro.sh matrix   # full CPU FR-6 grid (24 points x 16K/32K + 4K/8K/mn8k)
 #   ./repro.sh full     # matrix + GPU spot checks (needs CUDA + nvidia-smi)
+#   ./repro.sh budget   # AR007 budget-vs-quality sweep + curve (~15 min)
+#   ./repro.sh ar007    # AR007 acceptance campaign + expected gate (dense is slow)
 #
 # Every step is fail-fast (set -euo pipefail) and prints the exact command
 # it runs. Models are downloaded with SHA256 verification into ./models
@@ -158,8 +160,34 @@ case "${SUITE}" in
             echo "no GPU detected: full suite runs the CPU matrix only"
         fi
         ;;
+    budget)
+        # AR007 FR-5: budget-vs-quality sweep + curve on the 4K/8K cells.
+        # Produces benchmarks/results/ar007-sweep/{summary.md,budget_curve.txt}.
+        python3 benchmarks/scripts/sweep_budget.py \
+            --bin "${BIN}" --model "${MAIN_MODEL}" \
+            --embedding "${EMBED_MODEL}" \
+            --datasets explen/len4k,explen/len8k \
+            --budgets 0.05,0.08,0.12,0.20 \
+            --signals lexical,embedding \
+            --repeats 1 \
+            --out "${ROOT}/benchmarks/results/ar007-sweep"
+        OUT="${ROOT}/benchmarks/results/ar007-sweep"
+        ;;
+    ar007)
+        # AR007 FR-5: full acceptance campaign (dense / curve / AR006 budget)
+        # plus the machine-independent gate. Dense dominates the runtime
+        # (32K is minutes per case); resumes by skipping finished cells.
+        bash benchmarks/scripts/ar007_accept.sh \
+            --bin "${BIN}" --model "${MAIN_MODEL}" \
+            --out "${ROOT}/benchmarks/results/ar007-campaign"
+        python3 benchmarks/scripts/check_expected_ar007.py \
+            "${ROOT}/benchmarks/results/ar007-campaign" \
+            "${ROOT}/benchmarks/matrix/budget/expected.csv" \
+            || fail "AR007 campaign deviates from benchmarks/matrix/budget/expected.csv"
+        OUT="${ROOT}/benchmarks/results/ar007-campaign"
+        ;;
     *)
-        fail "unknown suite: ${SUITE} (smoke|matrix|full)"
+        fail "unknown suite: ${SUITE} (smoke|matrix|full|budget|ar007)"
         ;;
 esac
 
@@ -168,7 +196,8 @@ if [[ -f "${OUT}/matrix.md" ]]; then
     cat "${OUT}/matrix.md"
 fi
 
-if [[ "${CHECK_EXPECTED}" == "1" && "${SUITE}" != "smoke" ]]; then
+if [[ "${CHECK_EXPECTED}" == "1" && "${SUITE}" != "smoke" && "${SUITE}" != "budget" \
+      && "${SUITE}" != "ar007" ]]; then
     step "expected-results gate"
     python3 benchmarks/scripts/check_expected.py \
         --matrix "${OUT}/matrix.csv" \

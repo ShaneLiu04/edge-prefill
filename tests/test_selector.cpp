@@ -294,3 +294,79 @@ TEST_CASE(semantic_selection_needle_guard) {
 
     LlamaBackend::shutdown();
 }
+
+// AR007 FR-2: the anchor budget cap is what lets a small budget actually
+// select few tokens. Before AR007 the mandatory anchors alone pinned ~13% of
+// a 16K prompt, so any budget below that produced the same selection.
+TEST_CASE(selector_anchor_cap_reaches_low_budget) {
+    constexpr uint32_t n = 16384;
+    std::vector<llama_token> tokens(n);
+    std::vector<std::string> pieces(n, "filler");
+    for (uint32_t i = 0; i < n; ++i) tokens[i] = static_cast<llama_token>(i % 1000);
+    pieces[100 * 32 + 3] = "needle";
+
+    Selection sel;
+    BlockSelector selector;
+    auto opts = options(0.05);
+    opts.coverage_stride = 0;  // auto (AR007)
+    CHECK_OK(selector.select(tokens, "needle", pieces, opts, nullptr, &sel));
+    CHECK(!sel.dense);
+    // 5% of 16384 = 819 tokens; the 1.05 slack plus the forced last token is
+    // the ceiling. The old unconditional anchors produced ~2100.
+    CHECK(sel.selected_tokens <= 900u);
+    CHECK(sel.selected_tokens >= 700u);
+    // Anchors must respect the ratio cap (35% of the target, >= one block).
+    const uint32_t anchor_tokens = static_cast<uint32_t>(sel.anchor_blocks) * 32u;
+    CHECK(anchor_tokens <= 400u);
+    // The needle block is still pinned by the lexical/entity anchor even at
+    // 5%: quality must not depend on the budget being large.
+    CHECK(std::find(sel.block_indices.begin(), sel.block_indices.end(), 100u) !=
+          sel.block_indices.end());
+}
+
+// AR007 FR-3: MMR must not let near-duplicate boilerplate crowd out a single
+// unique relevant block.
+TEST_CASE(selector_mmr_prefers_unique_block) {
+    constexpr uint32_t n = 16384;
+    std::vector<llama_token> tokens(n);
+    std::vector<std::string> pieces(n);
+    for (uint32_t i = 0; i < n; ++i) tokens[i] = static_cast<llama_token>(i % 1000);
+    // 400 blocks of identical boilerplate that happens to share the query
+    // term, plus one block with the actual fact and a unique word.
+    for (uint32_t i = 0; i < n; ++i) pieces[i] = "report";
+    const uint32_t fact_block = 300;
+    pieces[fact_block * 32] = "needle";
+    pieces[fact_block * 32 + 1] = "zebra";
+
+    auto opts = options(0.03);
+    opts.coverage_stride = 0;
+    opts.mmr_threshold = 0.60;
+    opts.mmr_lambda = 0.50;
+    Selection sel;
+    BlockSelector selector;
+    CHECK_OK(selector.select(tokens, "needle", pieces, opts, nullptr, &sel));
+    CHECK(!sel.dense);
+    CHECK(std::find(sel.block_indices.begin(), sel.block_indices.end(), fact_block) !=
+          sel.block_indices.end());
+    CHECK(sel.mmr_penalized > 0);
+}
+
+// AR007 FR-2: anchors and selection stay deterministic.
+TEST_CASE(selector_ar007_deterministic) {
+    constexpr uint32_t n = 8192;
+    std::vector<llama_token> tokens(n);
+    std::vector<std::string> pieces(n, "filler");
+    for (uint32_t i = 0; i < n; ++i) tokens[i] = static_cast<llama_token>(i % 1000);
+    for (uint32_t i = 0; i < 30; ++i) pieces[7 * 32 + i] = "alpha beta";
+
+    auto opts = options(0.08);
+    opts.coverage_stride = 0;
+    Selection a;
+    Selection b;
+    BlockSelector selector;
+    CHECK_OK(selector.select(tokens, "alpha", pieces, opts, nullptr, &a));
+    CHECK_OK(selector.select(tokens, "alpha", pieces, opts, nullptr, &b));
+    CHECK_EQ(a.token_indices, b.token_indices);
+    CHECK_EQ(a.anchor_blocks, b.anchor_blocks);
+    CHECK_EQ(a.mmr_penalized, b.mmr_penalized);
+}

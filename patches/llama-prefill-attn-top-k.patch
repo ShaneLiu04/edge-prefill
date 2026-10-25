@@ -587,7 +587,7 @@ index 91a97f7..3acfd4b 100644
  
      std::vector<bool> embeddings_layer_inp; // [n_layer()] extract input embeddings for layer
 diff --git a/src/llama-graph.cpp b/src/llama-graph.cpp
-index b7e3744..274d2fe 100644
+index b7e3744..8117939 100644
 --- a/src/llama-graph.cpp
 +++ b/src/llama-graph.cpp
 @@ -558,6 +558,213 @@ void llm_graph_input_attn_kv::set_input(const llama_ubatch * ubatch) {
@@ -953,7 +953,7 @@ index b7e3744..274d2fe 100644
      }
  
      inp->self_k_rot = mctx_cur->build_input_k_rot(ctx0);
-@@ -3221,7 +3563,759 @@ ggml_tensor * llm_graph_context::build_attn(
+@@ -3221,7 +3563,764 @@ ggml_tensor * llm_graph_context::build_attn(
  
      ggml_tensor * kq_mask = inp->get_kq_mask();
  
@@ -1020,31 +1020,36 @@ index b7e3744..274d2fe 100644
 +        ggml_tensor * m_g = m_loc;
 +
 +        if (k_sel > 0) {
-+            // Page score = q . mean(K_page) (MoBA-style gate). The exact
-+            // min/max upper bound was implemented and measured first, but
-+            // ranking by an upper bound is biased toward large-norm keys
-+            // and failed retrieval at 16K (quality 0); the mean key is
-+            // unbiased and needs the same single page reduction.
-+            ggml_tensor * k4 = ggml_view_4d(ctx0, k,
-+                    d, h_kv, bs, n_pages,
-+                    k->nb[1], k->nb[2], bs * k->nb[2], 0);
-+            ggml_tensor * kc = ggml_cont(ctx0, ggml_permute(ctx0, k4, 2, 1, 0, 3)); // [bs, h, d, n_pages]
-+            ggml_tensor * kmean = ggml_pool_1d(ctx0, kc, GGML_OP_POOL_AVG, bs, bs, 0);
-+            kmean = ggml_cont(ctx0, ggml_permute(ctx0,
-+                    ggml_reshape_3d(ctx0, kmean, h_kv, d, n_pages), 1, 0, 2, 3));
-+            // kmean: [d, h_kv, n_pages]
-+
-+            // Query proxy: the ubatch's last query (scales cancel in the
-+            // ranking, so no normalization is needed). One query head per
-+            // KV head (the first of the GQA group) so the gate contracts
-+            // against the per-KV-head page means.
++            // Page score = q . mean(K_page) (MoBA-style gate), computed as
++            // a per-head GEMV over the K view plus a page sum. The previous
++            // implementation materialised cont(permute(k)) and pooled it,
++            // which copies the whole K cache every layer and ubatch
++            // (~160 GB of traffic at 32K, measured to cost more than the
++            // attention it saves). The view-based form keeps the same
++            // ranking and adds no copies beyond a page-sized head transpose.
++            //
++            // The exact min/max upper bound was implemented and measured
++            // first; ranking by an upper bound is biased toward large-norm
++            // keys and failed 16K retrieval (quality 0), so the mean key
++            // stays.
 +            const int64_t head_ratio = q->ne[1] / h_kv;
-+            ggml_tensor * q_last = ggml_view_4d(ctx0, q, d, h_kv, 1, 1,
-+                    head_ratio * q->nb[1], q->nb[2], q->nb[3],
-+                    (n_tok - 1) * q->nb[2]);
-+            ggml_tensor * u = ggml_sum_rows(ctx0,
-+                    ggml_mul(ctx0, kmean, q_last)); // [1, h_kv, n_pages, 1]
-+            ggml_tensor * u2 = ggml_reshape_2d(ctx0, u, h_kv, n_pages);
++            // One query row per KV head (first head of each GQA group), at
++            // the ubatch's last token: [d, 1, h_kv]. cont() materialises only
++            // h_kv*d floats - it makes the operand dense in ne[2] so every
++            // backend (not just CPU) accepts it.
++            ggml_tensor * q_heads = ggml_cont(ctx0, ggml_view_3d(ctx0, q, d, 1, h_kv,
++                    q->nb[1], head_ratio * q->nb[1], (n_tok - 1) * q->nb[2]));
++            // The gate needs k in [d, n_kv, h_kv]: the raw cache tensor is
++            // [d, h_kv, n_kv], and ggml_mul_mat only broadcasts b's ne[2] over
++            // a's, so the permuted view (no copy) is the contract, not `k`.
++            ggml_tensor * row_dot = ggml_mul_mat(ctx0, k_p, q_heads);
++            // Page rows are contiguous along ne0: fold them into the page
++            // axis and sum. All pages are full (n_pages = n_kv / bs), so the
++            // missing 1/bs scale cancels in the ranking.
++            ggml_tensor * page_dot = ggml_reshape_3d(ctx0, row_dot, bs, n_pages, h_kv);
++            ggml_tensor * u = ggml_sum_rows(ctx0, page_dot);  // [1, n_pages, h_kv]
++            ggml_tensor * u2 = ggml_cont(ctx0, ggml_permute(ctx0,
++                    ggml_reshape_2d(ctx0, u, n_pages, h_kv), 1, 0, 2, 3)); // [h_kv, n_pages]
 +            ggml_tensor * u1 = (h_kv > 1)
 +                    ? ggml_pool_1d(ctx0, u2, GGML_OP_POOL_MAX, h_kv, h_kv, 0)
 +                    : u2;

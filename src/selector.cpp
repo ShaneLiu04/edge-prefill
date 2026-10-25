@@ -415,18 +415,121 @@ Status BlockSelector::select(const std::vector<llama_token>& tokens,
             }
         }
     }
-    const uint32_t stride = std::max<uint32_t>(1, opts.coverage_stride);
+
+    // AR007 FR-2: budget-aware coverage sampling. The sample count scales
+    // with the token budget (a quarter of the selected blocks, at least 4),
+    // so a small budget still places a coverage probe in every region of
+    // the prompt instead of one probe per fixed 8-block bucket.
+    const uint32_t target = static_cast<uint32_t>(
+        std::ceil(static_cast<double>(n_tokens) * opts.budget));
+    const uint32_t target_blocks = std::max<uint32_t>(
+        1, static_cast<uint32_t>(std::ceil(static_cast<double>(target) / block_size)));
+    uint32_t n_samples = std::max<uint32_t>(
+        4, static_cast<uint32_t>(std::lround(0.25 * static_cast<double>(target_blocks) *
+                                             std::max(0.0, opts.anchor_stride_scale))));
+    n_samples = std::min<uint32_t>(n_samples, n_blocks);
+    // An explicit coverage_stride still wins when the user narrowed it below
+    // the automatic density (0 means "auto" in AR007).
+    if (opts.coverage_stride > 1) {
+        n_samples = std::min<uint32_t>(
+            n_samples, (n_blocks + opts.coverage_stride - 1) / opts.coverage_stride);
+    }
+    const uint32_t stride = std::max<uint32_t>(1, (n_blocks + n_samples - 1) / n_samples);
+    std::set<uint32_t> stride_anchors;
     for (uint32_t start = 0; start < n_blocks; start += stride) {
         const uint32_t end = std::min(n_blocks, start + stride);
         uint32_t best = start;
         for (uint32_t b = start + 1; b < end; ++b) {
             if (fused[b] > fused[best]) best = b;
         }
-        mandatory.insert(best);
+        stride_anchors.insert(best);
     }
 
-    const uint32_t target = static_cast<uint32_t>(
-        std::ceil(static_cast<double>(n_tokens) * opts.budget));
+    // AR007 FR-2: entity anchors. Distinct question terms that look specific
+    // (digits, long words, CJK) get their best context block pinned, so a
+    // multi-fact question keeps one anchor per fact instead of spending the
+    // whole budget on the single strongest lexical match.
+    std::set<uint32_t> entity_anchors;
+    if (!query_terms.empty()) {
+        const uint32_t df_cap = std::max<uint32_t>(2, n_blocks / 50);
+        std::vector<const std::string*> specific;
+        for (const auto& term : query_terms) {
+            if (df.find(term) == df.end()) continue;
+            if (df[term] > df_cap) continue;
+            bool looks_specific = term.size() >= 6;
+            for (char c : term) {
+                if (c >= '0' && c <= '9') looks_specific = true;
+            }
+            if (!looks_specific && static_cast<unsigned char>(term[0]) < 0x80) continue;
+            specific.push_back(&term);
+        }
+        std::sort(specific.begin(), specific.end(),
+                  [](const std::string* a, const std::string* b) { return *a < *b; });
+        for (const std::string* term : specific) {
+            uint32_t best = 0;
+            double best_score = 0.0;
+            for (uint32_t b = 0; b < n_blocks; ++b) {
+                if (!block_terms_unique[b].count(*term)) continue;
+                if (lexical[b] > best_score) {
+                    best_score = lexical[b];
+                    best = b;
+                }
+            }
+            if (best_score > 0.0) entity_anchors.insert(best);
+        }
+    }
+
+    // Anchor budget cap: anchors must not crowd out the relevance fill.
+    // Trim on the priority order stride > entity > recent, never touching
+    // the sink page or the final block (they carry the attention sink and
+    // the first-token logits).
+    std::set<uint32_t> anchors;
+    for (uint32_t b = 0; b < std::min<uint32_t>(opts.sink_blocks, n_blocks); ++b) anchors.insert(b);
+    anchors.insert(n_blocks - 1);
+    for (uint32_t b : mandatory) anchors.insert(b);
+    for (uint32_t b : entity_anchors) anchors.insert(b);
+    for (uint32_t b : stride_anchors) anchors.insert(b);
+    auto anchor_tokens = [&](const std::set<uint32_t>& set) {
+        uint32_t n = 0;
+        for (uint32_t b : set) n += std::min(block_size, n_tokens - b * block_size);
+        return n;
+    };
+    const uint32_t anchor_cap = std::max<uint32_t>(block_size, static_cast<uint32_t>(
+        std::ceil(static_cast<double>(target) * std::clamp(opts.anchor_ratio, 0.05, 1.0))));
+    for (auto it = stride_anchors.rbegin(); it != stride_anchors.rend() &&
+                                             anchor_tokens(anchors) > anchor_cap; ++it) {
+        if (anchors.count(*it) && *it != 0 && *it != n_blocks - 1 && !mandatory.count(*it)) {
+            anchors.erase(*it);
+        }
+    }
+    for (auto it = entity_anchors.rbegin(); it != entity_anchors.rend() &&
+                                             anchor_tokens(anchors) > anchor_cap; ++it) {
+        if (anchors.count(*it) && *it != 0 && *it != n_blocks - 1 && !mandatory.count(*it)) {
+            anchors.erase(*it);
+        }
+    }
+    mandatory = anchors;
+    out->anchor_blocks = static_cast<uint32_t>(anchors.size());
+
+    // AR007 FR-3: MMR-guided fill. Blocks near-duplicating an already
+    // selected block are down-weighted instead of being dropped, so repeated
+    // boilerplate cannot eat the budget while genuine evidence still wins.
+    auto jaccard = [&](uint32_t a, uint32_t b) {
+        const auto& sa = block_terms_unique[a];
+        const auto& sb = block_terms_unique[b];
+        if (sa.empty() || sb.empty()) return 0.0;
+        size_t inter = 0;
+        const auto& small = sa.size() <= sb.size() ? sa : sb;
+        const auto& large = sa.size() <= sb.size() ? sb : sa;
+        for (const auto& t : small) {
+            if (large.count(t)) ++inter;
+        }
+        const size_t uni = sa.size() + sb.size() - inter;
+        return uni == 0 ? 0.0 : static_cast<double>(inter) / static_cast<double>(uni);
+    };
+    const double mmr_threshold = std::clamp(opts.mmr_threshold, 0.0, 1.0);
+    const double mmr_lambda = std::clamp(opts.mmr_lambda, 0.0, 1.0);
+
     std::set<uint32_t> selected_blocks;
     uint32_t selected_tokens = 0;
     for (uint32_t b : mandatory) {
@@ -434,17 +537,73 @@ Status BlockSelector::select(const std::vector<llama_token>& tokens,
         selected_tokens += std::min(block_size, n_tokens - b * block_size);
     }
 
-    std::vector<uint32_t> order(n_blocks);
-    std::iota(order.begin(), order.end(), 0);
-    std::sort(order.begin(), order.end(), [&](uint32_t a, uint32_t b) {
-        if (std::abs(fused[a] - fused[b]) > 1e-12) return fused[a] > fused[b];
-        return a < b;
-    });
-    for (uint32_t b : order) {
-        if (selected_tokens >= target) break;
-        if (selected_blocks.count(b)) continue;
-        selected_blocks.insert(b);
-        selected_tokens += std::min(block_size, n_tokens - b * block_size);
+    // Incremental MMR: max_sim[b] tracks the highest similarity between b
+    // and any selected block and is refreshed only when a block is added, so
+    // the fill is O(n_blocks^2) set operations instead of O(n_blocks^3).
+    std::vector<double> max_sim(n_blocks, 0.0);
+    std::vector<double> adjusted(fused);
+    std::vector<char> mmr_hit(n_blocks, 0);
+    auto apply_mmr = [&](uint32_t b) {
+        double score = fused[b];
+        const double sim = max_sim[b];
+        if (sim > mmr_threshold && mmr_threshold < 1.0) {
+            const double excess = (sim - mmr_threshold) / (1.0 - mmr_threshold);
+            score *= std::max(0.0, 1.0 - mmr_lambda * excess);
+            if (!mmr_hit[b]) {
+                mmr_hit[b] = 1;
+            }
+        }
+        adjusted[b] = score;
+    };
+    for (uint32_t b : selected_blocks) {
+        for (uint32_t c = 0; c < n_blocks; ++c) {
+            if (c == b) continue;
+            const double j = jaccard(c, b);
+            if (j > max_sim[c]) max_sim[c] = j;
+        }
+    }
+    for (uint32_t b = 0; b < n_blocks; ++b) {
+        if (!selected_blocks.count(b)) apply_mmr(b);
+    }
+    // AR007: span growing. Evidence usually spans a block boundary (the
+    // needle sentence starts mid-block), so a selected block makes its
+    // immediate neighbours more attractive. Without this bias the fill
+    // scatters isolated blocks across the prompt and the answer span gets
+    // split away — measured as a quality drop when the budget grows.
+    constexpr double kSpanGrowWeight = 0.5;
+    std::vector<char> adjacent(n_blocks, 0);
+    auto mark_adjacent = [&](uint32_t b) {
+        if (b > 0) adjacent[b - 1] = 1;
+        if (b + 1 < n_blocks) adjacent[b + 1] = 1;
+    };
+    for (uint32_t b : selected_blocks) mark_adjacent(b);
+
+    while (selected_tokens < target) {
+        uint32_t best = n_blocks;
+        double best_score = 0.0;
+        for (uint32_t b = 0; b < n_blocks; ++b) {
+            if (selected_blocks.count(b)) continue;
+            const double score = adjusted[b] + (adjacent[b] ? kSpanGrowWeight : 0.0);
+            if (score > best_score || (score == best_score && best != n_blocks && b < best)) {
+                best_score = score;
+                best = b;
+            }
+        }
+        if (best == n_blocks || best_score <= 0.0) break;
+        selected_blocks.insert(best);
+        selected_tokens += std::min(block_size, n_tokens - best * block_size);
+        mark_adjacent(best);
+        for (uint32_t c = 0; c < n_blocks; ++c) {
+            if (selected_blocks.count(c)) continue;
+            const double j = jaccard(c, best);
+            if (j > max_sim[c]) {
+                max_sim[c] = j;
+                apply_mmr(c);
+            }
+        }
+    }
+    for (uint32_t b = 0; b < n_blocks; ++b) {
+        if (mmr_hit[b]) ++out->mmr_penalized;
     }
 
     const uint32_t limit = static_cast<uint32_t>(std::ceil(target * 1.05));
@@ -454,7 +613,7 @@ Status BlockSelector::select(const std::vector<llama_token>& tokens,
             if (!mandatory.count(b)) removable.push_back(b);
         }
         std::sort(removable.begin(), removable.end(), [&](uint32_t a, uint32_t b) {
-            if (std::abs(fused[a] - fused[b]) > 1e-12) return fused[a] < fused[b];
+            if (std::abs(adjusted[a] - adjusted[b]) > 1e-12) return adjusted[a] < adjusted[b];
             return a > b;
         });
         for (uint32_t b : removable) {

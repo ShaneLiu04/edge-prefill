@@ -1,0 +1,7 @@
+task,case,ttft_ms,e2e_ms,prefill_tps,kv_bytes,quality,dense,prompt_tokens,selected_tokens,mode,budget,attn_top_k,repeats,ppl_dense,ppl_sparse,query_gating,qg_groups,score_source,semantic_score_ms,draft_score_ms,qg_source,budget_source,anchor_blocks,mmr_penalized
+niah,mn-01-n1@7803,4363.087037,4870.492199,221.6428895,27738132,1,0,7847,967,balanced,0.12,743,1,0,0,0,0,lexical,0,0,,override,11,0
+niah,mn-01-n2@7803,4483.116789,5019.397301,215.7117092,27738132,1,0,7847,967,balanced,0.12,743,1,0,0,0,0,lexical,0,0,,override,11,0
+niah,mn-01-n3@7803,4324.587661,4802.759718,223.6149919,27738132,0,0,7847,967,balanced,0.12,743,1,0,0,0,0,lexical,0,0,,override,11,0
+niah,mn-02-n4@7823,4545.09679,4976.085178,210.1255429,27393924,1,0,7867,955,balanced,0.12,763,1,0,0,0,0,lexical,0,0,,override,10,0
+niah,mn-02-n5@7823,4423.439087,5508.160026,215.9039605,27393924,0,0,7867,955,balanced,0.12,763,1,0,0,0,0,lexical,0,0,,override,10,0
+niah,mn-02-n6@7823,4593.115408,5016.826331,207.9284535,27393924,0,0,7867,955,balanced,0.12,763,1,0,0,0,0,lexical,0,0,,override,10,0

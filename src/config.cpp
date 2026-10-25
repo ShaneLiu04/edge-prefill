@@ -160,6 +160,8 @@ std::string Plan::to_json() const {
     json.value(static_cast<uint64_t>(attention_top_k));
     json.key("dense_fallback");
     json.value(dense_fallback);
+    json.key("budget_source");
+    json.value(budget_source);
     json.key("reasons");
     json.begin_array();
     for (const auto& reason : reasons) json.value(reason);
@@ -267,6 +269,32 @@ Status parse_config_file(const std::string& path, Config* out) {
         } else if (key == "coverage_stride") {
             if (!parse_u64(value, &u)) goto bad_value;
             out->coverage_stride = static_cast<uint32_t>(u);
+        } else if (key == "anchor_ratio") {
+            if (!parse_double(value, &d) || !(d >= 0.05 && d <= 1.0)) {
+                return Status::error(ErrorCode::InvalidArgument,
+                                     "anchor_ratio must be in [0.05,1]");
+            }
+            out->anchor_ratio = d;
+        } else if (key == "anchor_stride_scale") {
+            if (!parse_double(value, &d) || !(d >= 0.0 && d <= 8.0)) {
+                return Status::error(ErrorCode::InvalidArgument,
+                                     "anchor_stride_scale must be in [0,8]");
+            }
+            out->anchor_stride_scale = d;
+        } else if (key == "mmr_threshold") {
+            if (!parse_double(value, &d) || !(d >= 0.0 && d <= 1.0)) {
+                return Status::error(ErrorCode::InvalidArgument,
+                                     "mmr_threshold must be in [0,1]");
+            }
+            out->mmr_threshold = d;
+        } else if (key == "mmr_lambda") {
+            if (!parse_double(value, &d) || !(d >= 0.0 && d <= 1.0)) {
+                return Status::error(ErrorCode::InvalidArgument,
+                                     "mmr_lambda must be in [0,1]");
+            }
+            out->mmr_lambda = d;
+        } else if (key == "budget_curve") {
+            out->budget_curve = value;
         } else if (key == "repeats") {
             if (!parse_i64(value, &i)) goto bad_value;
             if (i < 0) return Status::error(ErrorCode::InvalidArgument, "negative repeats");

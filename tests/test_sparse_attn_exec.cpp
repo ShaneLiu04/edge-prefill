@@ -1634,6 +1634,21 @@ TEST_CASE(bound_gating_execution_and_restore) {
     const std::vector<float> bound_logits2 = logits_of(loaded.backend);
     CHECK_EQ(argmax(bound_logits), argmax(bound_logits2));
 
+    // A narrowed local window forces the page-scoring branch: with the
+    // default window the whole fixture fits inside it and the gate takes the
+    // local-only bypass, which is exactly how a wrong K shape in the page
+    // score (AR007 FR-4) once shipped as an abort at 32K. qg_local_rows=32
+    // makes n_kv > n_local, so the scored path must build and run.
+    SparsePrefiller::Options opts_scored = opts;
+    opts_scored.qg_local_rows = 32;
+    PrefillStats stats_scored;
+    CHECK_OK(prefiller.prefill(loaded.tokens, selection, opts_scored, &stats_scored));
+    CHECK(stats_scored.query_gating);
+    CHECK(!stats_scored.attn_fallback);
+    const std::vector<float> scored_logits = logits_of(loaded.backend);
+    CHECK_EQ(scored_logits.size(), ref_logits.size());
+    for (float v : scored_logits) CHECK(std::isfinite(v));
+
     // Restore: the dense path after gating matches the reference run.
     PrefillStats after_stats;
     CHECK_OK(prefiller.prefill(loaded.tokens, selection, opts_ref, &after_stats));

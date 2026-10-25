@@ -29,6 +29,18 @@ serving. EdgePrefill plans and executes a sparse prefill:
    Quest-style exact bounds was implemented, measured and rejected (biased
    toward large-norm keys); see `docs/research.md` §8.
 
+6. **Length-adaptive admission budget (AR007)** — the admission budget is a
+   measured function of prompt length, not a constant: `sweep_budget.py`
+   produces a budget-vs-quality curve bound to the model's SHA256, and the
+   planner reads it when the conf points at it (`budget_curve`), recording
+   `budget_source = model|override|default|clamp` per sample. The same change
+   adds structural anchors (sink / last block / query-word anchors / strided
+   coverage), span growing (adjacent blocks get +0.5, so an answer that
+   straddles a block boundary stays contiguous) and incremental MMR against
+   near-duplicate text. Measured: quality is **not monotone** in the budget
+   (16K: b=0.05 q=1.00 vs b=0.25 q=0.36), which is why the curve is measured
+   per length instead of scaled.
+
 Sparse paths are lossy by construction. Every benchmark report pairs latency
 with a quality metric (needle accuracy, QA overlap, or PPL retention), and
 `budget=1.0` / all switches off remain numerically equivalent to dense.
@@ -89,6 +101,11 @@ EDGE_PREFILL_TEST_MODEL=/path/to/model.gguf ./build/edge_prefill_tests
 | `--kv-type f16\|q8_0\|q4_0` | KV cache precision | f16 |
 | `--skip-ffn <spec>` | FFN layer skip mask for prefill | — |
 | `--chunk-size N` | 0 = auto-align to n_ubatch (AR004) | 0 |
+| `--budget-curve P` | length -> admission-budget table (AR007) | — |
+| `--anchor-ratio F` | anchor budget as a fraction of the block target (AR007) | 0.35 |
+| `--anchor-stride-scale F` | strided-coverage anchor multiplier (AR007) | 1.0 |
+| `--mmr-lambda F` | MMR penalty weight on near-duplicate blocks (AR007) | 0.5 |
+| `--mmr-threshold F` | Jaccard similarity above which MMR applies (AR007) | 0.6 |
 | `--qg-bound on\|off` | in-graph query-aware page gating (AR006) | off |
 | `--qg-sel-pages N` | pages kept per ubatch by the gate (quality knob) | 16 |
 | `--qg-local-rows N` | local window rows around the ubatch (0 = ubatch span) | 0 |
@@ -113,6 +130,32 @@ acceptance status is `benchmarks/results/ar006-campaign/REPORT.md`.
 | AR005 qg-2d + embedding | 16K | 25.1 s | 6.4x | 1.00 |
 | in-graph gate p24 + local32 | 32K | 67.9 s | **5.7x** | 1.00 |
 | in-graph gate p16 | multi-needle | 17.1 s | 3.8x | 0.83 (scalar: 2.8x / 0.67) |
+
+### AR007: budget curve vs fixed budget (same session, one dense reference per dataset)
+
+| Setup | Prompt | TTFT | vs dense | Quality (needle) |
+| --- | ---: | ---: | ---: | --- |
+| dense | 8K | 48.8 s | 1.0x | 1.00 |
+| curve, b=0.05 | 8K | **1.7 s** | **29.1x** | 1.00 |
+| AR006 gate p16, b=0.25 | 8K | 9.1 s | 5.4x | 0.88 |
+| dense | 16K | 199.5 s | 1.0x | 1.00 |
+| curve, b=0.05 | 16K | **5.2 s** | **38.5x** | 1.00 |
+| AR006 fixed b=0.25 | 16K | 19.9 s | 10.0x | 0.36 |
+| dense | 32K | 384.1 s | 1.0x | 1.00 |
+| curve, b=0.05 | 32K | **7.0 s** | **55.2x** | 0.89 |
+| in-graph gate p24 + local32 (AR007 page score) | 32K | 31.4 s | 12.2x | 1.00 |
+| curve, b=0.05 | multi-needle | 1.8 s | 30.5x | **0.33** |
+| in-graph gate p16 + local32 | multi-needle | 9.7 s | 5.5x | 0.83 |
+
+Raw CSV, env JSON and the conf of every cell are in
+`benchmarks/results/ar007-campaign/`; the honest write-up (including the
+non-monotone budget and the multi-needle weakness) is
+`benchmarks/results/ar007-campaign/REPORT.md`, and the curve itself is
+`benchmarks/results/ar007-sweep/{budget_curve.txt,curve.json,summary.md}`.
+`budget_curve` is **opt-in** (no conf, no curve): on multi-needle documents the
+selection-level path loses facts that the in-graph gate keeps, so use
+`qg_bound=on` there. `benchmarks/scripts/check_expected_ar007.py` re-checks the
+quality/audit columns on another machine without depending on absolute TTFT.
 
 The gated path runs without an embedding model (`semantic_score_ms = 0`).
 Absolute TTFT depends on the host (this session ran up to 3x slower than the

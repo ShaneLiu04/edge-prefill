@@ -60,6 +60,18 @@ struct BenchmarkConfig {
     // weights suppress the semantic-priority default).
     SelectorWeights weights;
     bool weights_overridden = false;
+    // AR007 selection quality knobs (see Config): structural anchors, MMR
+    // de-duplication and the measured budget curve. Defaults keep the AR006
+    // numerics when budget_curve is empty and anchors/MMR stay at their
+    // documented defaults.
+    uint32_t sink_blocks = 1;
+    uint32_t recent_blocks = 2;
+    uint32_t coverage_stride = 0;
+    double anchor_ratio = 0.35;
+    double anchor_stride_scale = 1.0;
+    double mmr_threshold = 0.60;
+    double mmr_lambda = 0.50;
+    std::string budget_curve;
     // GPU offload: layers above this index move to the GPU backend (99 =
     // full offload). 0 keeps everything on CPU.
     int32_t n_gpu_layers = 0;

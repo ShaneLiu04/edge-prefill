@@ -1,0 +1,13 @@
+dataset,tag,budget,signal,prompt_tokens,selected_tokens,quality,min_quality,ttft_ms,repeats,score_source,budget_source
+explen/len4k,len4k-b0.05-lexical,0.05,lexical,3962,210,0.5,0.0,3022.0256799999997,1,lexical,override
+explen/len4k,len4k-b0.08-lexical,0.08,lexical,3962,322,1.0,1.0,3696.349698,1,lexical,override
+explen/len4k,len4k-b0.12-lexical,0.12,lexical,3962,482,1.0,1.0,3634.622117,1,lexical,override
+explen/len8k,len8k-b0.05-lexical,0.05,lexical,7826,388,1.0,1.0,3349.4195095,1,lexical,override
+explen/len8k,len8k-b0.08-lexical,0.08,lexical,7826,644,1.0,1.0,5881.4519805,1,lexical,override
+explen/len8k,len8k-b0.12-lexical,0.12,lexical,7826,956,1.0,1.0,7667.225092000001,1,lexical,override
+explen/len16k,len16k-b0.05-lexical,0.05,lexical,15603,792,1.0,1.0,6993.096286,1,lexical,override
+explen/len16k,len16k-b0.08-lexical,0.08,lexical,15603,1256,1.0,1.0,11001.782940000001,1,lexical,override
+explen/len16k,len16k-b0.12-lexical,0.12,lexical,15603,1880,0.5,0.0,15747.55576,1,lexical,override
+deep/len32k,len32k-b0.05-lexical,0.05,lexical,31125,1565,0.8928571428500001,0.5714285714,13683.01225,1,lexical,override
+deep/len32k,len32k-b0.08-lexical,0.08,lexical,31125,2509,0.666666666675,0.0,14811.58264,1,lexical,override
+deep/len32k,len32k-b0.12-lexical,0.12,lexical,31125,3749,0.75,0.0,26939.578235,1,lexical,override

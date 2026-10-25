@@ -1,5 +1,8 @@
 #include "edge_prefill/benchmark.h"
 
+#include "edge_prefill/budget_curve.h"
+#include "edge_prefill/hash_util.h"
+
 #include <algorithm>
 #include <cctype>
 #include <chrono>
@@ -224,6 +227,28 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
     base.attn_top_k = cfg.attn_top_k;
     base.attn_top_k_layers = cfg.attn_top_k_layers;
     base.weights = cfg.weights;
+    base.sink_blocks = cfg.sink_blocks;
+    base.recent_blocks = cfg.recent_blocks;
+    base.coverage_stride = cfg.coverage_stride;
+    base.anchor_ratio = cfg.anchor_ratio;
+    base.anchor_stride_scale = cfg.anchor_stride_scale;
+    base.mmr_threshold = cfg.mmr_threshold;
+    base.mmr_lambda = cfg.mmr_lambda;
+    base.budget_curve = cfg.budget_curve;
+    if (!base.budget_curve.empty()) {
+        BudgetCurve curve;
+        const auto curve_st = load_budget_curve(base.budget_curve, &curve);
+        if (!curve_st.ok()) {
+            if (warnings) warnings->push_back("budget-curve-unusable:" + curve_st.message);
+            base.budget_curve.clear();
+        } else if (!curve.matches_model(sha256_of_file(base.model_path))) {
+            if (warnings) {
+                warnings->push_back("budget-curve-model-mismatch:" + base.budget_curve);
+            }
+            log_warn("budget curve model fingerprint mismatch; falling back to defaults");
+            base.budget_curve.clear();
+        }
+    }
 
     LlamaBackend backend;
     auto st = LlamaBackend::init();
@@ -384,14 +409,17 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
                     if (mode != Mode::Dense && budget >= 0.95) continue;
                     Config run_cfg = base;
                     run_cfg.mode = mode;
-                    run_cfg.budget = budget;
+                    // A 0 grid point is the AR007 "let the curve decide"
+                    // sentinel: keep the conf budget untouched and let the
+                    // planner read the curve instead of overriding it.
+                    if (budget > 0.0) run_cfg.budget = budget;
                     // The loop budget is authoritative for a bench grid:
                     // without this the planner silently falls back to the
                     // mode default (0.5 for balanced, then the 4096-token
                     // clamp), which masked every conf/CLI budget request
                     // since AR002. Dense stays 1.0 - the planner checks
                     // mode==Dense before the override.
-                    run_cfg.budget_overridden = true;
+                    run_cfg.budget_overridden = budget > 0.0;
                     PlannerInput pin;
                     pin.n_tokens = static_cast<uint32_t>(tokens.size());
                     pin.mode = mode;
@@ -409,6 +437,10 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
                     sopts.sink_blocks = run_cfg.sink_blocks;
                     sopts.recent_blocks = run_cfg.recent_blocks;
                     sopts.coverage_stride = run_cfg.coverage_stride;
+                    sopts.anchor_ratio = run_cfg.anchor_ratio;
+                    sopts.anchor_stride_scale = run_cfg.anchor_stride_scale;
+                    sopts.mmr_threshold = run_cfg.mmr_threshold;
+                    sopts.mmr_lambda = run_cfg.mmr_lambda;
                     sopts.weights = run_cfg.weights;
                     // AR005: semantic-priority fusion defaults when the
                     // embedding engine is active and the user has not
@@ -805,6 +837,9 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
                     sample.semantic_score_ms = embed.loaded() ? select_ms : 0.0;
                     sample.draft_score_ms = 0.0;
                     sample.qg_source = qg_source;
+                    sample.budget_source = plan.budget_source;
+                    sample.anchor_blocks = selection.anchor_blocks;
+                    sample.mmr_penalized = selection.mmr_penalized;
                     log_info("case=" + sample.case_id + " mode=" + sample.mode +
                              " quality=" + std::to_string(sample.quality) +
                              " generated=" + generated);

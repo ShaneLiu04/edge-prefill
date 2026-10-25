@@ -53,6 +53,11 @@ struct Sample {
     double semantic_score_ms = 0.0;
     double draft_score_ms = 0.0;
     std::string qg_source;
+    // AR007 FR-2/FR-3 audit: admission-budget provenance and the structural
+    // anchor / MMR de-duplication counters produced by the selector.
+    std::string budget_source;
+    uint32_t anchor_blocks = 0;
+    uint32_t mmr_penalized = 0;
 };
 
 class Reporter {

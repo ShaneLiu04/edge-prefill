@@ -3,8 +3,8 @@
 | 字段 | 内容 |
 |------|------|
 | 组件名称 | edge-prefill / EdgePrefill |
-| 版本 | 0.4（AR005） |
-| 日期 | 2026-10-24 |
+| 版本 | 0.5（AR007） |
+| 日期 | 2026-10-26 |
 | 语言 | C++17 |
 | 构建 | CMake ≥ 3.20 |
 | 推理后端 | llama.cpp（固定 commit）+ GGUF |
@@ -57,7 +57,7 @@ EdgePrefill 负责端侧 LLM 的 **prefill 阶段优化**：在真实 GGUF 模�
 |------|------|----------|
 | `Config` | 运行配置 | model、draft_model、embedding_model、budget、mode、block/chunk、attention_top_k、skip mask、KV 类型/profile、hardware_profile |
 | `Plan` | 规划器输出 | passes、budget、skip mask、dense_fallback、reasons、attention_top_k、kv_profile、ffn_skip_mask、draft_enabled、per_head_top_k（层×头矩阵序列化）、head_adaptive、risk_level |
-| `Selection` | 块选择结果 | block/token indices、signals、mandatory、selected_tokens、attention_indices、attention_top_k、per_group_block_scores（G×B 语义矩阵，b 为原始块序号）、score_source（lexical/draft/embedding/混合来源审计） |
+| `Selection` | 块选择结果 | block/token indices、signals、mandatory、selected_tokens、attention_indices、attention_top_k、per_group_block_scores（G×B 语义矩阵，b 为原始块序号）、score_source（lexical/draft/embedding/混合来源审计）、anchor_blocks（结构锚点块数）、mmr_penalized（被 MMR 降权的候选块数） |
 | `CacheHit` | 前缀命中 | prefix_len、state blob、age、node_id |
 | `CacheStats` | 缓存统计 | cache_hit_rate、reused_tokens、saved_ttft_ms、saved_kv_bytes |
 | `KvSignature` | KV 兼容签名 | model_key、n_ctx、type_k、type_v、per_layer_profile |
@@ -237,5 +237,6 @@ visible 集合 = local（sink 页 + 尾部窗口，窗口 = `local_pages*32` 或
 | 2026-10-20 | 升级为 AR002：加入 draft 模型、attention 全局/分层 top-k、Radix 前缀缓存、按层 KV 精度、自动调优与 Pareto 基准 | AR002 |
 | 2026-10-21 | 升级为 AR003：加入 head 级自适应稀疏（ranked 池 + 层×头 top-k 矩阵 patch、消融式 head 分类器）、在线质量风险控制器、TuneSearchSpace 增 head_adaptive 维度、Sample 增 risk_level/head_adaptive/retrieval_heads、classify-heads CLI 契约、sync_gitee.sh 交付 | AR003 |
 | 2026-10-22 | 升级为 AR004：加入压缩上下文分支（pool_blocks patch + 代表注入）、query-chunk 门控（qg_count/qg_rows/qg_bounds patch）、head 模式路由与金字塔先验、chunk_size=0 自动对齐 n_ubatch 语义、Gitee 开放复现契约（download_model.sh 双通道+SHA256、结果 CSV/图入库） | AR004 |
+| 2026-10-26 | 升级为 AR007：加入**预算-质量曲线驱动的长度自适应预算**（`budget_curve` 行式 `key = value` + `model_sha256` 指纹校验、ceiling 语义、`budget_source=model|override|default|clamp` 审计列、bench 的 `budget=0` 哨兵表示"让曲线决定"）、**结构锚点与 span growing**（sink/末块/问句词锚点/位置采样，裁剪优先级 sink>recent>quote>stride，相邻已选块 +0.5 保持证据 span 连续）、**增量 MMR 去冗余**（`max_sim[]` 只在新增入选块时刷新，`mmr_threshold`/`mmr_lambda` 可配）、**页打分去 K 拷贝**（patch 侧 `q_heads=cont(view_3d(q))` + `mul_mat(permute(k))` + 页内 `sum_rows`，替代 `cont(permute(k))+pool_1d`，32K 门控 67.9s→25-31s）、Selection/Sample 增 `anchor_blocks`/`mmr_penalized` 审计列与 `sweep_budget.py`/`ar007_accept.sh`/`check_expected_ar007.py` 复现资产 | AR007 |
 | 2026-10-25 | 升级为 AR006：加入图内查询感知页门控（patch 侧 `llama_set_prefill_qg_bound`，每 ubatch 每层 K 页均值打分 + 图内 top-k + single-union gather，无嵌入、`semantic_score_ms=0`）、页→行 row_table 查表（ggml 无 F32→I32 cast）、每图一次 mask 预转置、local 覆盖全缓存时自动跳过门控（短提示等价 dense）、稀疏路径互斥单一 owner 与 RAII 恢复；新增 `qg_bound/qg_sel_pages/qg_local_rows/qg_pool_pages` 配置键与 CLI | AR006 |
 | 2026-10-24 | 升级为 AR005：加入嵌入模型语义引擎（bge-small GGUF，EmbeddingScorer + EmbeddingSelectionScorer 多态适配，零 patch）、qg v2 组×块 2D 门控（每组本组分数因果 top-k，1D 回退字节等价）、head 任务内校准（--calibration-file 真实文本探针）、Selection 增 per_group_block_scores/score_source、Sample 增 semantic_score_ms 净值记账、语义降级链（embedding→qg v1→scalar→dense 逐级审计） | AR005 |

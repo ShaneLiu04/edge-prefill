@@ -949,8 +949,7 @@ TEST_CASE(query_gated_2d_anti_degradation) {
     const uint32_t recent_a = group_a > 0
             ? block_of_row(br, group_a * opts.query_chunk_size - 1)
             : sink_block;
-    const uint32_t recent_b =
-            block_of_row(br, group_b * opts.query_chunk_size - 1);
+    (void)block_of_row(br, group_b * opts.query_chunk_size - 1);
 
     // Two full blocks fully before group A's span: outside both groups'
     // own spans (so not mandatory for either), causally visible from both
@@ -1256,7 +1255,6 @@ TEST_CASE(query_gated_2d_empty_rowset_forces_row_zero) {
 
     const BlockRows br = block_rows_of(sel);
     const uint32_t n_prompt_blocks = br.n_blocks;
-    const uint32_t sink_block = sel.token_indices.front() / 32;
 
     std::vector<std::vector<double>> matrix(
             n_groups, std::vector<double>(n_prompt_blocks, 0.0));

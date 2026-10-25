@@ -2,7 +2,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <filesystem>
 
+#include "edge_prefill/budget_curve.h"
 #include "edge_prefill/ffn_skip.h"
 
 namespace edge_prefill {
@@ -12,6 +14,34 @@ void add_reason(Plan* plan, const std::string& reason) {
     if (std::find(plan->reasons.begin(), plan->reasons.end(), reason) == plan->reasons.end()) {
         plan->reasons.push_back(reason);
     }
+}
+
+// AR007 FR-3: the curve is read once per (path, mtime) pair. A missing or
+// broken file degrades to the mode default with a reason, never a failure:
+// budget selection is an optimisation, not a correctness requirement.
+struct LoadedCurve {
+    std::string path;
+    std::filesystem::file_time_type mtime{};
+    bool valid = false;
+    BudgetCurve curve;
+};
+
+const BudgetCurve* cached_curve(const std::string& path) {
+    static LoadedCurve cache;
+    if (path.empty()) return nullptr;
+    std::error_code ec;
+    const auto mtime = std::filesystem::last_write_time(path, ec);
+    if (ec) return nullptr;
+    if (cache.valid && cache.path == path && cache.mtime == mtime) return &cache.curve;
+    cache.path = path;
+    cache.mtime = mtime;
+    cache.valid = false;
+    BudgetCurve curve;
+    if (load_budget_curve(path, &curve).ok()) {
+        cache.curve = std::move(curve);
+        cache.valid = true;
+    }
+    return cache.valid ? &cache.curve : nullptr;
 }
 
 } // namespace
@@ -41,6 +71,7 @@ Status Planner::make_plan(const PlannerInput& in, const Config& cfg, Plan* out) 
     if (in.n_tokens == 0) {
         plan.dense_fallback = true;
         plan.budget = 1.0;
+        plan.budget_source = "default";
         add_reason(&plan, "empty");
         *out = std::move(plan);
         return Status::success();
@@ -49,6 +80,7 @@ Status Planner::make_plan(const PlannerInput& in, const Config& cfg, Plan* out) 
     if (in.n_tokens < 512 || cfg.budget >= 0.95) {
         plan.dense_fallback = true;
         plan.budget = 1.0;
+        plan.budget_source = cfg.budget_overridden ? "override" : "default";
         add_reason(&plan, in.n_tokens < 512 ? "short-prompt" : "budget>=0.95");
         *out = std::move(plan);
         return Status::success();
@@ -65,6 +97,7 @@ Status Planner::make_plan(const PlannerInput& in, const Config& cfg, Plan* out) 
         if (t_opt >= 0.98 * c_prefill) {
             plan.dense_fallback = true;
             plan.budget = 1.0;
+            plan.budget_source = "default";
             add_reason(&plan, "negative-estimated-gain");
             *out = std::move(plan);
             return Status::success();
@@ -97,6 +130,7 @@ Status Planner::make_plan(const PlannerInput& in, const Config& cfg, Plan* out) 
     } else if (in.mode == Mode::Dense) {
         plan.dense_fallback = true;
         plan.budget = 1.0;
+        plan.budget_source = "default";
         add_reason(&plan, "mode-dense");
         *out = std::move(plan);
         return Status::success();
@@ -123,9 +157,37 @@ Status Planner::make_plan(const PlannerInput& in, const Config& cfg, Plan* out) 
         add_reason(&plan, "cli-override");
     }
 
+    // AR007 FR-3: the measured curve picks the admission budget when the
+    // user did not override it. The runner clears budget_curve when the
+    // model fingerprint does not match, so reaching this branch means the
+    // numbers came from this model.
+    plan.budget_source = cfg.budget_overridden ? "override" : "default";
+    if (!cfg.budget_overridden && !cfg.budget_curve.empty()) {
+        if (const BudgetCurve* curve = cached_curve(cfg.budget_curve)) {
+            double recommended = 0.0;
+            if (curve->recommend(in.n_tokens, &recommended)) {
+                budget = recommended;
+                plan.budget_source = "model";
+                add_reason(&plan, "budget-curve");
+            } else {
+                add_reason(&plan, "budget-curve-empty");
+            }
+        } else {
+            add_reason(&plan, "budget-curve-unavailable");
+        }
+    }
+
     if (in.n_tokens > 8192) {
-        budget = std::min(budget, 4096.0 / static_cast<double>(in.n_tokens));
-        add_reason(&plan, "budget-clamped");
+        // The curve may admit more than the legacy 4096-token ceiling: its
+        // recommendation was measured to hold quality. Explicit overrides
+        // keep the legacy clamp so user-visible numbers do not shift.
+        const double ceiling = plan.budget_source == "model" ? 8192.0 : 4096.0;
+        const double clamped = std::min(budget, ceiling / static_cast<double>(in.n_tokens));
+        if (clamped < budget) {
+            budget = clamped;
+            if (plan.budget_source != "model") plan.budget_source = "clamp";
+            add_reason(&plan, "budget-clamped");
+        }
     }
 
     if (!in.arch_supports_ffn_skip || in.n_layer <= 0 || in.n_layer > 64) {

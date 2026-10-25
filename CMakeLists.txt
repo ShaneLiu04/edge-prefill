@@ -53,6 +53,8 @@ add_library(edge_prefill
     src/head_profile.cpp
     src/head_classifier.cpp
     src/planner.cpp
+    src/budget_curve.cpp
+    src/hash_util.cpp
     src/sparse_prefill.cpp
     src/metrics.cpp
     src/benchmark.cpp
@@ -87,6 +89,7 @@ if(EDGE_PREFILL_BUILD_TESTS)
         tests/test_prefix_cache.cpp
         tests/test_chunk_scheduler.cpp
         tests/test_planner.cpp
+        tests/test_budget_curve.cpp
         tests/test_ffn_skip.cpp
         tests/test_head_profile.cpp
         tests/test_head_classifier.cpp

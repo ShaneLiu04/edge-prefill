@@ -1,6 +1,7 @@
 # Build trees
 build-wsl/
 build-cuda/
+build-werror/
 build/
 out/
 

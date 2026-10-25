@@ -16,6 +16,7 @@
 #include "edge_prefill/attention_sparsity.h"
 #include "edge_prefill/backend.h"
 #include "edge_prefill/benchmark.h"
+#include "edge_prefill/hash_util.h"
 #include "edge_prefill/config.h"
 #include "edge_prefill/draft_scorer.h"
 #include "edge_prefill/embedding_scorer.h"
@@ -102,6 +103,16 @@ struct Args {
     bool qg_pool_pages_set = false;
     double budget = 0.5;
     bool budget_set = false;
+    std::string budget_curve;
+    bool budget_curve_set = false;
+    double anchor_ratio = 0.0;
+    bool anchor_ratio_set = false;
+    double anchor_stride_scale = 0.0;
+    bool anchor_stride_scale_set = false;
+    double mmr_lambda = 0.0;
+    bool mmr_lambda_set = false;
+    double mmr_threshold = 0.0;
+    bool mmr_threshold_set = false;
     bool bench_skip_dense = false;
     std::string embedding_model;
     double selector_w_lexical = 0.0;
@@ -130,6 +141,8 @@ void usage() {
         "Common options:\n"
         "  --mode latency|balanced|quality|reuse|dense\n"
         "  --budget <0..1>   --kv-type f16|q8_0|q4_0   --skip-ffn <spec>\n"
+        "  --budget-curve P  --anchor-ratio F  --anchor-stride-scale F\n"
+        "  --mmr-lambda F  --mmr-threshold F   (AR007 admission controls)\n"
         "  --draft-model M   --attn-top-k N  --attn-top-k-layers 4,8,16\n"
         "  --embedding-model P  (bge-small style GGUF; activates semantic gating)\n"
         "  --selector-w-lexical F  --selector-w-diversity F\n"
@@ -528,6 +541,36 @@ Status parse_args(int argc, char** argv, Args* args) {
             if (!st.ok()) return st;
             args->budget = std::stod(value);
             args->budget_set = true;
+        } else if (flag == "--budget-curve") {
+            std::string value;
+            auto st = next(&value);
+            if (!st.ok()) return st;
+            args->budget_curve = value;
+            args->budget_curve_set = true;
+        } else if (flag == "--anchor-ratio") {
+            std::string value;
+            auto st = next(&value);
+            if (!st.ok()) return st;
+            args->anchor_ratio = std::stod(value);
+            args->anchor_ratio_set = true;
+        } else if (flag == "--anchor-stride-scale") {
+            std::string value;
+            auto st = next(&value);
+            if (!st.ok()) return st;
+            args->anchor_stride_scale = std::stod(value);
+            args->anchor_stride_scale_set = true;
+        } else if (flag == "--mmr-lambda") {
+            std::string value;
+            auto st = next(&value);
+            if (!st.ok()) return st;
+            args->mmr_lambda = std::stod(value);
+            args->mmr_lambda_set = true;
+        } else if (flag == "--mmr-threshold") {
+            std::string value;
+            auto st = next(&value);
+            if (!st.ok()) return st;
+            args->mmr_threshold = std::stod(value);
+            args->mmr_threshold_set = true;
         } else if (flag == "--chat") {
             args->chat = true;
         } else if (flag == "--json") {
@@ -559,19 +602,6 @@ std::string cpu_name() {
         }
     }
     return "unknown";
-}
-
-std::string sha256_of_file(const std::string& path) {
-    const std::string command = "sha256sum \"" + path + "\" 2>/dev/null";
-    FILE* pipe = popen(command.c_str(), "r");
-    if (!pipe) return "unavailable";
-    char buf[128] = {};
-    const char* result = fgets(buf, sizeof(buf), pipe);
-    pclose(pipe);
-    if (!result) return "unavailable";
-    std::string text(buf);
-    const auto space = text.find(' ');
-    return space == std::string::npos ? text : text.substr(0, space);
 }
 
 EnvironmentInfo make_environment(const Config& cfg, const std::string& command_line) {
@@ -620,6 +650,11 @@ Status apply_common_config(const Args& args, Config* cfg) {
         cfg->budget = args.budget;
         cfg->budget_overridden = true;
     }
+    if (args.budget_curve_set) cfg->budget_curve = args.budget_curve;
+    if (args.anchor_ratio_set) cfg->anchor_ratio = args.anchor_ratio;
+    if (args.anchor_stride_scale_set) cfg->anchor_stride_scale = args.anchor_stride_scale;
+    if (args.mmr_lambda_set) cfg->mmr_lambda = args.mmr_lambda;
+    if (args.mmr_threshold_set) cfg->mmr_threshold = args.mmr_threshold;
     if (!args.mode.empty()) {
         auto st = parse_mode(args.mode, &cfg->mode);
         if (!st.ok()) return st;
@@ -828,6 +863,10 @@ Status run_command(const Args& args) {
     sopts.sink_blocks = run_cfg.sink_blocks;
     sopts.recent_blocks = run_cfg.recent_blocks;
     sopts.coverage_stride = run_cfg.coverage_stride;
+    sopts.anchor_ratio = run_cfg.anchor_ratio;
+    sopts.anchor_stride_scale = run_cfg.anchor_stride_scale;
+    sopts.mmr_threshold = run_cfg.mmr_threshold;
+    sopts.mmr_lambda = run_cfg.mmr_lambda;
     sopts.weights = run_cfg.weights;
     // AR005: semantic evidence dominates the fusion when the embedding
     // engine is active, unless the user pinned weights or pure latency
@@ -1153,6 +1192,11 @@ Status plan_command(const Args& args) {
         cfg.budget = args.budget;
         cfg.budget_overridden = true;
     }
+    if (args.budget_curve_set) cfg.budget_curve = args.budget_curve;
+    if (args.anchor_ratio_set) cfg.anchor_ratio = args.anchor_ratio;
+    if (args.anchor_stride_scale_set) cfg.anchor_stride_scale = args.anchor_stride_scale;
+    if (args.mmr_lambda_set) cfg.mmr_lambda = args.mmr_lambda;
+    if (args.mmr_threshold_set) cfg.mmr_threshold = args.mmr_threshold;
     if (args.attn_top_k_set) cfg.attn_top_k = args.attn_top_k;
     if (!args.attn_top_k_layers.empty()) cfg.attn_top_k_layers = args.attn_top_k_layers;
     PlannerInput in;
@@ -1200,6 +1244,14 @@ Status bench_command(const Args& args) {
         bench.modes = {cfg.mode};
         bench.budgets = {cfg.budget};
     }
+    // AR007: a conf that points at a budget curve without pinning `budget`
+    // wants the planner to pick the budget per prompt length. The grid loop
+    // normally forces budget_overridden so conf/CLI values are honoured;
+    // the 0 sentinel keeps that override off and records the real source
+    // (model|default|clamp) for every sample.
+    if (!cfg.budget_overridden && !cfg.budget_curve.empty()) {
+        bench.budgets = {0.0};
+    }
     bench.lengths = {0};
     bench.repeats = static_cast<int32_t>(cfg.repeats);
     bench.warmup = cfg.warmup;
@@ -1226,6 +1278,14 @@ Status bench_command(const Args& args) {
     bench.embed_threads = cfg.n_threads;
     bench.weights = cfg.weights;
     bench.weights_overridden = cfg.weights_overridden;
+    bench.sink_blocks = cfg.sink_blocks;
+    bench.recent_blocks = cfg.recent_blocks;
+    bench.coverage_stride = cfg.coverage_stride;
+    bench.anchor_ratio = cfg.anchor_ratio;
+    bench.anchor_stride_scale = cfg.anchor_stride_scale;
+    bench.mmr_threshold = cfg.mmr_threshold;
+    bench.mmr_lambda = cfg.mmr_lambda;
+    bench.budget_curve = cfg.budget_curve;
     bench.n_gpu_layers = cfg.n_gpu_layers;
     bench.out_dir = cfg.results_dir;
 

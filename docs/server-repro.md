@@ -1,4 +1,4 @@
-# 服务器复现指南（AR006：图内查询感知门控）
+# 服务器复现指南（AR006 图内查询感知门控 / AR007 自适应预算）
 
 目标：在一台你没见过的机器上，用**真实模型**复现 AR006 的净 TTFT 加速与质量，
 并判断你的任务是否值得开启图内页门控。所有命令都是可复制粘贴的，且不依赖本仓库
@@ -105,7 +105,62 @@ GPU 上跑同样的三条命令，把 `--config` 换成 `bound-p24` 与 `n_gpu_l
 4. 32K 以上建议 `mode = balanced` + `budget = 0.25`（默认），并把 `qg_sel_pages`
    提到 32；页数越大质量越稳、加速越小，报告里两者都要写。
 
-## 7. 报告模板
+## 7. AR007：预算-质量曲线与自适应预算
+
+两条独立的链路，可以只做其中一条：
+
+### 7.1 先测你机器上的曲线（推荐，约 30-60 分钟 CPU）
+
+```bash
+./repro.sh budget        # 4K/8K，lexical+embedding，自动写 curve 资产
+
+# 想覆盖全部四个长度（本仓库曲线的来源）：
+python3 benchmarks/scripts/sweep_budget.py \
+    --bin build-wsl/edge-prefill \
+    --model models/qwen2.5-1.5b-instruct-q4_k_m.gguf \
+    --datasets explen/len4k,explen/len8k,explen/len16k,deep/len32k \
+    --budgets 0.05,0.08,0.12 --signals lexical \
+    --out benchmarks/results/ar007-sweep
+```
+
+产物：`summary.md`（人类表 + 推荐值）、`curve.json`（机器可读）、
+`budget_curve.txt`（planner 输入，带 `model_sha256`）。**换了模型要重测**：
+指纹不符时 runner 会清空曲线并告警，绝不套用别的模型的数字。
+
+### 7.2 用曲线跑自动预算，并与固定预算对比
+
+```bash
+BIN=build-wsl/edge-prefill
+MODEL=models/qwen2.5-1.5b-instruct-q4_k_m.gguf
+CURVE=benchmarks/results/ar007-sweep/budget_curve.txt
+
+# auto：conf 里不写 budget，只写 budget_curve
+printf '%s\n' "mode = balanced" "attn_top_k = 24" "qg_bound = false" \
+  "budget_curve = $CURVE" "threads = 16" "max_new_tokens = 16" "repeats = 1" \
+  > /tmp/ar007_auto.conf
+$BIN bench --config /tmp/ar007_auto.conf --model $MODEL \
+    --data-dir benchmarks/data/explen/len16k --out /tmp/ar007-auto --bench-skip-dense
+
+# 机器无关的自检（质量 + 审计列 + 选择 token 数，不比绝对延迟）
+python3 benchmarks/scripts/check_expected_ar007.py \
+    benchmarks/results/ar007-campaign benchmarks/matrix/budget/expected.csv
+```
+
+判读：
+
+| 指标 | 通过线 | 说明 |
+|---|---|---|
+| `budget_source` | `model` | 证明曲线真的生效；`override` 说明 conf 里还写了 budget |
+| 质量 q（8K/16K niah） | ≥0.95 | 与 `expected.csv` 同量级 |
+| 净加速（同会话 dense） | ≥10× | 本仓库 8K 29×、16K 38×、32K 55×（Xeon 6234） |
+| 32K 的 `qg p24+local32` 相对 AR006 | TTFT 降 ≥30% | 页打分去拷贝的收益；质量必须仍为 1.0 |
+| 多针 `deep/multineedle` | 不要用 auto | 选择级稀疏在 5% 预算下丢事实（q≈0.33）；用 `qg_bound=on` |
+
+曲线非单调是**预期行为**，不是 bug：本仓库 16K 在 b=0.05 拿到 q=1.0、
+b=0.25 只有 0.36。若你的机器上推荐值明显偏离（例如 4K 也要 0.25），
+先看 `summary.md` 里 `floor-missed` 标记，再决定是否手工覆盖 `budget`。
+
+## 8. 报告模板
 
 ```
 机器: <CPU/GPU, 核心数, 内存>, 会话: <日期>
@@ -114,4 +169,5 @@ dense  : <16K ttft> / <32K ttft>
 bound  : p<k> 16K ttft / 32K ttft, quality ...
 净加速 : <16K>× / <32K>×
 env    : <results dir>/<ts>_env.json
+曲线   : <budget_curve.txt 的四个键值 + budget_source 计数>
 ```

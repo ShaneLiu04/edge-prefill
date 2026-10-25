@@ -69,6 +69,37 @@ the AR006 contract is in `specs/changes/AR006-in-graph-query-aware-sparse-prefil
   In exchange the selection is per-ubatch (not per 128-token chunk), heads
   share the page set (ggml masks broadcast over heads), and the gate is only
   active when `n_kv` exceeds the local window (short prompts stay local-only).
+  Since AR007 the page score is `mul_mat(k_view, q_heads)` plus a page sum
+  instead of `cont(permute(k))` + pooling: same ranking, but the K cache is no
+  longer copied per layer (32K gate 67.9 s -> 25-31 s).
+
+## Admission budget: measured curve, not a constant (AR007)
+
+The selector's budget comes from three places, in priority order:
+
+1. an explicit conf/CLI `budget` (`budget_source=override`);
+2. a **budget curve** (`budget_curve = path`): `model_sha256`-fingerprinted
+   table of `prompt_length = budget`, produced by
+   `benchmarks/scripts/sweep_budget.py`, read with ceiling semantics
+   (`budget_source=model`);
+3. the mode default 0.5, then the legacy 4096-token clamp
+   (`budget_source=default|clamp`; the curve path is allowed 8192 tokens
+   because its recommendation was measured to hold quality).
+
+The curve exists because quality is not monotone in the budget: with
+proportional anchors, a larger budget admits more arbitrary coverage blocks
+and can push the evidence out (16K: b=0.05 q=1.00, b=0.25 q=0.36). A bench
+grid can pass `budget=0` as "let the curve decide"; the runner then keeps
+`budget_overridden=false` and every sample records where the number came from.
+Fingerprint mismatch clears the curve before planning, so a curve is never
+applied to a different model.
+
+Selection itself gained structural anchors (sink, last block, query-word
+anchors, strided coverage, priority order sink > recent > quote > stride),
+span growing (adjacent candidates get +0.5 so a straddling answer stays
+contiguous) and incremental MMR (near-duplicate blocks are penalised only when
+their Jaccard similarity exceeds `mmr_threshold`). `Selection.anchor_blocks`
+and `Selection.mmr_penalized` are printed into `raw.csv` as audit columns.
 
 ## Edge accounting and the dense invariant
 
