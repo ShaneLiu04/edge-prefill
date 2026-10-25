@@ -52,6 +52,21 @@
 - 测试：ctest build-wsl 1/1 通过（快速模式 0.38s 零回归）
 - 实现要点：显式 draft/embedding 路径加载失败=硬错不降级；净 TTFT 记账（semantic_score_ms 独立于 prefill 计时）
 
+### 2026-10-25 会话记录（qg 正确性修复：跨 chunk 重烘焙 + own-span 必留）
+
+- 背景：干净 smoke 显示 qg v2 在 4K 上 q={0,1,1,0}、lexical-1d 路径生成复读崩溃（"MAGENTA-FALCON-FAIR-FAIR-FAIR-"），qgoff 同数据 4/4
+- 定位手段（全部真实实验，无 mock）：
+  - G=1（query_chunk_size=4096）→ q=1.0，图机制正确
+  - 单 ubatch（临时 n_ubatch=4096，已还原）仍失败 → 排除跨 chunk
+  - `query_top_k=4096`（每组行集=完整因果前缀 ⇒ 数学上等价 dense）→ 所有 qcs（含 127/128/130/144/192/256）逐位一致且 q=1.0 ⇒ **图完全正确**
+  - 结论：缺陷在组行集设计——mandatory 仅含 sink+前一块，中段 token 看不到自身局部上下文，隐藏态失真污染高层 KV cache
+- 修复 1（patch 侧）：qg 烘焙守卫由 `qg_idx.empty()` 改为 n_kv/epoch 变化即重烘（chunked prefill 每 ubatch n_kv 变宽，旧行集截断后续 chunk 可见行）；patch 与构建源同步，新增注释说明
+- 修复 2（规划侧）：`build_query_gated` mandatory 集合加入**组自身查询跨度 [lo,hi) 相交的所有块**（MoBA 语义：每片必看自己），sink+recent 保留；预算语义不变（scored extras ≤ top_k_per_group）
+- 测试同步：3 个 2D qg 用例按新契约更新（own-span 必含、预算只约束 scored extras、X/Y 选择器移到组跨度外）
+- 实测：lexical-1d 4/4 q=1.0；embedding qgv2 `query_top_k=512` 4/4（384 时 niah-01 仍缺针 → 网格 qg conf 固定 512），qgoff 对照 4/4；budget 入账 0.25 证实 budget_overridden 修复生效；语义开销块缓存后 sem≈1.1s（原 2.9s）
+- 文档：组件详设 qg 契约补 own-span 必留与实测依据
+- 备注：benchmark.cpp 曾临时改 n_ubatch=4096 做单 ubatch 判别，已还原 512；新增 --verbose 下 qg 组行/chunk 组行调试输出（Debug 级，不影响默认路径）
+
 ## 阶段门控记录
 
 > 由 sdd-phase-gate skill 在阶段门控审查后追加，记录每轮审查结果（PASS/FAIL + 轮次）。

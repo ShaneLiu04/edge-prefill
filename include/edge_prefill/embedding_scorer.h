@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -65,6 +66,22 @@ private:
     const llama_vocab* vocab_ = nullptr;
     size_t dim_ = 0;
     uint32_t n_parallel_ = 8;
+
+    // AR005: the same block texts are scored twice per case (selection's
+    // query-block pass and the 2D group-block matrix) and re-used across
+    // cases that share one context (multineedle). Encoding is
+    // deterministic, so memoizing block vectors is exact reuse, not an
+    // approximation. Keyed by a dual-seed FNV fingerprint of the text
+    // list; a stale or foreign list misses and re-encodes.
+    std::vector<std::vector<double>> block_cache_;
+    std::array<uint64_t, 2> block_cache_key_ = {0, 0};
+
+    static void texts_fingerprint(const std::vector<std::string>& texts,
+                                  std::array<uint64_t, 2>* out);
+    bool block_cache_match(const std::vector<std::string>& block_texts) const;
+    void block_cache_store(const std::vector<std::string>& block_texts,
+                           const std::vector<std::vector<double>>& rows,
+                           size_t block_row_offset);
 };
 
 } // namespace edge_prefill

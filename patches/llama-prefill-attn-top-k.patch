@@ -1142,10 +1142,16 @@
 +        if (plan_ok) {
 +            const int64_t n_head_kv = k->ne[1];
 +
-+            // Bake the live-filtered per-group sets once per graph; the
-+            // idx input tensors are shared by every layer (a per-layer
++            // Bake the live-filtered per-group sets per graph; the idx
++            // input tensors are shared by every layer (a per-layer
 +            // creation would leave all but the last layer unfilled).
-+            if (inp->qg_idx.empty()) {
++            // Re-bake whenever the cache width or the content epoch moved:
++            // chunked prefill widens n_kv per ubatch, so a set baked for an
++            // earlier chunk would silently truncate the later chunks'
++            // visible rows to the earlier width.
++            if (inp->qg_idx.empty() ||
++                    inp->qg_n_kv != n_kv ||
++                    inp->edge_epoch != cparams.prefill_edge_epoch) {
 +                inp->qg_bounds.assign(qb.begin(), qb.end());
 +                inp->qg_n_kv = n_kv;
 +                inp->edge_epoch = cparams.prefill_edge_epoch;
@@ -1437,3 +1443,21 @@
      cb(cur, "kqv_out", il);
  
      if (inp->self_v_rot) {
+--- a/src/llama-context.cpp
++++ b/src/llama-context.cpp
+@@ -2544,8 +2544,15 @@ uint32_t llama_context::graph_max_nodes(uint32_t n_tokens) const {
+ 
+     if (cparams.training) {
+         res *= 4;
+     }
+ 
++    // EdgePrefill: query-gated prefill builds one attention subgraph per
++    // query group inside build_attn (gather + attention + concat) on top
++    // of the dense graph. The reserve is fixed at context creation, when
++    // no sparsity plan exists yet, so budget the headroom unconditionally
++    // (a few MB of arena at most).
++    res += std::max<uint32_t>(4096u, 16u * n_tokens);
++
+     return res;
+ }
+ 
