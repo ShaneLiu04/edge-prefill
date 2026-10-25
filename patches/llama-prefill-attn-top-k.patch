@@ -1,6 +1,8 @@
+diff --git a/include/llama.h b/include/llama.h
+index a846515..5348018 100644
 --- a/include/llama.h
 +++ b/include/llama.h
-@@ -760,6 +760,104 @@
+@@ -760,6 +760,124 @@ extern "C" {
      // Returns whether prefill mode is currently enabled.
      LLAMA_API bool llama_get_prefill_mode(const struct llama_context * ctx);
  
@@ -88,6 +90,26 @@
 +    // Returns the currently set query group count, or 0.
 +    LLAMA_API int32_t llama_get_prefill_qg_count(const struct llama_context * ctx);
 +
++    // EdgePrefill AR006: in-graph query-aware bound gating (Quest-style).
++    // When enabled, every prefill ubatch selects up to sel_pages KV pages
++    // (32 cache rows per page) using an exact upper bound of q.k derived
++    // from per-page per-head K min/max, and always attends the local window
++    // (the ubatch's own rows plus local_pages pages before it) and the sink
++    // page. Selection is shared by all heads. Takes precedence over the
++    // query-group row-list path. enabled == 0 disarms and restores the
++    // previous path. Returns 0 on success, 2 on invalid argument
++    // (enabled not 0/1, sel_pages < 0 or > 128, local_pages < 0 or > 1024,
++    // pool_pages < 0), 9 when the backend lacks required ops.
++    LLAMA_API int32_t llama_set_prefill_qg_bound(
++            struct llama_context * ctx,
++                     int32_t      enabled,
++                     int32_t      sel_pages,
++                     int32_t      local_pages,
++                     int32_t      pool_pages);
++
++    // Returns 1 when bound gating is armed, 0 otherwise.
++    LLAMA_API int32_t llama_get_prefill_qg_bound(const struct llama_context * ctx);
++
 +    // Sets the layer x head top-k matrix (n must equal n_layer * n_head).
 +    // An element of -1 marks a dense head (no gathering); >= 1 gathers the
 +    // top-k ranked rows for that head. n == 0 clears the matrix and restores
@@ -105,124 +127,25 @@
      //
      // Memory
      //
---- a/src/llama-cparams.h
-+++ b/src/llama-cparams.h
-@@ -59,6 +59,49 @@
-     bool     prefill_mode = false;
-     uint64_t prefill_ffn_skip_mask = 0;
- 
-+    // EdgePrefill extension: attention-level top-k sparse prefill.
-+    // top_k > 0 with non-empty indices enables K/V row gathering via
-+    // ggml_get_rows; otherwise the original dense attention path runs.
-+    int32_t prefill_attn_top_k = 0;
-+    std::vector<int32_t> prefill_attn_indices;
-+
-+    // EdgePrefill extension: per-head adaptive sparse prefill. A non-empty
-+    // ranked_rows pool plus head_top_k matrix activates grouped per-head
-+    // gathering in the attention graph (takes precedence over the scalar
-+    // path); empty values keep the scalar top-k path untouched.
-+    std::vector<int32_t> prefill_attn_ranked_rows;
-+    std::vector<int32_t> prefill_attn_head_top_k;
-+
-+    // EdgePrefill AR004: attention-level compressed branches. Selected
-+    // 32-row blocks that are not gathered are pooled to one mean row
-+    // (ggml_pool_1d AVG, k=32, s=32) and appended to the gathered KV rows,
-+    // so dropped context remains addressable at reduced fidelity. Starts
-+    // are multiples of 32 in the compacted KV row space; max_pos is the
-+    // block's largest token position (causal gate for the pooled row).
-+    // Empty = disabled; exclusive with the per-head matrix path (v1).
-+    std::vector<int32_t> prefill_attn_pool_starts;
-+    std::vector<int32_t> prefill_attn_pool_sizes;
-+    std::vector<int32_t> prefill_attn_pool_max_pos;
-+
-+    // EdgePrefill AR004: MoBA-style query-chunk gating. Queries of a
-+    // prefill decode are partitioned into qg_count contiguous ranges
-+    // (qg_bounds, qg_count+1 ascending entries starting at 0); each group
-+    // gathers its own KV rows (flat row list sliced by qg_offsets). The
-+    // graph bakes the per-group sets per build, so every setter bumps
-+    // prefill_edge_epoch and can_reuse rejects a stale graph. 0 count =
-+    // disabled; replaces the scalar top-k path while active.
-+    int32_t prefill_qg_count = 0;
-+    int32_t prefill_qg_set_groups = 0; // append-only state machine cursor
-+    std::vector<int32_t> prefill_qg_rows;      // flat, group-major
-+    std::vector<int32_t> prefill_qg_offsets;   // qg_count + 1 entries
-+    std::vector<int32_t> prefill_qg_bounds;    // qg_count + 1 entries
-+
-+    // Bumped by every setter that feeds graph-baked state (pool blocks,
-+    // query gating); lets can_reuse detect content changes that the
-+    // n_kv snapshot alone would miss (two same-width decodes with
-+    // different baked sets).
-+    uint64_t prefill_edge_epoch = 0;
-+
-     size_t moe_cache_size;
- 
-     std::vector<bool> embeddings_layer_inp; // [n_layer()] extract input embeddings for layer
---- a/src/llama-context.h
-+++ b/src/llama-context.h
-@@ -68,6 +68,60 @@
-     uint64_t get_prefill_ffn_skip() const { return cparams.prefill_ffn_skip_mask; }
-     bool get_prefill_mode() const { return cparams.prefill_mode; }
- 
-+    int32_t get_prefill_attn_top_k() const { return cparams.prefill_attn_top_k; }
-+    void set_prefill_attn_top_k(int32_t top_k) { cparams.prefill_attn_top_k = top_k; }
-+    const std::vector<int32_t> & get_prefill_attn_indices() const { return cparams.prefill_attn_indices; }
-+    void set_prefill_attn_indices(std::vector<int32_t> indices) { cparams.prefill_attn_indices = std::move(indices); }
-+
-+    const std::vector<int32_t> & get_prefill_attn_ranked_rows() const { return cparams.prefill_attn_ranked_rows; }
-+    void set_prefill_attn_ranked_rows(std::vector<int32_t> rows) { cparams.prefill_attn_ranked_rows = std::move(rows); }
-+    const std::vector<int32_t> & get_prefill_attn_head_top_k() const { return cparams.prefill_attn_head_top_k; }
-+    void set_prefill_attn_head_top_k(std::vector<int32_t> top_k) { cparams.prefill_attn_head_top_k = std::move(top_k); }
-+
-+    const std::vector<int32_t> & get_prefill_attn_pool_starts() const { return cparams.prefill_attn_pool_starts; }
-+    void set_prefill_attn_pool_blocks(std::vector<int32_t> starts,
-+                                      std::vector<int32_t> sizes,
-+                                      std::vector<int32_t> max_pos) {
-+        cparams.prefill_attn_pool_starts = std::move(starts);
-+        cparams.prefill_attn_pool_sizes  = std::move(sizes);
-+        cparams.prefill_attn_pool_max_pos = std::move(max_pos);
-+        ++cparams.prefill_edge_epoch;
-+    }
-+
-+    int32_t get_prefill_qg_count() const { return cparams.prefill_qg_count; }
-+    int32_t get_prefill_qg_set_groups() const { return cparams.prefill_qg_set_groups; }
-+    // A fresh count resets the row/bound state so a half-configured plan
-+    // can never reach the graph.
-+    void set_prefill_qg_count(int32_t n_groups) {
-+        cparams.prefill_qg_count = n_groups;
-+        cparams.prefill_qg_set_groups = 0;
-+        cparams.prefill_qg_rows.clear();
-+        cparams.prefill_qg_offsets.assign(
-+            n_groups > 0 ? static_cast<size_t>(n_groups) + 1 : 0, 0);
-+        cparams.prefill_qg_bounds.clear();
-+        ++cparams.prefill_edge_epoch;
-+    }
-+    const std::vector<int32_t> & get_prefill_qg_rows() const { return cparams.prefill_qg_rows; }
-+    const std::vector<int32_t> & get_prefill_qg_offsets() const { return cparams.prefill_qg_offsets; }
-+    // Append-only: the C API only allows setting group g after groups
-+    // 0..g-1, so the offsets stay consistent prefix sums.
-+    void append_prefill_qg_group_rows(int32_t group, std::vector<int32_t> rows) {
-+        cparams.prefill_qg_offsets[group] =
-+            static_cast<int32_t>(cparams.prefill_qg_rows.size());
-+        cparams.prefill_qg_rows.insert(
-+            cparams.prefill_qg_rows.end(),
-+            std::make_move_iterator(rows.begin()),
-+            std::make_move_iterator(rows.end()));
-+        cparams.prefill_qg_offsets[group + 1] =
-+            static_cast<int32_t>(cparams.prefill_qg_rows.size());
-+        ++cparams.prefill_qg_set_groups;
-+        ++cparams.prefill_edge_epoch;
-+    }
-+    void set_prefill_qg_bounds(std::vector<int32_t> bounds) {
-+        cparams.prefill_qg_bounds = std::move(bounds);
-+        ++cparams.prefill_edge_epoch;
-+    }
-+
-     ggml_backend_sched_t get_sched() const;
- 
-     uint32_t n_ctx()     const;
+diff --git a/src/llama-context.cpp b/src/llama-context.cpp
+index 42913ad..817d48d 100644
 --- a/src/llama-context.cpp
 +++ b/src/llama-context.cpp
-@@ -4407,6 +4407,257 @@
+@@ -2546,6 +2546,13 @@ uint32_t llama_context::graph_max_nodes(uint32_t n_tokens) const {
+         res *= 4;
+     }
+ 
++    // EdgePrefill: query-gated prefill builds one attention subgraph per
++    // query group inside build_attn (gather + attention + concat) on top
++    // of the dense graph. The reserve is fixed at context creation, when
++    // no sparsity plan exists yet, so budget the headroom unconditionally
++    // (a few MB of arena at most).
++    res += std::max<uint32_t>(4096u, 16u * n_tokens);
++
+     return res;
+ }
+ 
+@@ -4407,6 +4414,293 @@ bool llama_get_prefill_mode(const llama_context * ctx) {
      return ctx ? ctx->get_prefill_mode() : false;
  }
  
@@ -477,90 +400,197 @@
 +    return ctx->get_prefill_qg_count();
 +}
 +
++int32_t llama_set_prefill_qg_bound(llama_context * ctx, int32_t enabled,
++                                   int32_t sel_pages, int32_t local_pages,
++                                   int32_t pool_pages) {
++    if (!ctx) {
++        return 2; // InvalidArgument
++    }
++    if (enabled != 0 && enabled != 1) {
++        return 2; // InvalidArgument
++    }
++    if (sel_pages < 0 || sel_pages > 128 ||
++        local_pages < 0 || local_pages > 1024 || pool_pages < 0) {
++        return 2; // InvalidArgument: graph width / budget guards
++    }
++    if (enabled) {
++        // Bound gating replaces every other sparse attention mechanism.
++        // Clear the conflicting state so the graph has exactly one owner.
++        ctx->set_prefill_qg_count(0);
++        ctx->set_prefill_attn_top_k(0);
++        ctx->set_prefill_attn_indices({});
++        ctx->set_prefill_attn_head_top_k({});
++        ctx->set_prefill_attn_ranked_rows({});
++        ctx->set_prefill_attn_pool_blocks({}, {}, {});
++    }
++    ctx->set_prefill_qg_bound(enabled, enabled ? sel_pages : 0,
++                              enabled ? local_pages : 0,
++                              enabled ? pool_pages : 0);
++    return 0;
++}
++
++int32_t llama_get_prefill_qg_bound(const llama_context * ctx) {
++    if (!ctx) {
++        return 0;
++    }
++    return ctx->get_prefill_qg_bound();
++}
++
  //
  // memory
  //
---- a/src/llama-graph.h
-+++ b/src/llama-graph.h
-@@ -357,12 +357,75 @@
+diff --git a/src/llama-context.h b/src/llama-context.h
+index faa34d4..2c6151e 100644
+--- a/src/llama-context.h
++++ b/src/llama-context.h
+@@ -68,6 +68,75 @@ struct llama_context {
+     uint64_t get_prefill_ffn_skip() const { return cparams.prefill_ffn_skip_mask; }
+     bool get_prefill_mode() const { return cparams.prefill_mode; }
  
-     ggml_tensor * get_kq_mask() const { return self_kq_mask_cnv; }
++    int32_t get_prefill_attn_top_k() const { return cparams.prefill_attn_top_k; }
++    void set_prefill_attn_top_k(int32_t top_k) { cparams.prefill_attn_top_k = top_k; }
++    const std::vector<int32_t> & get_prefill_attn_indices() const { return cparams.prefill_attn_indices; }
++    void set_prefill_attn_indices(std::vector<int32_t> indices) { cparams.prefill_attn_indices = std::move(indices); }
++
++    const std::vector<int32_t> & get_prefill_attn_ranked_rows() const { return cparams.prefill_attn_ranked_rows; }
++    void set_prefill_attn_ranked_rows(std::vector<int32_t> rows) { cparams.prefill_attn_ranked_rows = std::move(rows); }
++    const std::vector<int32_t> & get_prefill_attn_head_top_k() const { return cparams.prefill_attn_head_top_k; }
++    void set_prefill_attn_head_top_k(std::vector<int32_t> top_k) { cparams.prefill_attn_head_top_k = std::move(top_k); }
++
++    const std::vector<int32_t> & get_prefill_attn_pool_starts() const { return cparams.prefill_attn_pool_starts; }
++    void set_prefill_attn_pool_blocks(std::vector<int32_t> starts,
++                                      std::vector<int32_t> sizes,
++                                      std::vector<int32_t> max_pos) {
++        cparams.prefill_attn_pool_starts = std::move(starts);
++        cparams.prefill_attn_pool_sizes  = std::move(sizes);
++        cparams.prefill_attn_pool_max_pos = std::move(max_pos);
++        ++cparams.prefill_edge_epoch;
++    }
++
++    int32_t get_prefill_qg_count() const { return cparams.prefill_qg_count; }
++    int32_t get_prefill_qg_set_groups() const { return cparams.prefill_qg_set_groups; }
++    // A fresh count resets the row/bound state so a half-configured plan
++    // can never reach the graph.
++    void set_prefill_qg_count(int32_t n_groups) {
++        cparams.prefill_qg_count = n_groups;
++        cparams.prefill_qg_set_groups = 0;
++        cparams.prefill_qg_rows.clear();
++        cparams.prefill_qg_offsets.assign(
++            n_groups > 0 ? static_cast<size_t>(n_groups) + 1 : 0, 0);
++        cparams.prefill_qg_bounds.clear();
++        ++cparams.prefill_edge_epoch;
++    }
++    const std::vector<int32_t> & get_prefill_qg_rows() const { return cparams.prefill_qg_rows; }
++    const std::vector<int32_t> & get_prefill_qg_offsets() const { return cparams.prefill_qg_offsets; }
++    // Append-only: the C API only allows setting group g after groups
++    // 0..g-1, so the offsets stay consistent prefix sums.
++    void append_prefill_qg_group_rows(int32_t group, std::vector<int32_t> rows) {
++        cparams.prefill_qg_offsets[group] =
++            static_cast<int32_t>(cparams.prefill_qg_rows.size());
++        cparams.prefill_qg_rows.insert(
++            cparams.prefill_qg_rows.end(),
++            std::make_move_iterator(rows.begin()),
++            std::make_move_iterator(rows.end()));
++        cparams.prefill_qg_offsets[group + 1] =
++            static_cast<int32_t>(cparams.prefill_qg_rows.size());
++        ++cparams.prefill_qg_set_groups;
++        ++cparams.prefill_edge_epoch;
++    }
++    void set_prefill_qg_bounds(std::vector<int32_t> bounds) {
++        cparams.prefill_qg_bounds = std::move(bounds);
++        ++cparams.prefill_edge_epoch;
++    }
++
++    // EdgePrefill AR006: arm/disarm the in-graph bound gating. Every change
++    // bumps the epoch so can_reuse rejects graphs built with other budgets.
++    int32_t get_prefill_qg_bound() const { return cparams.prefill_qg_bound; }
++    int32_t get_prefill_qg_bound_sel_pages() const { return cparams.prefill_qg_bound_sel_pages; }
++    int32_t get_prefill_qg_bound_local_pages() const { return cparams.prefill_qg_bound_local_pages; }
++    int32_t get_prefill_qg_bound_pool_pages() const { return cparams.prefill_qg_bound_pool_pages; }
++    void set_prefill_qg_bound(int32_t enabled, int32_t sel_pages,
++                              int32_t local_pages, int32_t pool_pages) {
++        cparams.prefill_qg_bound = enabled;
++        cparams.prefill_qg_bound_sel_pages = sel_pages;
++        cparams.prefill_qg_bound_local_pages = local_pages;
++        cparams.prefill_qg_bound_pool_pages = pool_pages;
++        ++cparams.prefill_edge_epoch;
++    }
++
+     ggml_backend_sched_t get_sched() const;
  
-+    ggml_tensor * get_attn_idx() const { return self_attn_idx; }
-+
-     ggml_tensor * self_k_idxs = nullptr; // I64 [n_batch]
-     ggml_tensor * self_v_idxs = nullptr; // I64 [n_batch] or [n_batch*n_embd_v_gqa]
+     uint32_t n_ctx()     const;
+diff --git a/src/llama-cparams.h b/src/llama-cparams.h
+index 91a97f7..3acfd4b 100644
+--- a/src/llama-cparams.h
++++ b/src/llama-cparams.h
+@@ -59,6 +59,62 @@ struct llama_cparams {
+     bool     prefill_mode = false;
+     uint64_t prefill_ffn_skip_mask = 0;
  
-     ggml_tensor * self_kq_mask     = nullptr; // F32/F16 [n_kv, n_batch/n_stream, 1, n_stream]
-     ggml_tensor * self_kq_mask_cnv = nullptr; //         [n_kv, n_batch/n_stream, 1, n_stream]
++    // EdgePrefill extension: attention-level top-k sparse prefill.
++    // top_k > 0 with non-empty indices enables K/V row gathering via
++    // ggml_get_rows; otherwise the original dense attention path runs.
++    int32_t prefill_attn_top_k = 0;
++    std::vector<int32_t> prefill_attn_indices;
++
++    // EdgePrefill extension: per-head adaptive sparse prefill. A non-empty
++    // ranked_rows pool plus head_top_k matrix activates grouped per-head
++    // gathering in the attention graph (takes precedence over the scalar
++    // path); empty values keep the scalar top-k path untouched.
++    std::vector<int32_t> prefill_attn_ranked_rows;
++    std::vector<int32_t> prefill_attn_head_top_k;
++
++    // EdgePrefill AR004: attention-level compressed branches. Selected
++    // 32-row blocks that are not gathered are pooled to one mean row
++    // (ggml_pool_1d AVG, k=32, s=32) and appended to the gathered KV rows,
++    // so dropped context remains addressable at reduced fidelity. Starts
++    // are multiples of 32 in the compacted KV row space; max_pos is the
++    // block's largest token position (causal gate for the pooled row).
++    // Empty = disabled; exclusive with the per-head matrix path (v1).
++    std::vector<int32_t> prefill_attn_pool_starts;
++    std::vector<int32_t> prefill_attn_pool_sizes;
++    std::vector<int32_t> prefill_attn_pool_max_pos;
++
++    // EdgePrefill AR004: MoBA-style query-chunk gating. Queries of a
++    // prefill decode are partitioned into qg_count contiguous ranges
++    // (qg_bounds, qg_count+1 ascending entries starting at 0); each group
++    // gathers its own KV rows (flat row list sliced by qg_offsets). The
++    // graph bakes the per-group sets per build, so every setter bumps
++    // prefill_edge_epoch and can_reuse rejects a stale graph. 0 count =
++    // disabled; replaces the scalar top-k path while active.
++    int32_t prefill_qg_count = 0;
++    int32_t prefill_qg_set_groups = 0; // append-only state machine cursor
++    std::vector<int32_t> prefill_qg_rows;      // flat, group-major
++    std::vector<int32_t> prefill_qg_offsets;   // qg_count + 1 entries
++    std::vector<int32_t> prefill_qg_bounds;    // qg_count + 1 entries
++
++    // EdgePrefill AR006: in-graph query-aware bound gating (Quest-style).
++    // When enabled, each prefill ubatch selects up to sel_pages KV pages
++    // (32 cache rows per page) by an exact upper bound of q.k computed from
++    // per-page per-head K min/max, and always attends the local window
++    // (the ubatch's own rows plus local_pages pages before it) and the sink
++    // page. Selection is per ubatch and shared by all heads (the ggml KQ
++    // mask cannot broadcast per-head visibility). sel_pages == 0 keeps only
++    // the local window. Takes precedence over the row-list qg path.
++    int32_t prefill_qg_bound = 0;
++    int32_t prefill_qg_bound_sel_pages = 8;
++    int32_t prefill_qg_bound_local_pages = 0; // 0 = ubatch-sized window
++    int32_t prefill_qg_bound_pool_pages = 0;  // reserved (pool uses AR004 path)
++
++    // Bumped by every setter that feeds graph-baked state (pool blocks,
++    // query gating); lets can_reuse detect content changes that the
++    // n_kv snapshot alone would miss (two same-width decodes with
++    // different baked sets).
++    uint64_t prefill_edge_epoch = 0;
++
+     size_t moe_cache_size;
  
-+    // EdgePrefill: attention top-k gather indices.
-+    // I32 [n_idx, n_head_kv, n_stream, 1], replicated across heads/streams
-+    // in set_input. Allocated only when prefill_attn_top_k > 0.
-+    ggml_tensor * self_attn_idx = nullptr;
-+
-+    // EdgePrefill per-head adaptive path: per-layer group plans computed by
-+    // build_attn (which knows the layer index) and filled by set_input. The
-+    // attn_kv input object is shared across layers, so the plans are stored
-+    // per layer here.
-+    struct edge_group {
-+        bool dense = true;             // -1 heads or degenerate width: full-width attention
-+        int64_t n_idx = 0;             // gathered width (sparse groups only)
-+        std::vector<int32_t> rows;     // ascending deduped gathered rows (sparse groups only)
-+    };
-+    struct edge_layer {
-+        bool active = false;
-+        std::vector<edge_group> groups;
-+        std::vector<int32_t> head_perm;     // original head -> grouped slot
-+        std::vector<int32_t> head_perm_inv; // grouped slot -> original head
-+        // Grouped Q head slot -> KV head it must attend to. For MHA this is
-+        // the head permutation itself; for GQA it maps each query head to its
-+        // KV head (values may repeat), so a get_rows gather on the K/V head
-+        // dimension replicates KV heads and yields exact q/kv alignment
-+        // inside every group.
-+        std::vector<int32_t> kv_head_map;
-+        ggml_tensor * perm_idx = nullptr;     // I32 [n_head, n_tok, n_stream, 1]
-+        ggml_tensor * kv_perm_idx = nullptr;  // I32 [n_head, n_kv, n_stream, 1]
-+        ggml_tensor * out_perm_idx = nullptr; // I32 [n_head, n_tok*n_stream, 1, 1]
-+        std::vector<ggml_tensor *> group_idx; // parallel to groups; nullptr for dense
-+    };
-+    std::vector<edge_layer> edge_layers;
-+    // Build snapshot for can_reuse: identical matrix/pool/n_kv imply an
-+    // identical group structure without recomputing it.
-+    std::vector<int32_t> edge_matrix;
-+    std::vector<int32_t> edge_pool;
-+    int64_t edge_n_kv = -1;
-+
-+    // EdgePrefill AR004: attention-level compressed branches. The live
-+    // block list is computed once per graph build from cparams (blocks
-+    // beyond the chunk's live KV width are dropped) and shared by every
-+    // layer. pool_ids/pool_last are baked at build time so set_input only
-+    // copies them; pool_n_kv snapshots the live width for can_reuse.
-+    ggml_tensor * pool_idx = nullptr;    // I32 [n_live, n_head_kv, n_stream, 1] pooled-row ids (start/32)
-+    ggml_tensor * pool_idx_m = nullptr;  // I32 [n_live, 1, n_stream, 1] causal-mask row ids (start+31)
-+    std::vector<int32_t> pool_ids;       // baked pooled-row id per live block
-+    std::vector<int32_t> pool_last;      // baked last cache row per live block
-+    int64_t pool_n_kv = -1;              // reuse snapshot; -1 = feature was off
-+
-+    // EdgePrefill AR004: MoBA-style query-chunk gating. The graph loops
-+    // over query groups; each group gathers its own live KV rows
-+    // (qg_rows, filtered to the build-time cache width) and attends only
-+    // its query slice (qg_bounds). idx tensors are created once per
-+    // graph (shared by every layer); qg_n_kv plus the cparams epoch let
-+    // can_reuse reject stale graphs.
-+    std::vector<ggml_tensor *> qg_idx;    // I32 [n_rows_g, n_head_kv, n_stream, 1] per group
-+    std::vector<ggml_tensor *> qg_idx_m;  // I32 [n_rows_g, 1, n_stream, 1] per group (mask rows)
-+    std::vector<std::vector<int32_t>> qg_rows;  // baked live rows per group
-+    std::vector<int32_t> qg_bounds;            // baked query bounds (group count + 1)
-+    int64_t qg_n_kv = -1;                 // reuse snapshot; -1 = feature was off
-+    uint64_t edge_epoch = 0;               // cparams epoch at build (pool/qg staleness)
-+
-     // note: assumes v_rot^2 == I
-     ggml_tensor * self_k_rot = nullptr;
-     ggml_tensor * self_v_rot = nullptr;
+     std::vector<bool> embeddings_layer_inp; // [n_layer()] extract input embeddings for layer
+diff --git a/src/llama-graph.cpp b/src/llama-graph.cpp
+index b7e3744..11731c2 100644
 --- a/src/llama-graph.cpp
 +++ b/src/llama-graph.cpp
-@@ -558,6 +558,155 @@
+@@ -558,6 +558,213 @@ void llm_graph_input_attn_kv::set_input(const llama_ubatch * ubatch) {
      if (self_v_rot && self_v_rot->buffer) {
          mctx->set_input_v_rot(self_v_rot);
      }
@@ -713,10 +743,68 @@
 +            }
 +        }
 +    }
++
++    // EdgePrefill AR006: bound-gating inputs. All values are deterministic
++    // from the cache width, the ubatch width and the cparams budgets, so a
++    // reused graph is refilled with the same layout it was built for.
++    if (bound_bias && bound_bias->buffer) {
++        const int64_t n_pages = bound_bias->ne[0];
++        const int64_t n_kv = mctx->get_n_kv();
++        const int64_t n_tok = ubatch->n_tokens;
++        int64_t local_start_page = 0;
++        {
++            const int64_t bs = 32;
++            const int64_t W = cparams.prefill_qg_bound_local_pages > 0
++                    ? static_cast<int64_t>(cparams.prefill_qg_bound_local_pages) * bs
++                    : n_tok;
++            const int64_t start_row = std::max<int64_t>(0, n_kv - n_tok - W);
++            local_start_page = start_row / bs;
++        }
++        float * bias = reinterpret_cast<float *>(bound_bias->data);
++        for (int64_t p = 0; p < n_pages; ++p) {
++            bias[p] = (p == 0 || p >= local_start_page) ? -INFINITY : 0.0f;
++        }
++    }
++    if (bound_local_idx && bound_local_idx->buffer) {
++        const int64_t n_local = bound_local_idx->ne[0];
++        const int64_t n_kv = mctx->get_n_kv();
++        const int64_t n_tok = ubatch->n_tokens;
++        const int64_t bs = 32;
++        const int64_t W = cparams.prefill_qg_bound_local_pages > 0
++                ? static_cast<int64_t>(cparams.prefill_qg_bound_local_pages) * bs
++                : n_tok;
++        const int64_t start_row = std::max<int64_t>(0, n_kv - n_tok - W);
++        const int64_t local_start_page = start_row / bs;
++        int32_t * dst = reinterpret_cast<int32_t *>(bound_local_idx->data);
++        int64_t i = 0;
++        if (local_start_page == 0) {
++            for (int64_t r = 0; r < n_kv; ++r) {
++                dst[i++] = static_cast<int32_t>(r);
++            }
++        } else {
++            for (int64_t r = 0; r < bs; ++r) {
++                dst[i++] = static_cast<int32_t>(r);
++            }
++            for (int64_t r = local_start_page * bs; r < n_kv; ++r) {
++                dst[i++] = static_cast<int32_t>(r);
++            }
++        }
++        GGML_ASSERT(i == n_local);
++    }
++    if (bound_row_table && bound_row_table->buffer) {
++        const int64_t bs = bound_row_table->ne[0];
++        const int64_t n_pages = bound_row_table->ne[1];
++        int32_t * dst = reinterpret_cast<int32_t *>(bound_row_table->data);
++        for (int64_t p = 0; p < n_pages; ++p) {
++            for (int64_t r = 0; r < bs; ++r) {
++                dst[r + p * bs] = static_cast<int32_t>(p * bs + r);
++            }
++        }
++    }
  }
  
  bool llm_graph_input_attn_kv::can_reuse(const llm_graph_params & params) {
-@@ -572,6 +721,64 @@
+@@ -572,6 +779,77 @@ bool llm_graph_input_attn_kv::can_reuse(const llm_graph_params & params) {
  
      res &= can_reuse_kq_mask(self_kq_mask, mctx, params.ubatch, params.cparams);
  
@@ -778,10 +866,23 @@
 +        res &= edge_epoch == params.cparams.prefill_edge_epoch;
 +    }
 +
++    // EdgePrefill AR006: bound gating bakes the local window and the page
++    // bias for this cache width; keep the armed state and the width/epoch
++    // identical when reusing.
++    const bool want_bound = params.cparams.prefill_mode &&
++                            params.cparams.prefill_qg_bound > 0;
++    if (want_bound != (bound_n_kv >= 0)) {
++        return false;
++    }
++    if (want_bound) {
++        res &= bound_n_kv == static_cast<int64_t>(mctx->get_n_kv());
++        res &= edge_epoch == params.cparams.prefill_edge_epoch;
++    }
++
      return res;
  }
  
-@@ -3148,6 +3355,29 @@
+@@ -3148,6 +3426,68 @@ static std::unique_ptr<llm_graph_input_attn_kv> build_attn_inp_kv_impl(
  
          inp->self_kq_mask = build_attn_inp_kq_mask(ctx0, mctx_cur, ubatch, cparams);
          inp->self_kq_mask_cnv = inp->self_kq_mask;
@@ -808,15 +909,183 @@
 +            ggml_set_input(inp->self_attn_idx);
 +            ggml_set_name(inp->self_attn_idx, "self_attn_idx");
 +        }
++
++        // EdgePrefill AR006: bound-gating input tensors. Only full 32-row
++        // pages are scored; the tail rows (n_kv % 32) always stay in the
++        // local window. n_pages == 0 (tiny cache) leaves the tensors null
++        // and the graph branch simply does not engage.
++        if (cparams.prefill_mode && cparams.prefill_qg_bound > 0) {
++            const int64_t bs = 32;
++            const int64_t n_kv = mctx_cur->get_n_kv();
++            const int64_t n_tok = ubatch.n_tokens;
++            const int64_t n_pages = n_kv / bs;
++            inp->bound_n_kv = n_kv;
++            if (n_pages > 0) {
++                inp->bound_bias = ggml_new_tensor_1d(ctx0, GGML_TYPE_F32, n_pages);
++                ggml_set_input(inp->bound_bias);
++                ggml_set_name(inp->bound_bias, "edge_bound_bias");
++
++                const int64_t W = cparams.prefill_qg_bound_local_pages > 0
++                        ? static_cast<int64_t>(cparams.prefill_qg_bound_local_pages) * bs
++                        : n_tok;
++                const int64_t start_row = std::max<int64_t>(0, n_kv - n_tok - W);
++                const int64_t local_start_page = start_row / bs;
++                const int64_t n_local = local_start_page == 0
++                        ? n_kv
++                        : bs + n_kv - local_start_page * bs;
++                inp->bound_local_idx = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, n_local);
++                ggml_set_input(inp->bound_local_idx);
++                ggml_set_name(inp->bound_local_idx, "edge_bound_local_idx");
++
++                inp->bound_row_table = ggml_new_tensor_2d(ctx0, GGML_TYPE_I32, bs, n_pages);
++                ggml_set_input(inp->bound_row_table);
++                ggml_set_name(inp->bound_row_table, "edge_bound_row_table");
++
++                // Layer-independent causal mask, pre-transposed once per
++                // graph so every layer can gather rows directly.
++                inp->bound_mask_p = ggml_cont(ctx0,
++                        ggml_permute(ctx0, inp->self_kq_mask, 1, 0, 2, 3));
++                ggml_set_name(inp->bound_mask_p, "edge_bound_mask_p");
++            }
++        }
      }
  
      inp->self_k_rot = mctx_cur->build_input_k_rot(ctx0);
-@@ -3221,7 +3451,624 @@
+@@ -3221,7 +3561,759 @@ ggml_tensor * llm_graph_context::build_attn(
  
      ggml_tensor * kq_mask = inp->get_kq_mask();
  
 -    ggml_tensor * cur = build_attn_mha(q, k, v, kq_b, kq_mask, sinks, v_mla, 0, kq_scale, il);
 +    ggml_tensor * cur = nullptr;
++
++    // EdgePrefill AR006: in-graph query-aware page gating. One selection
++    // per prefill ubatch, shared by all heads: each KV page (32 rows) is
++    // scored by q . mean(K_page) (MoBA-style gate, unbiased by key norms),
++    // the top pages plus the local window (sink page and the trailing
++    // window ending at the ubatch's own rows) are gathered in one pass, and
++    // a single attention call runs over the union. Causality is preserved
++    // exactly by gathering the pre-transposed kq_mask rows (shared by every
++    // layer, built once per graph).
++    if (cparams.prefill_mode && cparams.prefill_qg_bound > 0 &&
++        !cparams.flash_attn && !hparams.is_swa(il) &&
++        kq_b == nullptr && sinks == nullptr &&
++        q->ne[3] == 1 && k->ne[3] == 1 && kq_mask->ne[3] == 1 &&
++        inp->bound_bias != nullptr && hparams.n_head_kv(il) == k->ne[1]) {
++        const int64_t bs    = 32;
++        const int64_t d     = k->ne[0];
++        const int64_t h_kv  = k->ne[1];
++        const int64_t n_kv  = k->ne[2];
++        const int64_t n_tok = q->ne[2];
++        const int64_t n_pages = n_kv / bs;
++        const int64_t local_start_row = std::max<int64_t>(
++                0, n_kv - n_tok - (cparams.prefill_qg_bound_local_pages > 0
++                        ? static_cast<int64_t>(cparams.prefill_qg_bound_local_pages) * bs
++                        : n_tok));
++        const int64_t local_start_page = local_start_row / bs;
++        const int64_t n_local = (local_start_page == 0)
++                ? n_kv : bs + n_kv - local_start_page * bs;
++        // Selected pages must be non-local and keep the graph width bounded.
++        int64_t k_sel = std::min<int64_t>(
++                cparams.prefill_qg_bound_sel_pages,
++                std::max<int64_t>(0, local_start_page));
++        k_sel = std::min<int64_t>(k_sel, std::max<int64_t>(0, (4096 - n_local) / bs));
++
++        const ggml_type type_k_src = k->type;
++        const ggml_type type_v_src = v->type;
++        const bool v_trans = v->nb[1] > v->nb[2];
++        ggml_tensor * v_norm = v_trans
++                ? ggml_cont(ctx0, ggml_permute(ctx0, v, 2, 1, 0, 3))
++                : v;
++        ggml_tensor * k_p = ggml_permute(ctx0, k, 0, 2, 1, 3); // [d, n_kv, h_kv]
++        ggml_tensor * v_p = ggml_permute(ctx0, v_norm, 0, 2, 1, 3);
++        ggml_tensor * m_p = inp->bound_mask_p;                 // [n_tok, n_kv]
++
++        // Local branch: contiguous sink page + trailing window. get_rows
++        // requires idx->ne[1] == src->ne[2] (the K/V head count), while the
++        // mask is head-free (ne[2] == 1), so the replicated index is used
++        // for K/V and the flat index for the mask.
++        ggml_tensor * loc_idx_kv = ggml_repeat_4d(ctx0, inp->bound_local_idx,
++                n_local, h_kv, 1, 1);
++        ggml_tensor * k_loc = ggml_get_rows(ctx0, k_p, loc_idx_kv);
++        k_loc = ggml_cont(ctx0, ggml_permute(ctx0, k_loc, 0, 2, 1, 3));
++        ggml_tensor * v_loc = ggml_get_rows(ctx0, v_p, loc_idx_kv);
++        v_loc = ggml_cont(ctx0, ggml_permute(ctx0, v_loc, 0, 2, 1, 3));
++        ggml_tensor * m_loc = ggml_get_rows(ctx0, m_p, inp->bound_local_idx);
++        m_loc = ggml_cont(ctx0, ggml_permute(ctx0, m_loc, 1, 0, 2, 3));
++
++        ggml_tensor * k_g = k_loc;
++        ggml_tensor * v_g = v_loc;
++        ggml_tensor * m_g = m_loc;
++
++        if (k_sel > 0) {
++            // Page score = q . mean(K_page) (MoBA-style gate). The exact
++            // min/max upper bound was implemented and measured first, but
++            // ranking by an upper bound is biased toward large-norm keys
++            // and failed retrieval at 16K (quality 0); the mean key is
++            // unbiased and needs the same single page reduction.
++            ggml_tensor * k4 = ggml_view_4d(ctx0, k,
++                    d, h_kv, bs, n_pages,
++                    k->nb[1], k->nb[2], bs * k->nb[2], 0);
++            ggml_tensor * kc = ggml_cont(ctx0, ggml_permute(ctx0, k4, 2, 1, 0, 3)); // [bs, h, d, n_pages]
++            ggml_tensor * kmean = ggml_pool_1d(ctx0, kc, GGML_OP_POOL_AVG, bs, bs, 0);
++            kmean = ggml_cont(ctx0, ggml_permute(ctx0,
++                    ggml_reshape_3d(ctx0, kmean, h_kv, d, n_pages), 1, 0, 2, 3));
++            // kmean: [d, h_kv, n_pages]
++
++            // Query proxy: the ubatch's last query (scales cancel in the
++            // ranking, so no normalization is needed). One query head per
++            // KV head (the first of the GQA group) so the gate contracts
++            // against the per-KV-head page means.
++            const int64_t head_ratio = q->ne[1] / h_kv;
++            ggml_tensor * q_last = ggml_view_4d(ctx0, q, d, h_kv, 1, 1,
++                    head_ratio * q->nb[1], q->nb[2], q->nb[3],
++                    (n_tok - 1) * q->nb[2]);
++            ggml_tensor * u = ggml_sum_rows(ctx0,
++                    ggml_mul(ctx0, kmean, q_last)); // [1, h_kv, n_pages, 1]
++            ggml_tensor * u2 = ggml_reshape_2d(ctx0, u, h_kv, n_pages);
++            ggml_tensor * u1 = (h_kv > 1)
++                    ? ggml_pool_1d(ctx0, u2, GGML_OP_POOL_MAX, h_kv, h_kv, 0)
++                    : u2;
++            u1 = ggml_reshape_1d(ctx0, u1, n_pages);
++            u1 = ggml_add(ctx0, u1, inp->bound_bias);
++            ggml_tensor * sel = ggml_top_k(ctx0, u1, k_sel); // I32 [k_sel]
++
++            // Page ids -> row ids through the precomputed lookup table:
++            // get_rows(row_table [bs, n_pages], sel [k_sel]) yields
++            // [bs, k_sel] with element (r, i) = sel[i]*bs + r; flattened,
++            // that is k_sel contiguous blocks of bs ascending rows.
++            ggml_tensor * sel_rows = ggml_reshape_1d(ctx0,
++                    ggml_get_rows(ctx0, inp->bound_row_table, sel), k_sel * bs);
++            ggml_tensor * sel_idx_kv = ggml_repeat_4d(ctx0, sel_rows,
++                    k_sel * bs, h_kv, 1, 1);
++
++            ggml_tensor * k_sel_t = ggml_get_rows(ctx0, k_p, sel_idx_kv);
++            k_sel_t = ggml_cont(ctx0, ggml_permute(ctx0, k_sel_t, 0, 2, 1, 3));
++            ggml_tensor * v_sel_t = ggml_get_rows(ctx0, v_p, sel_idx_kv);
++            v_sel_t = ggml_cont(ctx0, ggml_permute(ctx0, v_sel_t, 0, 2, 1, 3));
++            ggml_tensor * m_sel = ggml_get_rows(ctx0, m_p, sel_rows);
++            m_sel = ggml_cont(ctx0, ggml_permute(ctx0, m_sel, 1, 0, 2, 3));
++
++            k_g = ggml_concat(ctx0, k_g, k_sel_t, 2);
++            v_g = ggml_concat(ctx0, v_g, v_sel_t, 2);
++            m_g = ggml_concat(ctx0, m_g, m_sel, 0);
++        }
++
++        if (k_g->type != type_k_src &&
++            (type_k_src == GGML_TYPE_F16 || type_k_src == GGML_TYPE_BF16)) {
++            k_g = ggml_cast(ctx0, k_g, type_k_src);
++        }
++        if (v_g->type != type_v_src &&
++            (type_v_src == GGML_TYPE_F16 || type_v_src == GGML_TYPE_BF16)) {
++            v_g = ggml_cast(ctx0, v_g, type_v_src);
++        }
++        if (m_g->type != kq_mask->type) {
++            m_g = ggml_cast(ctx0, m_g, kq_mask->type);
++        }
++        cur = build_attn_mha(q, k_g, v_g, nullptr, m_g, nullptr, nullptr,
++                             0, kq_scale, il);
++        cb(cur, "kqv_out", il);
++    }
 +
 +    // EdgePrefill per-head adaptive path: takes precedence over the scalar
 +    // top-k gather. Heads of the layer are grouped by their distinct top-k
@@ -1443,21 +1712,107 @@
      cb(cur, "kqv_out", il);
  
      if (inp->self_v_rot) {
---- a/src/llama-context.cpp
-+++ b/src/llama-context.cpp
-@@ -2544,8 +2544,15 @@ uint32_t llama_context::graph_max_nodes(uint32_t n_tokens) const {
+diff --git a/src/llama-graph.h b/src/llama-graph.h
+index f66bedb..0cfb71f 100644
+--- a/src/llama-graph.h
++++ b/src/llama-graph.h
+@@ -357,12 +357,99 @@ public:
  
-     if (cparams.training) {
-         res *= 4;
-     }
+     ggml_tensor * get_kq_mask() const { return self_kq_mask_cnv; }
  
-+    // EdgePrefill: query-gated prefill builds one attention subgraph per
-+    // query group inside build_attn (gather + attention + concat) on top
-+    // of the dense graph. The reserve is fixed at context creation, when
-+    // no sparsity plan exists yet, so budget the headroom unconditionally
-+    // (a few MB of arena at most).
-+    res += std::max<uint32_t>(4096u, 16u * n_tokens);
++    ggml_tensor * get_attn_idx() const { return self_attn_idx; }
 +
-     return res;
- }
+     ggml_tensor * self_k_idxs = nullptr; // I64 [n_batch]
+     ggml_tensor * self_v_idxs = nullptr; // I64 [n_batch] or [n_batch*n_embd_v_gqa]
  
+     ggml_tensor * self_kq_mask     = nullptr; // F32/F16 [n_kv, n_batch/n_stream, 1, n_stream]
+     ggml_tensor * self_kq_mask_cnv = nullptr; //         [n_kv, n_batch/n_stream, 1, n_stream]
+ 
++    // EdgePrefill: attention top-k gather indices.
++    // I32 [n_idx, n_head_kv, n_stream, 1], replicated across heads/streams
++    // in set_input. Allocated only when prefill_attn_top_k > 0.
++    ggml_tensor * self_attn_idx = nullptr;
++
++    // EdgePrefill per-head adaptive path: per-layer group plans computed by
++    // build_attn (which knows the layer index) and filled by set_input. The
++    // attn_kv input object is shared across layers, so the plans are stored
++    // per layer here.
++    struct edge_group {
++        bool dense = true;             // -1 heads or degenerate width: full-width attention
++        int64_t n_idx = 0;             // gathered width (sparse groups only)
++        std::vector<int32_t> rows;     // ascending deduped gathered rows (sparse groups only)
++    };
++    struct edge_layer {
++        bool active = false;
++        std::vector<edge_group> groups;
++        std::vector<int32_t> head_perm;     // original head -> grouped slot
++        std::vector<int32_t> head_perm_inv; // grouped slot -> original head
++        // Grouped Q head slot -> KV head it must attend to. For MHA this is
++        // the head permutation itself; for GQA it maps each query head to its
++        // KV head (values may repeat), so a get_rows gather on the K/V head
++        // dimension replicates KV heads and yields exact q/kv alignment
++        // inside every group.
++        std::vector<int32_t> kv_head_map;
++        ggml_tensor * perm_idx = nullptr;     // I32 [n_head, n_tok, n_stream, 1]
++        ggml_tensor * kv_perm_idx = nullptr;  // I32 [n_head, n_kv, n_stream, 1]
++        ggml_tensor * out_perm_idx = nullptr; // I32 [n_head, n_tok*n_stream, 1, 1]
++        std::vector<ggml_tensor *> group_idx; // parallel to groups; nullptr for dense
++    };
++    std::vector<edge_layer> edge_layers;
++    // Build snapshot for can_reuse: identical matrix/pool/n_kv imply an
++    // identical group structure without recomputing it.
++    std::vector<int32_t> edge_matrix;
++    std::vector<int32_t> edge_pool;
++    int64_t edge_n_kv = -1;
++
++    // EdgePrefill AR004: attention-level compressed branches. The live
++    // block list is computed once per graph build from cparams (blocks
++    // beyond the chunk's live KV width are dropped) and shared by every
++    // layer. pool_ids/pool_last are baked at build time so set_input only
++    // copies them; pool_n_kv snapshots the live width for can_reuse.
++    ggml_tensor * pool_idx = nullptr;    // I32 [n_live, n_head_kv, n_stream, 1] pooled-row ids (start/32)
++    ggml_tensor * pool_idx_m = nullptr;  // I32 [n_live, 1, n_stream, 1] causal-mask row ids (start+31)
++    std::vector<int32_t> pool_ids;       // baked pooled-row id per live block
++    std::vector<int32_t> pool_last;      // baked last cache row per live block
++    int64_t pool_n_kv = -1;              // reuse snapshot; -1 = feature was off
++
++    // EdgePrefill AR004: MoBA-style query-chunk gating. The graph loops
++    // over query groups; each group gathers its own live KV rows
++    // (qg_rows, filtered to the build-time cache width) and attends only
++    // its query slice (qg_bounds). idx tensors are created once per
++    // graph (shared by every layer); qg_n_kv plus the cparams epoch let
++    // can_reuse reject stale graphs.
++    std::vector<ggml_tensor *> qg_idx;    // I32 [n_rows_g, n_head_kv, n_stream, 1] per group
++    std::vector<ggml_tensor *> qg_idx_m;  // I32 [n_rows_g, 1, n_stream, 1] per group (mask rows)
++    std::vector<std::vector<int32_t>> qg_rows;  // baked live rows per group
++    std::vector<int32_t> qg_bounds;            // baked query bounds (group count + 1)
++    int64_t qg_n_kv = -1;                 // reuse snapshot; -1 = feature was off
++    uint64_t edge_epoch = 0;               // cparams epoch at build (pool/qg staleness)
++
++    // EdgePrefill AR006: in-graph query-aware bound gating. The bias and
++    // local-row index tensors are deterministic from the build-time cache
++    // width and the cparams budgets, so set_input refills them on reuse.
++    //   bound_bias      F32 [n_pages]  0 for selectable pages, -INF for
++    //                                  local pages (sink page and the
++    //                                  trailing window) so a page is never
++    //                                  both selected and local.
++    //   bound_local_idx I32 [n_local]  local rows (sink page rows plus the
++    //                                  trailing window), ascending, unique.
++    //   bound_row_table I32 [32, n_pages]  page-id -> row-id lookup:
++    //                                  element (r, p) = p*32 + r. The graph
++    //                                  gathers it with the selected page ids
++    //                                  to expand a page selection into rows
++    //                                  without integer arithmetic on
++    //                                  tensors (ggml has no I32 cast path).
++    ggml_tensor * bound_bias      = nullptr;
++    ggml_tensor * bound_local_idx = nullptr;
++    ggml_tensor * bound_row_table = nullptr;
++    // kq_mask pre-transposed to row-major [n_tok, n_kv] once per graph
++    // (layer-independent), so page gating does not pay a per-layer mask
++    // copy: gathering its rows yields the causal mask of the gathered keys.
++    ggml_tensor * bound_mask_p    = nullptr;
++    int64_t bound_n_kv = -1;              // reuse snapshot; -1 = feature was off
++
+     // note: assumes v_rot^2 == I
+     ggml_tensor * self_k_rot = nullptr;
+     ggml_tensor * self_v_rot = nullptr;
