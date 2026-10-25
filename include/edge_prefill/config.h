@@ -107,6 +107,16 @@ struct Config {
     uint32_t query_chunk_size = 128;
     uint32_t query_chunk_max = 16;
     uint32_t query_top_k_per_group = 256;
+    // AR006 in-graph query-aware bound gating (Quest-style). One page
+    // selection per prefill ubatch from real K min/max upper bounds:
+    // qg_sel_pages pages (32 rows each, 0 = local only) ranked by the
+    // bound plus a mandatory local window of qg_local_rows rows (0 =
+    // ubatch-sized). Takes precedence over query_gating. Default off keeps
+    // the AR005 behavior byte-identical.
+    bool qg_bound = false;
+    uint32_t qg_sel_pages = 8;
+    uint32_t qg_local_rows = 0;
+    uint32_t qg_pool_pages = 0;
     bool risk_guard = true;
     double risk_sep_threshold = 0.5;
     double risk_cov_threshold = 0.35;

@@ -44,6 +44,14 @@ public:
         bool enable_query_gating = false;
         std::vector<std::vector<int32_t>> qg_group_rows;  // full-plan rows per group
         std::vector<int32_t> qg_bounds;                   // full-plan bounds (groups+1)
+        // AR006 in-graph bound gating: one page selection per prefill
+        // ubatch from real K min/max bounds plus a mandatory local window.
+        // Takes precedence over enable_query_gating; requires an un-prefixed
+        // row space. Backend rejection degrades to the row-list/scalar path.
+        bool enable_qg_bound = false;
+        uint32_t qg_sel_pages = 8;
+        uint32_t qg_local_rows = 0;
+        uint32_t qg_pool_pages = 0;
     };
 
     SparsePrefiller(LlamaBackend* backend, PrefixCache* cache);
@@ -62,7 +70,8 @@ private:
                         const std::vector<int32_t>& attn_indices,
                         const Options& opts,
                         PrefillStats* stats,
-                        bool qg_active);
+                        bool qg_active,
+                        bool bound_active);
 
     LlamaBackend* backend_;
     PrefixCache* cache_;

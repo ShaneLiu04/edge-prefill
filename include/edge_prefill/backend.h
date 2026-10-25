@@ -135,6 +135,16 @@ public:
     Status set_qg_bounds(const std::vector<int32_t>& bounds);
     int32_t qg_count() const;
 
+    // AR006 in-graph query-aware bound gating (Quest-style). One page
+    // selection per prefill ubatch, shared by all heads: `sel_pages` pages
+    // (32 cache rows each) ranked by an exact upper bound of q.k from real
+    // K min/max, plus a mandatory local window (`local_rows` rows ending at
+    // the ubatch's own rows; 0 = ubatch-sized) and the sink page. Arming
+    // clears every other sparse attention path. enabled=false disarms.
+    Status set_qg_bound(bool enabled, uint32_t sel_pages, uint32_t local_rows,
+                        uint32_t pool_pages);
+    bool qg_bound() const;
+
     const llama_model* model() const { return model_; }
     llama_context* context() const { return ctx_; }
     const llama_vocab* vocab() const { return vocab_; }

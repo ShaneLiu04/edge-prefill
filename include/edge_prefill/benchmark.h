@@ -44,6 +44,11 @@ struct BenchmarkConfig {
     uint32_t query_chunk_size = 128;
     uint32_t query_chunk_max = 16;
     uint32_t query_top_k_per_group = 256;
+    // AR006 in-graph query-aware bound gating (see Config).
+    bool qg_bound = false;
+    uint32_t qg_sel_pages = 8;
+    uint32_t qg_local_rows = 0;
+    uint32_t qg_pool_pages = 0;
     // AR005: embedding GGUF activates the semantic engine for selection
     // and upgrades query gating to the per-group 2D matrix. Explicit
     // configuration never degrades: a load failure fails the run.
