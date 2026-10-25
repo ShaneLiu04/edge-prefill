@@ -48,6 +48,9 @@ struct BenchmarkConfig {
     // and upgrades query gating to the per-group 2D matrix. Explicit
     // configuration never degrades: a load failure fails the run.
     std::string embedding_model;
+    // Thread count for the embedding engine (tiny encoder graphs are
+    // capped internally); 0 = hardware default.
+    int32_t embed_threads = 0;
     // Selector fusion weights and whether the user pinned them (pinned
     // weights suppress the semantic-priority default).
     SelectorWeights weights;
