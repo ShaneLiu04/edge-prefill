@@ -19,11 +19,11 @@
 | T006 | patch：页门控去 K 拷贝（`mul_mat(k_view,q_last)` + 页求和），形状守卫与回退 | - | passing | FR-4。`view_3d(q)+mul_mat(k,q)` → `reshape_3d(bs,n_pages,h_kv)` → `sum_rows` → permute/pool，去掉 `cont(permute(k))`；patch 1823 行，`git apply --check` 干净 |
 | T007 | 单测：锚点/MMR/曲线表/页分数等价（新旧实现容差 1e-4） | T002-T006 | passing | FR-2/3/4。新增 `test_budget_curve.cpp`（loader 严格性/planner 三态/clamp）与 3 个 selector 用例；全量 144 PASS（无模型）；页分数新旧一致性放到真机对比（T008） |
 | T008 | 真机实测：16K ≤12% 预算 q≥0.9；32K bound 降幅 ≥30%；4K/8K/mn 不回归 | T005,T006 | passing | FR-1..4。16K b0.05 q=1.00（38.5×，b=0.12 反而 q=0.50，见 srs §8）；32K 门控 p24+local32 67.9s→25.4-31.4s（≥56% 降幅）q=1.00；8K 29.1× q=1.00；**mn 例外**：自动预算 q=0.33，AR006 门控 q=0.83，已在 REPORT/srs 记录并保持曲线默认关闭 |
-| T009 | GPU 关键点回归（16K bound，RTX5000） | T008 | pending | 守护 |
+| T009 | GPU 关键点回归（16K bound，RTX5000） | T008 | pending | 守护。本机无 GPU；页打分新链路仍需在 CUDA 后端验证 `mul_mat(view)` + `sum_rows` + `pool_1d` 的等价（CPU 已验证 q=1.00）。已记入 research §9.5 与 server-repro §5 |
 | T010 | 复现资产：`benchmarks/matrix/budget/*.conf`、expected 表、`repro.sh sweep`、server-repro 手册更新 | T008 | passing | FR-5。`matrix/budget/{auto,b008-a24,b012-a24}.conf` + `expected.csv`（54 行，机器无关闸门 `check_expected_ar007.py` PASS 54/54）+ `repro.sh budget|ar007` + `ar007_accept.sh`/`ar007_report.py` + server-repro §7 |
 | T011 | 文档：README 结果表、architecture/research（预算-质量曲线、MMR/锚点论证）、组件详设变更记录 | T008 | passing | FR-5。README 结果表+CLI；architecture 增"预算来源三层"节；research §9（非单调曲线/锚点/去拷贝/教训）；组件详设 v0.5 变更记录 |
 | T012 | Review：-Werror、全量回归、dense 等价、无 mock 审计、审计列一致性 | T008-T011 | passing | `-Wall -Wextra -Werror` 全量构建零警告（顺带修掉 test_attention_sparsity 两个未用变量）；无模型 145 PASS / 带模型 145 PASS；dense 等价由既有等价用例覆盖；审计列 `budget_source/anchor_blocks/mmr_penalized` 在 raw.csv 末端追加，旧脚本按列名读取不受影响；patch 对 pin+ffn `git apply --check` 干净 |
-| T013 | ST 验收 + 归档 + tag `ar007-v1.0` + Gitee 推送（split-push 脚本可用） | T012 | pending | |
+| T013 | ST 验收 + 归档 + tag `ar007-v1.0` + Gitee 推送（split-push 脚本可用） | T012 | passing | ST 见下「ST 验收记录」；tag `ar007-v1.0` → 87dc6eb 已推 Gitee（直推成功，无需 split-push） |
 
 ## 状态说明
 
@@ -52,3 +52,42 @@
 
 > 由 sdd-phase-gate 追加。本轮按用户「自动化、无需逐步确认」授权跳过交互式门控，
 > 改为自检记录（见上）。
+
+## ST 验收记录（2026-10-26）
+
+### 环境与范围
+
+- 主机：WSL2 / Xeon Gold 6234（16 线程），无 GPU；
+- 模型：`qwen2.5-1.5b-instruct-q4_k_m.gguf`（`model_sha256=6a1a2eb6…407e`）、
+  embedding `bge-small-en-v1.5-q8_0.gguf`；
+- 数据集：`explen/{len4k,len8k,len16k}`、`deep/{len32k,multineedle}`（仓库自带 + manifest SHA256）；
+- 交付物：tag `ar007-v1.0` = 87dc6eb，Gitee master 同步。
+
+### 用例执行
+
+| # | 用例 | 结果 |
+|---|---|---|
+| ST-1 | 曲线测量可复算：`sweep_budget.py` 12 格点，抽查 16K b0.05（raw q=1.00/ttft 6993ms）与 summary 一致 | PASS |
+| ST-2 | 曲线推荐规则：4K→0.08、8K/16K/32K→0.05，`floor-missed` 标记 32K | PASS |
+| ST-3 | planner 三态：无 conf 无曲线 → `default`；指向曲线 → `model`；显式 budget → `override`；32K 显式 0.25 → `clamp`（4096 token） | PASS |
+| ST-4 | 指纹校验：曲线 `model_sha256` 不符 → 清空 + warning，预算回落 default | PASS（单测 `planner_budget_source_and_curve` + runner 日志） |
+| ST-5 | 8K 自动预算：q=1.00（4/4）、1.67s，dense 48.8s → 29.1× | PASS |
+| ST-6 | 16K 自动预算：q=1.00（4/4）、5.18s，dense 199.5s → 38.5× | PASS |
+| ST-7 | 32K 自动预算：q=0.893（min 0.571）、6.96s，dense 384.1s → 55.2× | PASS（质量低于 0.95 已在 REPORT 标注为 floor-missed） |
+| ST-8 | 32K 门控 p24+local32：q=1.00、25.4-31.4s（旧实现 67.9s，降幅 ≥56%） | PASS |
+| ST-9 | 16K 门控 p16：q=1.00、21.8-26.7s（旧 23.7s） | PASS |
+| ST-10 | 多针：auto q=0.33 / b0.25 q=0.39 / AR006 门控 q=0.83 → **记录为已知限制**，曲线默认关闭 | PASS（按诚实红线记录，不宣称达成） |
+| ST-11 | dense 等价：`budget=1.0` + 全关路径逐位等于 dense（既有等价用例 + `qg_empty_plan_equivalence`） | PASS |
+| ST-12 | 回归守护：`bound_gating_execution_and_restore` 含 `qg_local_rows=32` 页打分分支（曾一次 `mul_mat` abort） | PASS |
+| ST-13 | 全量测试（无模型）145 PASS / 0 FAIL；（带真实模型）145 PASS / 0 FAIL | PASS |
+| ST-14 | `-Wall -Wextra -Werror` 全量构建零警告 | PASS |
+| ST-15 | patch 对 pin(+ffn) `git apply --check` 干净，应用后 `llama_set_prefill_qg_bound` 符号在位 | PASS |
+| ST-16 | 干净克隆 `--branch ar007-v1.0` → cmake 构建 → ctest 100% → `check_expected_ar007.py` 54/54 | PASS |
+| ST-17 | 复现资产齐全：matrix/budget 三 conf + expected.csv + 四个脚本 + repro `budget|ar007` + server-repro §7 | PASS |
+
+### 未达成 / 待办
+
+- T009 GPU 关键点回归未执行（无 GPU）：页打分新链路的 CUDA 等价性待 RTX5000 机器验证；
+- 多针族质量（q≈0.33）未达 FR 目标：根因是选择级块粒度在 5% 预算下无法覆盖多事实邻域，
+  已用"曲线默认关闭 + 多针走 AR006 门控"工程化规避，并写入 srs §8 / research §9.5；
+- 曲线仍是单针任务族专用：跨任务自动识别（多针/摘要）未实现，属后续 AR 范围。
