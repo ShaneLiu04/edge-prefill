@@ -89,6 +89,14 @@ struct Args {
     bool query_chunk_max_set = false;
     uint32_t query_top_k_per_group = 256;
     bool query_top_k_per_group_set = false;
+    bool qg_bound = false;
+    bool qg_bound_set = false;
+    uint32_t qg_sel_pages = 8;
+    bool qg_sel_pages_set = false;
+    uint32_t qg_local_rows = 0;
+    bool qg_local_rows_set = false;
+    uint32_t qg_pool_pages = 0;
+    bool qg_pool_pages_set = false;
     double budget = 0.5;
     bool budget_set = false;
     bool bench_skip_dense = false;
@@ -397,6 +405,49 @@ Status parse_args(int argc, char** argv, Args* args) {
             }
             args->query_top_k_per_group = static_cast<uint32_t>(parsed);
             args->query_top_k_per_group_set = true;
+        } else if (flag == "--qg-bound") {
+            std::string value;
+            auto st = next(&value);
+            if (!st.ok()) return st;
+            if (value != "on" && value != "off") {
+                return Status::error(ErrorCode::InvalidArgument,
+                                     "invalid --qg-bound: " + value);
+            }
+            args->qg_bound = value == "on";
+            args->qg_bound_set = true;
+        } else if (flag == "--qg-sel-pages") {
+            std::string value;
+            auto st = next(&value);
+            if (!st.ok()) return st;
+            int64_t parsed = 0;
+            if (!parse_i64_strict(value, &parsed) || parsed < 0 || parsed > 128) {
+                return Status::error(ErrorCode::InvalidArgument,
+                                     "invalid --qg-sel-pages: " + value);
+            }
+            args->qg_sel_pages = static_cast<uint32_t>(parsed);
+            args->qg_sel_pages_set = true;
+        } else if (flag == "--qg-local-rows") {
+            std::string value;
+            auto st = next(&value);
+            if (!st.ok()) return st;
+            int64_t parsed = 0;
+            if (!parse_i64_strict(value, &parsed) || parsed < 0 || parsed > 32768) {
+                return Status::error(ErrorCode::InvalidArgument,
+                                     "invalid --qg-local-rows: " + value);
+            }
+            args->qg_local_rows = static_cast<uint32_t>(parsed);
+            args->qg_local_rows_set = true;
+        } else if (flag == "--qg-pool-pages") {
+            std::string value;
+            auto st = next(&value);
+            if (!st.ok()) return st;
+            int64_t parsed = 0;
+            if (!parse_i64_strict(value, &parsed) || parsed < 0 || parsed > 4096) {
+                return Status::error(ErrorCode::InvalidArgument,
+                                     "invalid --qg-pool-pages: " + value);
+            }
+            args->qg_pool_pages = static_cast<uint32_t>(parsed);
+            args->qg_pool_pages_set = true;
         } else if (flag == "--output") {
             auto st = next(&args->output);
             if (!st.ok()) return st;
@@ -616,6 +667,10 @@ Status apply_common_config(const Args& args, Config* cfg) {
     if (args.query_top_k_per_group_set) {
         cfg->query_top_k_per_group = args.query_top_k_per_group;
     }
+    if (args.qg_bound_set) cfg->qg_bound = args.qg_bound;
+    if (args.qg_sel_pages_set) cfg->qg_sel_pages = args.qg_sel_pages;
+    if (args.qg_local_rows_set) cfg->qg_local_rows = args.qg_local_rows;
+    if (args.qg_pool_pages_set) cfg->qg_pool_pages = args.qg_pool_pages;
     if (cfg->pyramid_k_min > cfg->pyramid_k_max) {
         return Status::error(ErrorCode::InvalidArgument,
                              "pyramid-k-min must be <= pyramid-k-max");
@@ -944,7 +999,21 @@ Status run_command(const Args& args) {
             log_debug("qg: lexical-1d-unavailable (per-position scores missing)");
         }
     }
-    if (run_cfg.query_gating && !popts.enable_head_adaptive &&
+    if (run_cfg.qg_bound && !popts.enable_head_adaptive && !selection.dense) {
+        // AR006: in-graph bound gating (attention-derived, no embedding in
+        // the critical path). Replaces every other attention sparse path;
+        // the graph selects pages per ubatch from real K min/max bounds.
+        popts.enable_qg_bound = true;
+        popts.qg_sel_pages = run_cfg.qg_sel_pages;
+        popts.qg_local_rows = run_cfg.qg_local_rows;
+        popts.qg_pool_pages = run_cfg.qg_pool_pages;
+        popts.enable_query_gating = false;
+        popts.enable_pool_blocks = false;
+        qg_source = "attention-bound";
+        log_info("bound gating plan: sel_pages=" +
+                 std::to_string(run_cfg.qg_sel_pages) + " local_rows=" +
+                 std::to_string(run_cfg.qg_local_rows));
+    } else if (run_cfg.query_gating && !popts.enable_head_adaptive &&
         !selection.dense &&
         selection.per_pos_scores.size() == selection.total_tokens) {
         QueryGatingOptions qg_opts;
@@ -1146,6 +1215,10 @@ Status bench_command(const Args& args) {
     bench.query_chunk_size = cfg.query_chunk_size;
     bench.query_chunk_max = cfg.query_chunk_max;
     bench.query_top_k_per_group = cfg.query_top_k_per_group;
+    bench.qg_bound = cfg.qg_bound;
+    bench.qg_sel_pages = cfg.qg_sel_pages;
+    bench.qg_local_rows = cfg.qg_local_rows;
+    bench.qg_pool_pages = cfg.qg_pool_pages;
     bench.embedding_model = cfg.embedding_model;
     bench.embed_threads = cfg.n_threads;
     bench.weights = cfg.weights;

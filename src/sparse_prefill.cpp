@@ -125,12 +125,34 @@ Status SparsePrefiller::prefill(const std::vector<llama_token>& tokens,
             }
         }
     }
+    // AR006 in-graph bound gating: one page selection per ubatch from real
+    // K min/max bounds. Takes precedence over the row-list qg path; a
+    // rejected probe degrades to the row-list/scalar path below, never
+    // fails the request.
+    bool bound_active = false;
+    if (opts.enable_qg_bound && !head_active && prefix_len == 0) {
+        auto st = backend_->set_qg_bound(true, opts.qg_sel_pages,
+                                         opts.qg_local_rows, opts.qg_pool_pages);
+        if (!st.ok()) {
+            log_warn("bound gating unavailable (" + st.message +
+                     "); falling back to the row-list/scalar path");
+        } else {
+            bound_active = true;
+            attn_active = true;
+            stats->query_gating = true;
+            stats->qg_groups = 1;
+            log_info("bound gating active: sel_pages=" +
+                     std::to_string(opts.qg_sel_pages) + " local_rows=" +
+                     std::to_string(opts.qg_local_rows));
+        }
+    }
+
     // AR004 FR-3 query-chunk gating: replaces the scalar gather with
     // per-group row sets. Only meaningful in the un-prefixed row space (a
     // prefix-cache hit shifts rows); a rejected probe degrades to the
     // scalar path below, never fails the request.
     bool qg_active = false;
-    if (opts.enable_query_gating && !head_active &&
+    if (!bound_active && opts.enable_query_gating && !head_active &&
         prefix_len == 0 && !opts.qg_group_rows.empty()) {
         auto probe = backend_->set_qg_count(1);
         if (!probe.ok()) {
@@ -204,7 +226,7 @@ Status SparsePrefiller::prefill(const std::vector<llama_token>& tokens,
         Status st = Status::success();
         if (attn_active) {
             st = attn_prefill(active_tokens, active_positions, selection.attention_indices,
-                              opts, stats, qg_active);
+                              opts, stats, qg_active, bound_active);
         } else {
             // enable_chunking=false passes the whole active span: the
             // scheduler emits one range and llama_decode splits internally
@@ -226,6 +248,7 @@ Status SparsePrefiller::prefill(const std::vector<llama_token>& tokens,
         backend_->set_attn_indices({});
         backend_->set_attn_pool_blocks({}, {}, {});
         backend_->set_qg_count(0);
+        backend_->set_qg_bound(false, 0, 0, 0);
         if (!st.ok()) return st;
         stats->prompt_tokens = static_cast<uint32_t>(tokens.size());
         stats->selected_tokens = static_cast<uint32_t>(selection.token_indices.size());
@@ -260,7 +283,8 @@ Status SparsePrefiller::attn_prefill(const std::vector<llama_token>& tokens,
                                      const std::vector<int32_t>& attn_indices,
                                      const Options& opts,
                                      PrefillStats* stats,
-                                     bool qg_active) {
+                                     bool qg_active,
+                                     bool bound_active) {
     // The llama.cpp gather patch indexes KV cells in decode order, not by
     // absolute position: with sparse selection the r-th cell holds the r-th
     // selected token, so position != row. Map every gather position to its
@@ -309,7 +333,11 @@ Status SparsePrefiller::attn_prefill(const std::vector<llama_token>& tokens,
         std::vector<llama_pos> chunk_positions(positions.begin() + range.begin,
                                                 positions.begin() + range.end);
         std::vector<std::vector<int32_t>> chunk_groups;
-        if (qg_active) {
+        if (bound_active) {
+            // AR006: bound gating is armed once per prefill; every ubatch
+            // selects its own pages inside the attention graph from real K
+            // min/max bounds, so no per-chunk state is set here.
+        } else if (qg_active) {
             // Per-chunk gating plan: intersect the full-plan groups with
             // the chunk's row window and keep only live rows (< range.end;
             // the chunk's own rows are written by this decode and enter
@@ -416,7 +444,13 @@ Status SparsePrefiller::attn_prefill(const std::vector<llama_token>& tokens,
         // Audit the gathered width: scalar allowed-prefix rows, or the
         // per-group row total under query gating.
         uint32_t chunk_rows = 0;
-        if (qg_active) {
+        if (bound_active) {
+            // Local window (sink page + ubatch-sized tail) plus the page
+            // budget; the graph may shrink both for early ubatches.
+            chunk_rows = (opts.qg_local_rows > 0 ? opts.qg_local_rows
+                                                 : static_cast<uint32_t>(chunk_tokens.size()))
+                       + 32 + opts.qg_sel_pages * 32;
+        } else if (qg_active) {
             for (const auto& rows : chunk_groups) {
                 chunk_rows += static_cast<uint32_t>(rows.size());
             }
