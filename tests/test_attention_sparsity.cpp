@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <limits>
 #include <numeric>
+#include <cstdio>
+#include <fstream>
 #include <set>
 #include <string>
 #include <utility>
@@ -227,6 +229,42 @@ TEST_CASE(attention_sparsity_config_parse) {
     CHECK_ERR(parse_u32_list("4,x", &values), ErrorCode::InvalidArgument);
     CHECK_ERR(parse_u32_list("-1", &values), ErrorCode::InvalidArgument);
     CHECK_ERR(parse_u32_list("4", nullptr), ErrorCode::InvalidArgument);
+}
+
+// AR006: the bound-gating config keys parse, default off, and reject
+// out-of-range budgets (the graph contract: sel_pages <= 128).
+TEST_CASE(bound_gating_config_parse) {
+    const std::string path = "edge_prefill_bound_test.conf";
+    {
+        std::ofstream f(path);
+        f << "qg_bound = true\n"
+          << "qg_sel_pages = 16\n"
+          << "qg_local_rows = 512\n"
+          << "qg_pool_pages = 4\n";
+    }
+    Config cfg;
+    CHECK_OK(parse_config_file(path, &cfg));
+    CHECK(cfg.qg_bound);
+    CHECK_EQ(cfg.qg_sel_pages, 16u);
+    CHECK_EQ(cfg.qg_local_rows, 512u);
+    CHECK_EQ(cfg.qg_pool_pages, 4u);
+    std::remove(path.c_str());
+
+    // Defaults: off, 8 pages, ubatch-sized local window, no pool pages.
+    Config def;
+    CHECK(!def.qg_bound);
+    CHECK_EQ(def.qg_sel_pages, 8u);
+    CHECK_EQ(def.qg_local_rows, 0u);
+    CHECK_EQ(def.qg_pool_pages, 0u);
+
+    const std::string bad = "edge_prefill_bound_bad.conf";
+    {
+        std::ofstream f(bad);
+        f << "qg_sel_pages = 129\n";
+    }
+    Config out;
+    CHECK_ERR(parse_config_file(bad, &out), ErrorCode::InvalidArgument);
+    std::remove(bad.c_str());
 }
 
 TEST_CASE(attention_sparsity_plan_fields) {
