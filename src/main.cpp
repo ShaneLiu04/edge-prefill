@@ -60,7 +60,10 @@ struct Args {
     uint32_t n_ubatch = 512;
     int32_t threads = 0;
     int32_t n_gpu_layers = 0;
-    int32_t repeats = 5;
+    // -1 means "not given on the command line": the config file's repeats
+    // (or the 5x default) wins. A 0/5 default here used to silently
+    // override every conf file and quintuple matrix runtimes.
+    int32_t repeats = -1;
     uint32_t attn_top_k = 0;
     bool attn_top_k_set = false;
     bool head_adaptive = false;
