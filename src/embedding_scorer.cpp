@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <thread>
+#include <utility>
 
 #include "edge_prefill/log.h"
 
@@ -35,7 +36,44 @@ bool vector_is_zero(const std::vector<double>& v) {
     return true;
 }
 
+// Tiny encoder graphs collapse under many threads: measured on the 16-core
+// bench host, 16 threads runs ~7x SLOWER than 8 for 32-token block waves
+// (spin-wait contention dominates the small ggml ops). Cap the pool.
+constexpr int32_t kEmbedThreadsCap = 8;
+
 } // namespace
+
+void EmbeddingScorer::texts_fingerprint(const std::vector<std::string>& texts,
+                                        std::array<uint64_t, 2>* out) {
+    // Dual-seed FNV-1a: two independent 64-bit lanes make an accidental
+    // collision (which would silently reuse foreign embeddings) negligible.
+    uint64_t h0 = 1469598103934665603ull;
+    uint64_t h1 = 14695981039346656037ull;
+    for (const std::string& t : texts) {
+        for (char c : t) {
+            h0 = (h0 ^ static_cast<uint64_t>(static_cast<unsigned char>(c))) *
+                 1099511628211ull;
+            h1 = (h1 ^ static_cast<uint64_t>(static_cast<unsigned char>(c))) *
+                 1099511628211ull;
+        }
+        // Separator so ["ab","c"] never collides with ["a","bc"].
+        h0 = (h0 ^ 0x1full) * 1099511628211ull;
+        h1 = (h1 ^ 0x9eull) * 1099511628211ull;
+    }
+    (*out)[0] = h0;
+    (*out)[1] = h1;
+}
+
+bool EmbeddingScorer::block_cache_match(
+        const std::vector<std::string>& block_texts) const {
+    if (block_cache_.size() != block_texts.size() ||
+           block_cache_key_[0] == 0) {
+        return false;
+    }
+    std::array<uint64_t, 2> key = {0, 0};
+    texts_fingerprint(block_texts, &key);
+    return key[0] == block_cache_key_[0] && key[1] == block_cache_key_[1];
+}
 
 EmbeddingScorer::~EmbeddingScorer() {
     if (ctx_) {
@@ -74,9 +112,17 @@ Status EmbeddingScorer::load_model(const std::string& path, int32_t n_threads) {
     cparams.n_ubatch = kMaxSeqTokens * kDefaultParallel;
     cparams.n_seq_max = n_parallel_;
     const uint32_t hw = std::thread::hardware_concurrency();
-    cparams.n_threads = n_threads > 0 ? n_threads
-                                      : static_cast<int32_t>(hw > 0 ? hw : 4);
-    cparams.n_threads_batch = cparams.n_threads;
+    int32_t threads = n_threads > 0 ? n_threads
+                                    : static_cast<int32_t>(hw > 0 ? hw : 4);
+    if (threads > kEmbedThreadsCap) {
+        log_info("embedding threads capped to " +
+                 std::to_string(kEmbedThreadsCap) + " (requested " +
+                 std::to_string(threads) +
+                 "); tiny encoder graphs degrade beyond the cap");
+        threads = kEmbedThreadsCap;
+    }
+    cparams.n_threads = threads;
+    cparams.n_threads_batch = threads;
     cparams.embeddings = true;
     // Pooling is left unspecified so the GGUF's own pooling head wins
     // (bge = CLS, generic embedders = MEAN). Both produce pooled sequence
@@ -237,23 +283,36 @@ Status EmbeddingScorer::score_group_block(
     }
 
     // One combined encode pass: every text (group and block) is encoded
-    // exactly once, then paired into the G x B cosine matrix.
-    std::vector<std::string> combined;
-    combined.reserve(group_texts.size() + block_texts.size());
-    combined.insert(combined.end(), group_texts.begin(), group_texts.end());
-    combined.insert(combined.end(), block_texts.begin(), block_texts.end());
+    // exactly once, then paired into the G x B cosine matrix. Block
+    // vectors hit the memo cache when selection already encoded the same
+    // list (same case, or a sibling case sharing the context).
+    const bool cached = block_cache_match(block_texts);
+    std::vector<std::string> to_encode;
+    if (cached) {
+        to_encode.insert(to_encode.end(), group_texts.begin(), group_texts.end());
+    } else {
+        to_encode.reserve(group_texts.size() + block_texts.size());
+        to_encode.insert(to_encode.end(), group_texts.begin(), group_texts.end());
+        to_encode.insert(to_encode.end(), block_texts.begin(), block_texts.end());
+    }
     std::vector<std::vector<double>> rows;
-    Status st = encode(combined, &rows);
+    Status st = encode(to_encode, &rows);
     if (!st.ok()) {
         return st;
     }
 
     const size_t n_groups = group_texts.size();
     const size_t n_blocks = block_texts.size();
+    if (!cached) {
+        block_cache_store(block_texts, rows, n_groups);
+    }
+    const std::vector<std::vector<double>>& block_rows =
+            cached ? block_cache_ : rows;
+    const size_t block_row_base = cached ? 0 : n_groups;
     matrix->assign(n_groups, std::vector<double>(n_blocks, 0.0));
     for (size_t g = 0; g < n_groups; ++g) {
         for (size_t b = 0; b < n_blocks; ++b) {
-            const double c = cosine(rows[g], rows[n_groups + b]);
+            const double c = cosine(rows[g], block_rows[block_row_base + b]);
             if (!std::isfinite(c)) {
                 return Status::error(ErrorCode::Internal,
                                      "non-finite group-block cosine score");
@@ -262,6 +321,17 @@ Status EmbeddingScorer::score_group_block(
         }
     }
     return Status::success();
+}
+
+void EmbeddingScorer::block_cache_store(
+        const std::vector<std::string>& block_texts,
+        const std::vector<std::vector<double>>& rows,
+        size_t block_row_offset) {
+    block_cache_.assign(block_texts.size(), {});
+    for (size_t b = 0; b < block_texts.size(); ++b) {
+        block_cache_[b] = rows[block_row_offset + b];
+    }
+    texts_fingerprint(block_texts, &block_cache_key_);
 }
 
 Status EmbeddingScorer::score_query_blocks(
@@ -279,19 +349,30 @@ Status EmbeddingScorer::score_query_blocks(
         return Status::error(ErrorCode::InvalidArgument, "embedding model is not loaded");
     }
 
-    std::vector<std::string> combined;
-    combined.reserve(1 + block_texts.size());
-    combined.push_back(query);
-    combined.insert(combined.end(), block_texts.begin(), block_texts.end());
+    // The query is always encoded; block vectors come from the memo cache
+    // when the same list was scored before (deterministic encoder, exact
+    // reuse). A miss encodes query + blocks and primes the cache.
+    const bool cached = block_cache_match(block_texts);
+    std::vector<std::string> to_encode;
+    to_encode.push_back(query);
+    if (!cached) {
+        to_encode.insert(to_encode.end(), block_texts.begin(), block_texts.end());
+    }
     std::vector<std::vector<double>> rows;
-    Status st = encode(combined, &rows);
+    Status st = encode(to_encode, &rows);
     if (!st.ok()) {
         return st;
     }
+    if (!cached) {
+        block_cache_store(block_texts, rows, 1);
+    }
+    const std::vector<std::vector<double>>& block_rows =
+            cached ? block_cache_ : rows;
+    const size_t block_row_base = cached ? 0 : 1;
 
     block_scores->assign(block_texts.size(), 0.0);
     for (size_t b = 0; b < block_texts.size(); ++b) {
-        const double c = cosine(rows[0], rows[1 + b]);
+        const double c = cosine(rows[0], block_rows[block_row_base + b]);
         if (!std::isfinite(c)) {
             return Status::error(ErrorCode::Internal,
                                  "non-finite query-block cosine score");

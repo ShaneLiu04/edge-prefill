@@ -91,6 +91,7 @@ struct Args {
     bool query_top_k_per_group_set = false;
     double budget = 0.5;
     bool budget_set = false;
+    bool bench_skip_dense = false;
     std::string embedding_model;
     double selector_w_lexical = 0.0;
     bool selector_w_lexical_set = false;
@@ -201,6 +202,8 @@ Status parse_args(int argc, char** argv, Args* args) {
         } else if (flag == "--embedding-model") {
             auto st = next(&args->embedding_model);
             if (!st.ok()) return st;
+        } else if (flag == "--bench-skip-dense") {
+            args->bench_skip_dense = true;
         } else if (flag == "--selector-w-lexical" || flag == "--selector-w-diversity" ||
                    flag == "--selector-w-position" || flag == "--selector-w-draft") {
             std::string value;
@@ -790,9 +793,6 @@ Status run_command(const Args& args) {
     const auto sel_begin = std::chrono::steady_clock::now();
     st = selector.select(tokens, run_cfg.prompt, pieces, sopts, selection_scorer,
                          &selection);
-    const double select_ms = std::chrono::duration<double, std::milli>(
-                                     std::chrono::steady_clock::now() - sel_begin)
-                                     .count();
     if (!st.ok()) {
         LlamaBackend::shutdown();
         return st;
@@ -1020,6 +1020,12 @@ Status run_command(const Args& args) {
             log_info(qg_reason);
         }
     }
+    // AR005 FR-5: the selection clock stops after the 2D group-block
+    // matrix build (when armed) - the matrix is selection-stage work and
+    // must not leak into the prefill TTFT.
+    const double select_ms = std::chrono::duration<double, std::milli>(
+                                     std::chrono::steady_clock::now() - sel_begin)
+                                     .count();
     PrefillStats stats;
     const auto begin = std::chrono::steady_clock::now();
     st = prefilter.prefill(tokens, selection, popts, &stats);
@@ -1105,12 +1111,23 @@ Status bench_command(const Args& args) {
     if (cfg.model_path.empty()) return Status::error(ErrorCode::InvalidArgument, "missing model");
     if (cfg.data_dir.empty()) return Status::error(ErrorCode::InvalidArgument, "missing data_dir");
     if (args.repeats > 0) cfg.repeats = static_cast<uint32_t>(args.repeats);
+    // The embedding model can be pinned in the conf; an explicit CLI path
+    // wins so the matrix runner stays machine-neutral.
+    if (!args.embedding_model.empty()) cfg.embedding_model = args.embedding_model;
 
     BenchmarkConfig bench;
     bench.model = cfg.model_path;
     bench.data_dir = cfg.data_dir;
     bench.modes = {Mode::Dense, cfg.mode};
     bench.budgets = {1.0, cfg.budget};
+    // AR005 FR-6: matrix runs pair every sparse grid point against one
+    // shared dense reference per dataset (dense is config-independent);
+    // --bench-skip-dense turns this run sparse-only so the reference is
+    // measured once, not 24 times.
+    if (args.bench_skip_dense) {
+        bench.modes = {cfg.mode};
+        bench.budgets = {cfg.budget};
+    }
     bench.lengths = {0};
     bench.repeats = static_cast<int32_t>(cfg.repeats);
     bench.warmup = cfg.warmup;
@@ -1130,6 +1147,7 @@ Status bench_command(const Args& args) {
     bench.query_chunk_max = cfg.query_chunk_max;
     bench.query_top_k_per_group = cfg.query_top_k_per_group;
     bench.embedding_model = cfg.embedding_model;
+    bench.embed_threads = cfg.n_threads;
     bench.weights = cfg.weights;
     bench.weights_overridden = cfg.weights_overridden;
     bench.n_gpu_layers = cfg.n_gpu_layers;

@@ -368,6 +368,20 @@ Status SparsePrefiller::attn_prefill(const std::vector<llama_token>& tokens,
                 log_debug("chunk [" + std::to_string(range.begin) + "," +
                           std::to_string(range.end) + ") qg groups=" +
                           std::to_string(chunk_groups.size()));
+                for (size_t g = 0; g < chunk_groups.size(); ++g) {
+                    std::string d = "chunkq [" + std::to_string(range.begin) +
+                                    "," + std::to_string(range.end) + ") g" +
+                                    std::to_string(g) + " bounds=" +
+                                    std::to_string(chunk_bounds[g]) + ".." +
+                                    std::to_string(chunk_bounds[g + 1]) +
+                                    " rows(" +
+                                    std::to_string(chunk_groups[g].size()) +
+                                    "):";
+                    for (size_t i = 0; i < chunk_groups[g].size(); ++i) {
+                        d += " " + std::to_string(chunk_groups[g][i]);
+                    }
+                    log_debug(d);
+                }
             }
         } else {
             const auto row_end =
