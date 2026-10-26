@@ -23,8 +23,8 @@
 | T010 | 路由表定稿（由实测生成，不手填） | T007,T008 | passing | FR-2。`matrix/portfolio/portfolio.txt`：`high:32k = gate-p24-local32`，其余 `selection`，`default = selection`；路由端到端验证 5/5 命中且 32K `qg_source=attention-bound` |
 | T011 | 复现资产：`repro.sh portfolio`、server-repro §8、README 结果表 | T010 | passing | FR-5。实际套件名 `ar008`（`./repro.sh ar008`）；server-repro §8；README 结果表 + CLI |
 | T012 | 文档：research §10、architecture、组件详设 v0.6 变更记录、REPORT.md | T010 | passing | FR-5。research §10（判别符根因/短语三步/组合矩阵/闸门/矩阵抓到的缺陷）、architecture 增 AR008 节、组件详设 v0.6、REPORT.md |
-| T013 | Review：-Werror、全量（无模型 + 真机）、dense 等价、无 mock 审计、列一致性 | T011,T012 | pending | |
-| T014 | ST 验收 + 干净克隆 + tag `ar008-v1.0` + Gitee 推送 | T013 | pending | |
+| T013 | Review：-Werror、全量（无模型 + 真机）、dense 等价、无 mock 审计、列一致性 | T011,T012 | passing | `-Wall -Wextra -Werror` 全量构建零警告；无模型 148 PASS/0 FAIL；真机全量 151 PASS/0 FAIL；审计列追加在 raw.csv 末尾（旧脚本按列名读取不受影响）；无 mock（全部真实 GGUF 前向） |
+| T014 | ST 验收 + 干净克隆 + tag `ar008-v1.0` + Gitee 推送 | T013 | passing | tag `ar008-v1.0` = f494a55 已推；干净克隆构建 + ctest 100% + 组合闸门 5/5 PASS + 注入劣化 FAIL（见下节） |
 
 ## 状态说明
 
@@ -53,3 +53,29 @@
   本轮采纳：**位置短语 + 短判别符**（IR 经典做法，直接修根因）与
   **实测驱动的组合路由 + Pareto 闸门**（把"组合最优"变成可执行检查）。
 - 授权记录：用户明确"自动化、无需逐步确认"，故 req 门控以自检替代交互式审查。
+
+## ST 验收记录（2026-10-26）
+
+| # | 用例 | 结果 |
+|---|---|---|
+| ST-1 | 多针判别符：同一预算（0.05）、同一机器，`phrase_weight` 0 → 0.5 | PASS（q 0.333 → 1.000，6/6） |
+| ST-2 | 单针不回归：4K/8K/16K q 保持 1.000 | PASS |
+| ST-3 | PHA 开销：8K -1.8%、16K +1.7%（目标 ≤2%） | PASS |
+| ST-4 | 短语零回归开关：`phrase_weight=0` 不构建短语结构，`phrase_blocks=0` | PASS（单测 + 实跑） |
+| ST-5 | 跨块短语：60/61 块边界用例 | PASS（`selector_phrase_crosses_block_boundary`） |
+| ST-6 | 组合矩阵 20 格点（5 数据集 × 4 组合，dense 每数据集实测一次） | PASS（`ar008-portfolio/matrix.csv`） |
+| ST-7 | 路由端到端：4K/8K/16K/多针 → selection，32K → gate-p24-local32 | PASS（`portfolio_choice`/`portfolio_reason` 审计，32K `qg_source=attention-bound`） |
+| ST-8 | Pareto 闸门：路由组合不劣于同会话最佳固定组合 | PASS 5/5 |
+| ST-9 | 闸门有效性自测：`--inject=len16k:gate-p16` 必须 FAIL | PASS（实测 FAIL 并列出违规） |
+| ST-10 | 组合表语义：显式 `qg_bound` 优先、指纹不符/缺表回退 | PASS（单测 `portfolio_load_and_recommend`、`--strip` 实跑） |
+| ST-11 | 全量测试：无模型 148 PASS；真机 151 PASS（含 3 个 classify 消融，共享 VM 负载下约 3.5h） | PASS |
+| ST-12 | `-Wall -Wextra -Werror` 全量构建 | PASS（零警告） |
+| ST-13 | 干净克隆 `--branch ar008-v1.0`：构建 + ctest 100% + 组合闸门 5/5 + 注入劣化 FAIL | PASS |
+| ST-14 | 复现资产：`matrix/portfolio/{3 conf, portfolio.txt}`、`portfolio_matrix.py`、`check_portfolio.py`、`repro.sh ar008`、server-repro §8 | PASS |
+
+### 未达成 / 待办
+
+- 32K 的质量底线是靠门控换来的（36.8× → 12.8×），不是免费收益，已在 REPORT/research 明示；
+- 纯语义（无判别短语）regime 没有数据集，短语信号为空时只走 `default`，不作提升宣称；
+- GPU 未验证（本机无 GPU）：组合表中 32K 的门控臂在 CUDA 上的页打分等价性沿用 AR007 T009 待办；
+- 多事实覆盖（submodular facility location）未做，仓库缺"一问多跳"数据集。
