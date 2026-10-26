@@ -58,6 +58,12 @@ struct Sample {
     std::string budget_source;
     uint32_t anchor_blocks = 0;
     uint32_t mmr_penalized = 0;
+    // AR008 FR-1/FR-2 audit: blocks that matched a discriminative query
+    // phrase, and which execution combination the portfolio router picked.
+    uint32_t phrase_blocks = 0;
+    uint32_t specific_terms = 0;
+    std::string portfolio_choice = "none";
+    std::string portfolio_reason;
 };
 
 class Reporter {

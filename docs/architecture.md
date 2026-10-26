@@ -101,6 +101,36 @@ contiguous) and incremental MMR (near-duplicate blocks are penalised only when
 their Jaccard similarity exceeds `mmr_threshold`). `Selection.anchor_blocks`
 and `Selection.mmr_penalized` are printed into `raw.csv` as audit columns.
 
+## Phrase-aware admission and combination routing (AR008)
+
+Two findings drove AR008. First, the selector filtered query terms with
+`len >= 2`, which silently discarded a lone digit - and a digit was the only
+thing separating `vault 5` from `vault 6` in the multi-needle dataset, so
+three sibling facts scored identically and the answer was whichever block came
+first (quality 0.33). Second, the repository has several complete execution
+paths whose cost/quality trade-off differs by prompt (32K: selection 7 s at
+q=0.89 vs in-graph gate 31 s at q=1.00) and nothing chose between them.
+
+**Phrase admission.** Query *and* document are turned into adjacent word pairs
+(`vault 5`, `chapter 7`, `case 42`) whose block-level IDF makes a phrase hit
+decisive; the pair is also matched across block boundaries, because a needle
+sentence routinely starts in block b and ends in b+1. Blocks containing the
+most discriminative phrase are pinned as anchors (protected from both anchor
+trimming and stride eviction) and the hit is mirrored into `per_pos_scores`,
+so the AR004 query-chunk and AR006 in-graph paths see the same discriminator.
+`phrase_weight=0` disables the feature and restores the AR007 selection
+exactly.
+
+**Combination routing.** The selector pass doubles as the profiler: prompt
+length, discriminative-term count, phrase-hit block count and lexical
+concentration feed a measured table (`portfolio`) whose rows map
+`<discriminability>:<length_bucket>` to a combo (`selection` / `gate-p16` /
+`gate-p24-local32` / `dense`). The table rule is "fastest combo whose mean and
+min quality reach the floor, else the best quality", and
+`check_portfolio.py` enforces that the routed combo is Pareto-no-worse than
+the best fixed combo, so a new arm that does not improve the combination is
+rejected rather than shipped.
+
 ## Edge accounting and the dense invariant
 
 `budget=1.0`, `qg_bound=false`, `query_gating=false`, `attn_top_k=0` and

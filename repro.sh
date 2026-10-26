@@ -6,6 +6,7 @@
 #   ./repro.sh full     # matrix + GPU spot checks (needs CUDA + nvidia-smi)
 #   ./repro.sh budget   # AR007 budget-vs-quality sweep + curve (~15 min)
 #   ./repro.sh ar007    # AR007 acceptance campaign + expected gate (dense is slow)
+#   ./repro.sh ar008    # AR008 combination matrix + portfolio gate (dense is slow)
 #
 # Every step is fail-fast (set -euo pipefail) and prints the exact command
 # it runs. Models are downloaded with SHA256 verification into ./models
@@ -186,8 +187,21 @@ case "${SUITE}" in
             || fail "AR007 campaign deviates from benchmarks/matrix/budget/expected.csv"
         OUT="${ROOT}/benchmarks/results/ar007-campaign"
         ;;
+    ar008)
+        # AR008 FR-4: measure the execution-combination matrix, derive the
+        # portfolio table from it, then gate the routed combination against
+        # the best fixed one (Pareto, machine independent).
+        python3 benchmarks/scripts/portfolio_matrix.py \
+            --bin "${BIN}" --model "${MAIN_MODEL}" \
+            --out "${ROOT}/benchmarks/results/ar008-portfolio"
+        python3 benchmarks/scripts/check_portfolio.py \
+            "${ROOT}/benchmarks/results/ar008-portfolio/matrix.csv" \
+            "${ROOT}/benchmarks/results/ar008-portfolio/portfolio.json" \
+            || fail "routed combination is worse than the best fixed combination"
+        OUT="${ROOT}/benchmarks/results/ar008-portfolio"
+        ;;
     *)
-        fail "unknown suite: ${SUITE} (smoke|matrix|full|budget|ar007)"
+        fail "unknown suite: ${SUITE} (smoke|matrix|full|budget|ar007|ar008)"
         ;;
 esac
 
@@ -197,7 +211,7 @@ if [[ -f "${OUT}/matrix.md" ]]; then
 fi
 
 if [[ "${CHECK_EXPECTED}" == "1" && "${SUITE}" != "smoke" && "${SUITE}" != "budget" \
-      && "${SUITE}" != "ar007" ]]; then
+      && "${SUITE}" != "ar007" && "${SUITE}" != "ar008" ]]; then
     step "expected-results gate"
     python3 benchmarks/scripts/check_expected.py \
         --matrix "${OUT}/matrix.csv" \

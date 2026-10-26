@@ -18,6 +18,10 @@ struct BlockSignal {
     double diversity = 0.0;
     double position = 0.0;
     double draft = 0.0;
+    // AR008 FR-1: positional phrase (bigram) match weight, min-max
+    // normalised like the other signals. Zero when no query phrase occurs
+    // in the block (and always zero when phrase_weight == 0).
+    double phrase = 0.0;
     double fused = 0.0;
 };
 
@@ -53,6 +57,15 @@ struct Selection {
     // for dense selections.
     uint32_t anchor_blocks = 0;
     uint32_t mmr_penalized = 0;
+    // AR008 FR-1 audit + FR-2 profile input: how many blocks matched a
+    // discriminative query phrase, and how many discriminative query terms
+    // the prompt/question carried in total.
+    uint32_t phrase_blocks = 0;
+    uint32_t specific_terms = 0;
+    // AR008 FR-2 profile input: top-1 lexical score over the lexical sum.
+    // A high value means the evidence is concentrated in one block, which
+    // is exactly when selection-level sparsity is safe.
+    double lexical_concentration = 0.0;
     std::string reason;
 
     std::string to_json() const;
@@ -76,6 +89,10 @@ struct SelectionOptions {
     // down-weighted by score * (1 - lambda * excess).
     double mmr_threshold = 0.60;
     double mmr_lambda = 0.50;
+    // AR008 FR-1: weight of the positional phrase signal added to the fused
+    // block score. 0 disables the feature and restores AR007 behaviour
+    // bit-for-bit (no phrase set is built at all).
+    double phrase_weight = 0.50;
     SelectorWeights weights;
 };
 

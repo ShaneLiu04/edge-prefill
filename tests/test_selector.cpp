@@ -370,3 +370,104 @@ TEST_CASE(selector_ar007_deterministic) {
     CHECK_EQ(a.anchor_blocks, b.anchor_blocks);
     CHECK_EQ(a.mmr_penalized, b.mmr_penalized);
 }
+
+// AR008 FR-1: a digit is a discriminative token even though it is a single
+// character. Before AR008 the query-term filter dropped it, so "vault 5" and
+// "vault 6" produced identical scores and the selector answered whichever
+// block came first (measured as quality 1/3 on the multi-needle set).
+TEST_CASE(selector_phrase_keeps_numeric_discriminator) {
+    constexpr uint32_t n = 8192;
+    std::vector<llama_token> tokens(n);
+    std::vector<std::string> pieces(n, "filler");
+    for (uint32_t i = 0; i < n; ++i) tokens[i] = static_cast<llama_token>(i % 1000);
+    const uint32_t b1 = 40, b2 = 120, b3 = 200;
+    auto sentence = [&](uint32_t block, const char* digit, const char* code) {
+        pieces[block * 32 + 0] = "the";
+        pieces[block * 32 + 1] = "secret";
+        pieces[block * 32 + 2] = "passcode";
+        pieces[block * 32 + 3] = "for";
+        pieces[block * 32 + 4] = "vault";
+        pieces[block * 32 + 5] = digit;
+        pieces[block * 32 + 6] = "is";
+        pieces[block * 32 + 7] = code;
+    };
+    sentence(b1, "1", "magenta");
+    sentence(b2, "2", "cobalt");
+    sentence(b3, "3", "amber");
+
+    Selection sel;
+    BlockSelector selector;
+    auto opts = options(0.05);
+    opts.coverage_stride = 0;
+    CHECK_OK(selector.select(tokens, "What is the secret passcode for vault 3?",
+                             pieces, opts, nullptr, &sel));
+    CHECK(!sel.dense);
+    CHECK(sel.phrase_blocks > 0u);
+    CHECK(sel.specific_terms >= 2u);
+    CHECK(std::find(sel.block_indices.begin(), sel.block_indices.end(), b3) !=
+          sel.block_indices.end());
+    CHECK(std::find(sel.mandatory_blocks.begin(), sel.mandatory_blocks.end(), b3) !=
+          sel.mandatory_blocks.end());
+}
+
+// AR008 FR-1: phrase matching must survive a block boundary. The needle
+// sentence can start near the end of block b and finish in b+1; a per-block
+// bigram then misses it entirely (this was the last failing multi-needle case
+// before the crossing-pair fix).
+TEST_CASE(selector_phrase_crosses_block_boundary) {
+    constexpr uint32_t n = 4096;
+    std::vector<llama_token> tokens(n);
+    std::vector<std::string> pieces(n, "filler");
+    for (uint32_t i = 0; i < n; ++i) tokens[i] = static_cast<llama_token>(i % 1000);
+    pieces[60 * 32 + 31] = "vault";
+    pieces[61 * 32 + 0] = "7";
+    pieces[61 * 32 + 1] = "is";
+    pieces[61 * 32 + 2] = "teal";
+
+    Selection sel;
+    BlockSelector selector;
+    auto opts = options(0.05);
+    opts.coverage_stride = 0;
+    CHECK_OK(selector.select(tokens, "passcode for vault 7", pieces, opts, nullptr, &sel));
+    CHECK(sel.phrase_blocks > 0u);
+    const bool pinned_60 =
+            std::find(sel.mandatory_blocks.begin(), sel.mandatory_blocks.end(), 60u) !=
+            sel.mandatory_blocks.end();
+    const bool pinned_61 =
+            std::find(sel.mandatory_blocks.begin(), sel.mandatory_blocks.end(), 61u) !=
+            sel.mandatory_blocks.end();
+    CHECK(pinned_60 || pinned_61);
+    CHECK(pinned_61);
+}
+
+// AR008 FR-1 zero-regression switch: phrase_weight=0 must reproduce the AR007
+// selection (no phrase work at all), and the feature must never turn a sparse
+// selection dense.
+TEST_CASE(selector_phrase_weight_zero_matches_ar007) {
+    constexpr uint32_t n = 8192;
+    std::vector<llama_token> tokens(n);
+    std::vector<std::string> pieces(n, "filler");
+    for (uint32_t i = 0; i < n; ++i) tokens[i] = static_cast<llama_token>(i % 1000);
+    for (uint32_t i = 0; i < 30; ++i) pieces[11 * 32 + i] = "alpha beta gamma";
+
+    auto opts = options(0.08);
+    opts.coverage_stride = 0;
+    opts.phrase_weight = 0.0;
+    Selection off;
+    Selection off2;
+    Selection on;
+    BlockSelector selector;
+    CHECK_OK(selector.select(tokens, "alpha beta", pieces, opts, nullptr, &off));
+    CHECK_EQ(off.phrase_blocks, 0u);
+    // The profile's discriminative-term count stays available even when the
+    // phrase signal is off: routing must not collapse to the "flat" bucket
+    // just because the user disabled phrase admission.
+    CHECK(off.specific_terms > 0u);
+    CHECK_OK(selector.select(tokens, "alpha beta", pieces, opts, nullptr, &off2));
+    CHECK_EQ(off.token_indices, off2.token_indices);
+    auto opts_on = opts;
+    opts_on.phrase_weight = 0.5;
+    CHECK_OK(selector.select(tokens, "alpha beta", pieces, opts_on, nullptr, &on));
+    CHECK_EQ(on.dense, off.dense);
+    CHECK(on.selected_tokens <= off.selected_tokens + 32u * 4u);
+}

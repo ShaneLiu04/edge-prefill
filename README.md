@@ -41,6 +41,18 @@ serving. EdgePrefill plans and executes a sparse prefill:
    (16K: b=0.05 q=1.00 vs b=0.25 q=0.36), which is why the curve is measured
    per length instead of scaled.
 
+7. **Phrase-aware admission + combination portfolio (AR008)** — the selector
+   now admits *positional phrases* (adjacent query word pairs such as
+   `vault 5`, `chapter 7`, `case 42`) as first-class terms, keeps
+   single-character discriminators that the old filter dropped, and matches
+   phrases across block boundaries. This fixed the multi-needle family
+   (quality 0.33 → 1.00 at 5% budget) where a lone digit was the only thing
+   separating sibling facts. On top of that, a measured `portfolio` table
+   routes each prompt to the execution combination whose measurement reaches
+   the quality floor (`selection` / `gate-p16` / `gate-p24-local32` / `dense`),
+   and `check_portfolio.py` refuses any combination that is Pareto-worse than
+   the best fixed one.
+
 Sparse paths are lossy by construction. Every benchmark report pairs latency
 with a quality metric (needle accuracy, QA overlap, or PPL retention), and
 `budget=1.0` / all switches off remain numerically equivalent to dense.
@@ -106,6 +118,8 @@ EDGE_PREFILL_TEST_MODEL=/path/to/model.gguf ./build/edge_prefill_tests
 | `--anchor-stride-scale F` | strided-coverage anchor multiplier (AR007) | 1.0 |
 | `--mmr-lambda F` | MMR penalty weight on near-duplicate blocks (AR007) | 0.5 |
 | `--mmr-threshold F` | Jaccard similarity above which MMR applies (AR007) | 0.6 |
+| `--phrase-weight F` | positional phrase admission weight, 0 = AR007 behavior (AR008) | 0.5 |
+| `--portfolio P` | measured execution-combination table (AR008) | — |
 | `--qg-bound on\|off` | in-graph query-aware page gating (AR006) | off |
 | `--qg-sel-pages N` | pages kept per ubatch by the gate (quality knob) | 16 |
 | `--qg-local-rows N` | local window rows around the ubatch (0 = ubatch span) | 0 |
@@ -147,7 +161,10 @@ acceptance status is `benchmarks/results/ar006-campaign/REPORT.md`.
 | curve, b=0.05 | multi-needle | 1.8 s | 30.5x | **0.33** |
 | in-graph gate p16 + local32 | multi-needle | 9.7 s | 5.5x | 0.83 |
 
-Raw CSV, env JSON and the conf of every cell are in
+Raw CSV, env JSON and the conf of every combination cell are in
+`benchmarks/results/ar008-portfolio/` (see its `REPORT.md` for the honest
+write-up, including the discriminator bug the matrix exposed); AR007 assets are
+still in
 `benchmarks/results/ar007-campaign/`; the honest write-up (including the
 non-monotone budget and the multi-needle weakness) is
 `benchmarks/results/ar007-campaign/REPORT.md`, and the curve itself is
@@ -156,6 +173,30 @@ non-monotone budget and the multi-needle weakness) is
 selection-level path loses facts that the in-graph gate keeps, so use
 `qg_bound=on` there. `benchmarks/scripts/check_expected_ar007.py` re-checks the
 quality/audit columns on another machine without depending on absolute TTFT.
+
+### AR008: phrase admission and combination routing
+
+| Setup | Prompt | TTFT | Quality |
+| --- | ---: | ---: | --- |
+| selection, `phrase_weight=0` (AR007) | multi-needle, b=0.05 | 5.7 s | **0.33** |
+| selection, `phrase_weight=0.5` | multi-needle, b=0.05 | 6.2 s | **1.00** |
+| selection (routed) | 8K | 5.7 s (24.9x vs dense) | 1.00 |
+| selection (routed) | 16K | 15.9 s (19.1x) | 1.00 |
+| selection | 32K | 23.1 s (36.8x) | **0.88** |
+| gate-p24-local32 (routed at 32K) | 32K | 66.8 s (12.8x) | **1.00** |
+| selection (routed) | multi-needle | 8.2 s (11.2x) | 1.00 |
+
+Routing rule: fastest combination whose mean *and* min quality reach 0.95,
+else the highest quality - so everything stays on selection except 32K, where
+the in-graph gate buys the floor back for 2.9x TTFT. `check_portfolio.py`
+verifies that the routed combination is Pareto-no-worse than the best fixed
+one (and fails on an injected slower arm).
+
+The multi-needle row is the honest before/after: the same budget, the same
+machine, only the admission signal changed. Full matrix (5 datasets × 4
+combinations, dense reference per dataset) and the routed table live in
+`benchmarks/results/ar008-portfolio/`; `./repro.sh ar008` regenerates them and
+runs the Pareto gate.
 
 The gated path runs without an embedding model (`semantic_score_ms = 0`).
 Absolute TTFT depends on the host (this session ran up to 3x slower than the

@@ -136,6 +136,12 @@ std::string Selection::to_json() const {
     json.begin_array();
     for (auto b : mandatory_blocks) json.value(static_cast<uint64_t>(b));
     json.end_array();
+    json.key("phrase_blocks");
+    json.value(static_cast<uint64_t>(phrase_blocks));
+    json.key("specific_terms");
+    json.value(static_cast<uint64_t>(specific_terms));
+    json.key("lexical_concentration");
+    json.value(lexical_concentration);
     json.key("signals");
     json.begin_array();
     for (const auto& s : signals) {
@@ -148,6 +154,8 @@ std::string Selection::to_json() const {
         json.value(s.position);
         json.key("draft");
         json.value(s.draft);
+        json.key("phrase");
+        json.value(s.phrase);
         json.key("fused");
         json.value(s.fused);
         json.end_object();
@@ -211,10 +219,25 @@ Status BlockSelector::select(const std::vector<llama_token>& tokens,
     std::vector<std::unordered_set<std::string>> block_terms_unique(n_blocks);
     std::vector<std::vector<std::string>> token_terms(n_tokens);
     std::vector<Vec64> token_embeddings(tokens.size());
+    // AR008 FR-1: the unfiltered word sequence per block, in token order.
+    // The filtered `block_terms` drops one-character terms (a lone digit),
+    // which is exactly the discriminator that separates "vault 5" from
+    // "vault 6"; positional phrases must see it.
+    const bool phrase_enabled = opts.phrase_weight > 0.0;
+    std::vector<std::vector<std::string>> block_seq;
+    std::vector<std::string> flat_seq;
+    if (phrase_enabled) {
+        block_seq.assign(n_blocks, {});
+        flat_seq.reserve(n_tokens * 2);
+    }
     for (uint32_t i = 0; i < n_tokens; ++i) {
         const std::string norm = normalize_piece(token_pieces[i]);
         auto terms = terms_from_text(norm);
         for (const auto& term : terms) {
+            if (phrase_enabled) {
+                block_seq[i / block_size].push_back(term);
+                flat_seq.push_back(term);
+            }
             if (term.size() >= 2 || static_cast<unsigned char>(term[0]) >= 0x80) {
                 block_terms[i / block_size].push_back(term);
                 block_terms_unique[i / block_size].insert(term);
@@ -225,7 +248,13 @@ Status BlockSelector::select(const std::vector<llama_token>& tokens,
     }
 
     std::unordered_set<std::string> query_terms;
+    // The raw query sequence always exists: the portfolio profile counts
+    // discriminative terms even when the phrase signal itself is disabled
+    // (phrase_weight=0), otherwise routing would silently degrade to the
+    // "flat" bucket.
+    std::vector<std::string> query_seq;
     for (const auto& term : terms_from_text(query_text)) {
+        query_seq.push_back(term);
         if (term.size() >= 2 || (!term.empty() && static_cast<unsigned char>(term[0]) >= 0x80)) {
             query_terms.insert(term);
         }
@@ -253,6 +282,107 @@ Status BlockSelector::select(const std::vector<llama_token>& tokens,
         lexical[b] = score / std::sqrt(static_cast<double>(std::max<uint32_t>(1, size)));
     }
 
+    // AR008 FR-1: positional phrase admission. A query bigram such as
+    // "vault 5" is one discriminative unit: the document only contains it
+    // once, while each of its words occurs in every sibling sentence. The
+    // block level IDF makes a phrase hit decisive without any model call.
+    std::vector<std::string> query_phrases;
+    std::vector<std::unordered_set<std::string>> block_bigrams;
+    std::vector<double> phrase(n_blocks, 0.0);
+    std::unordered_map<std::string, uint32_t> phrase_df;
+    if (phrase_enabled && query_seq.size() >= 2) {
+        auto discriminative = [](const std::string& term) {
+            if (term.empty()) return false;
+            bool has_digit = false;
+            for (char c : term) {
+                if (c >= '0' && c <= '9') has_digit = true;
+            }
+            return has_digit || term.size() >= 5 ||
+                   static_cast<unsigned char>(term[0]) >= 0x80;
+        };
+        std::unordered_set<std::string> seen;
+        for (size_t i = 0; i + 1 < query_seq.size(); ++i) {
+            const std::string& a = query_seq[i];
+            const std::string& b = query_seq[i + 1];
+            if (a.empty() || b.empty()) continue;
+            if (!discriminative(a) && !discriminative(b)) continue;
+            const std::string key = a + " " + b;
+            if (seen.insert(key).second) query_phrases.push_back(key);
+        }
+        // Deterministic order for reproducible tie-breaking.
+        std::sort(query_phrases.begin(), query_phrases.end());
+        if (!query_phrases.empty()) {
+            block_bigrams.assign(n_blocks, {});
+            for (uint32_t b = 0; b < n_blocks; ++b) {
+                const auto& seq = block_seq[b];
+                for (size_t i = 0; i + 1 < seq.size(); ++i) {
+                    if (seq[i].empty() || seq[i + 1].empty()) continue;
+                    block_bigrams[b].insert(seq[i] + " " + seq[i + 1]);
+                }
+            }
+            // A phrase that straddles a block boundary ("... for vault" | "3
+            // is ...") is invisible to per-block bigrams, and that is exactly
+            // how a needle can land on the wrong side of a 32-token cut. Add
+            // the crossing pair to both neighbours: they are adjacent in the
+            // text even though they live in different blocks.
+            for (uint32_t b = 0; b + 1 < n_blocks; ++b) {
+                if (block_seq[b].empty() || block_seq[b + 1].empty()) continue;
+                const std::string cross = block_seq[b].back() + " " + block_seq[b + 1].front();
+                if (cross.empty() || cross == " ") continue;
+                bool wanted = false;
+                for (const auto& p : query_phrases) {
+                    if (p == cross) {
+                        wanted = true;
+                        break;
+                    }
+                }
+                if (!wanted) continue;
+                block_bigrams[b].insert(cross);
+                block_bigrams[b + 1].insert(cross);
+            }
+            for (uint32_t b = 0; b < n_blocks; ++b) {
+                uint32_t hits = 0;
+                for (const auto& p : query_phrases) {
+                    if (block_bigrams[b].count(p)) ++hits;
+                }
+                if (hits > 0) ++out->phrase_blocks;
+            }
+            for (const auto& p : query_phrases) {
+                uint32_t n = 0;
+                for (uint32_t b = 0; b < n_blocks; ++b) {
+                    if (block_bigrams[b].count(p)) ++n;
+                }
+                phrase_df[p] = n;
+            }
+            for (uint32_t b = 0; b < n_blocks; ++b) {
+                double score = 0.0;
+                for (const auto& p : query_phrases) {
+                    if (!block_bigrams[b].count(p)) continue;
+                    score += std::log((static_cast<double>(n_blocks) + 1.0) /
+                                      (static_cast<double>(phrase_df[p]) + 1.0)) + 1.0;
+                }
+                const uint32_t size = std::min(block_size, n_tokens - b * block_size);
+                phrase[b] = score / std::sqrt(static_cast<double>(std::max<uint32_t>(1, size)));
+            }
+        }
+    }
+    {
+        auto discriminative = [](const std::string& term) {
+            if (term.empty()) return false;
+            bool has_digit = false;
+            for (char c : term) {
+                if (c >= '0' && c <= '9') has_digit = true;
+            }
+            return has_digit || term.size() >= 5 ||
+                   static_cast<unsigned char>(term[0]) >= 0x80;
+        };
+        std::unordered_set<std::string> specific;
+        for (const auto& term : query_seq) {
+            if (discriminative(term)) specific.insert(term);
+        }
+        out->specific_terms = static_cast<uint32_t>(specific.size());
+    }
+
     // AR004 FR-3: per-position lexical relevance (idf of the token's own
     // query-term hits, deduped within the token). Retained for the
     // query-chunk gating planner; superseded by draft scores below when a
@@ -271,6 +401,24 @@ Status BlockSelector::select(const std::vector<llama_token>& tokens,
                                   (static_cast<double>(df[term]) + 1.0)) + 1.0;
             }
             per_pos[i] = score;
+        }
+        // AR008 FR-1: phrase hits also land in the per-position vector so
+        // the query-chunk (AR004) and in-graph page (AR006) paths see the
+        // same discriminator, not just the block selector.
+        if (!query_phrases.empty()) {
+            const std::vector<std::string>& flat = flat_seq;
+            std::unordered_map<std::string, double> phrase_weight;
+            for (const auto& p : query_phrases) {
+                phrase_weight[p] = std::log((static_cast<double>(n_blocks) + 1.0) /
+                                            (static_cast<double>(phrase_df[p]) + 1.0)) + 1.0;
+            }
+            for (size_t i = 0; i + 1 < flat.size(); ++i) {
+                if (flat[i].empty() || flat[i + 1].empty()) continue;
+                const auto it = phrase_weight.find(flat[i] + " " + flat[i + 1]);
+                if (it == phrase_weight.end()) continue;
+                per_pos[i] += it->second;
+                per_pos[i + 1] += it->second;
+            }
         }
     }
 
@@ -347,6 +495,12 @@ Status BlockSelector::select(const std::vector<llama_token>& tokens,
     minmax(&lexical);
     minmax(&diversity);
     minmax(&position);
+    // Only normalise the phrase signal when something matched: minmax maps a
+    // constant vector to 0.5, which would add a uniform (ranking-neutral but
+    // misleading) boost and report phrase_blocks=0 with a non-zero signal.
+    if (std::any_of(phrase.begin(), phrase.end(), [](double v) { return v > 1e-12; })) {
+        minmax(&phrase);
+    }
     if (draft_enabled) minmax(&draft_scores);
 
     // FR-3 score source: semantic draft scores win over the lexical
@@ -382,9 +536,21 @@ Status BlockSelector::select(const std::vector<llama_token>& tokens,
         out->signals[b].diversity = diversity[b];
         out->signals[b].position = position[b];
         out->signals[b].draft = draft_enabled ? draft_scores[b] : 0.0;
+        out->signals[b].phrase = phrase[b];
         fused[b] = weights.lexical * lexical[b] + weights.diversity * diversity[b] +
-                   weights.position * position[b] + weights.draft * draft_scores[b];
+                   weights.position * position[b] + weights.draft * draft_scores[b] +
+                   opts.phrase_weight * phrase[b];
         out->signals[b].fused = fused[b];
+    }
+
+    {
+        double sum = 0.0;
+        double top = 0.0;
+        for (double v : lexical) {
+            sum += v;
+            top = std::max(top, v);
+        }
+        out->lexical_concentration = sum > 1e-12 ? top / sum : 0.0;
     }
 
     std::set<uint32_t> mandatory;
@@ -479,14 +645,51 @@ Status BlockSelector::select(const std::vector<llama_token>& tokens,
         }
     }
 
+    // AR008 FR-1: the best phrase block is the single most reliable piece of
+    // evidence (a discriminative bigram usually occurs once in the prompt),
+    // so it is pinned ahead of entity/stride anchors and protected from
+    // trimming.
+    std::set<uint32_t> phrase_anchors;
+    if (!query_phrases.empty()) {
+        // Pin every block that contains the *most discriminative* phrase,
+        // i.e. the one with the highest block-level IDF ("vault 5" rather
+        // than the template "for vault" that all sibling facts share).
+        // Anchoring on the arg-max block score instead lets a sibling fact
+        // win by a tokenisation accident, and anchoring on every template
+        // hit drags competing answers into the context, which measurably
+        // confuses the model ("vault 3" answered as "vault 1").
+        std::string best_phrase;
+        uint32_t best_df = 0;
+        for (const auto& p : query_phrases) {
+            const auto it = phrase_df.find(p);
+            if (it == phrase_df.end() || it->second == 0) continue;
+            if (best_phrase.empty() || it->second < best_df) {
+                best_phrase = p;
+                best_df = it->second;
+            }
+        }
+        if (!best_phrase.empty()) {
+            const uint32_t phrase_budget = target / 2;
+            uint32_t used = 0;
+            for (uint32_t b = 0; b < n_blocks; ++b) {
+                if (!block_bigrams[b].count(best_phrase)) continue;
+                const uint32_t size = std::min(block_size, n_tokens - b * block_size);
+                if (used + size > phrase_budget && !phrase_anchors.empty()) break;
+                phrase_anchors.insert(b);
+                used += size;
+            }
+        }
+    }
+
     // Anchor budget cap: anchors must not crowd out the relevance fill.
-    // Trim on the priority order stride > entity > recent, never touching
-    // the sink page or the final block (they carry the attention sink and
-    // the first-token logits).
+    // Trim on the priority order stride > entity > phrase > recent, never
+    // touching the sink page or the final block (they carry the attention
+    // sink and the first-token logits).
     std::set<uint32_t> anchors;
     for (uint32_t b = 0; b < std::min<uint32_t>(opts.sink_blocks, n_blocks); ++b) anchors.insert(b);
     anchors.insert(n_blocks - 1);
     for (uint32_t b : mandatory) anchors.insert(b);
+    for (uint32_t b : phrase_anchors) anchors.insert(b);
     for (uint32_t b : entity_anchors) anchors.insert(b);
     for (uint32_t b : stride_anchors) anchors.insert(b);
     auto anchor_tokens = [&](const std::set<uint32_t>& set) {
@@ -498,13 +701,19 @@ Status BlockSelector::select(const std::vector<llama_token>& tokens,
         std::ceil(static_cast<double>(target) * std::clamp(opts.anchor_ratio, 0.05, 1.0))));
     for (auto it = stride_anchors.rbegin(); it != stride_anchors.rend() &&
                                              anchor_tokens(anchors) > anchor_cap; ++it) {
-        if (anchors.count(*it) && *it != 0 && *it != n_blocks - 1 && !mandatory.count(*it)) {
+        // Phrase anchors are the only discriminative evidence in the prompt;
+        // they outrank every positional sample, so the stride trim must not
+        // take them (this was how a pinned "vault 3" block got evicted by a
+        // coverage sample in the first measurement round).
+        if (anchors.count(*it) && *it != 0 && *it != n_blocks - 1 && !mandatory.count(*it) &&
+            !phrase_anchors.count(*it)) {
             anchors.erase(*it);
         }
     }
     for (auto it = entity_anchors.rbegin(); it != entity_anchors.rend() &&
                                              anchor_tokens(anchors) > anchor_cap; ++it) {
-        if (anchors.count(*it) && *it != 0 && *it != n_blocks - 1 && !mandatory.count(*it)) {
+        if (anchors.count(*it) && *it != 0 && *it != n_blocks - 1 && !mandatory.count(*it) &&
+            !phrase_anchors.count(*it)) {
             anchors.erase(*it);
         }
     }

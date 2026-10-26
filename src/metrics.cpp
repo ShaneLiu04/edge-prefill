@@ -38,7 +38,9 @@ Status Reporter::write_raw_csv(const std::string& path) {
     out << "task,case,ttft_ms,e2e_ms,prefill_tps,kv_bytes,quality,dense,prompt_tokens,"
            "selected_tokens,mode,budget,attn_top_k,repeats,ppl_dense,ppl_sparse,"
            "query_gating,qg_groups,score_source,semantic_score_ms,draft_score_ms,"
-           "qg_source,budget_source,anchor_blocks,mmr_penalized\n";
+           "qg_source,budget_source,anchor_blocks,mmr_penalized,phrase_blocks,"
+           "specific_terms,"
+           "portfolio_choice,portfolio_reason\n";
     out << std::setprecision(10);
     for (const auto& s : samples_) {
         out << s.task << ',' << s.case_id << ',' << s.ttft_ms << ',' << s.e2e_ms << ','
@@ -50,7 +52,9 @@ Status Reporter::write_raw_csv(const std::string& path) {
             << (s.score_source.empty() ? "lexical" : s.score_source) << ','
             << s.semantic_score_ms << ',' << s.draft_score_ms << ','
             << s.qg_source << ',' << s.budget_source << ',' << s.anchor_blocks
-            << ',' << s.mmr_penalized << '\n';
+            << ',' << s.mmr_penalized << ',' << s.phrase_blocks << ',' << s.specific_terms << ','
+            << (s.portfolio_choice.empty() ? "none" : s.portfolio_choice) << ','
+            << s.portfolio_reason << '\n';
     }
     return Status::success();
 }

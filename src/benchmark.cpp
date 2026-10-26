@@ -1,6 +1,7 @@
 #include "edge_prefill/benchmark.h"
 
 #include "edge_prefill/budget_curve.h"
+#include "edge_prefill/portfolio.h"
 #include "edge_prefill/hash_util.h"
 
 #include <algorithm>
@@ -235,6 +236,8 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
     base.mmr_threshold = cfg.mmr_threshold;
     base.mmr_lambda = cfg.mmr_lambda;
     base.budget_curve = cfg.budget_curve;
+    base.phrase_weight = cfg.phrase_weight;
+    base.portfolio_table = cfg.portfolio_table;
     if (!base.budget_curve.empty()) {
         BudgetCurve curve;
         const auto curve_st = load_budget_curve(base.budget_curve, &curve);
@@ -441,6 +444,7 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
                     sopts.anchor_stride_scale = run_cfg.anchor_stride_scale;
                     sopts.mmr_threshold = run_cfg.mmr_threshold;
                     sopts.mmr_lambda = run_cfg.mmr_lambda;
+                    sopts.phrase_weight = run_cfg.phrase_weight;
                     sopts.weights = run_cfg.weights;
                     // AR005: semantic-priority fusion defaults when the
                     // embedding engine is active and the user has not
@@ -462,6 +466,63 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
                                          embed.loaded() ? &embed_adapter : nullptr,
                                          &selection);
                     if (!st.ok()) continue;
+
+                    // AR008 FR-2: measured combination routing. The selector
+                    // run above doubles as the profiler: its phrase hits,
+                    // discriminative-term count and lexical concentration are
+                    // exactly the features the table was built from, and a
+                    // selection pass costs milliseconds. The gate path does
+                    // not need the selection, so a routed switch is free.
+                    std::string portfolio_choice = selection.dense ? "dense" : "selection";
+                    std::string portfolio_reason = "disabled";
+                    // The qg_* knobs live on the BenchmarkConfig (they are
+                    // not part of the Config used for planning), so read them
+                    // from `cfg` and not from the per-cell `run_cfg`.
+                    bool routed_qg_bound = cfg.qg_bound;
+                    uint32_t routed_sel_pages = cfg.qg_sel_pages;
+                    uint32_t routed_local_rows = cfg.qg_local_rows;
+                    if (!run_cfg.portfolio_table.empty() && !selection.dense) {
+                        PortfolioProfile profile;
+                        profile.n_tokens = selection.total_tokens;
+                        profile.specific_terms = selection.specific_terms;
+                        profile.phrase_blocks = selection.phrase_blocks;
+                        profile.lexical_concentration = selection.lexical_concentration;
+                        PortfolioTable table;
+                        auto pt = load_portfolio_cached(run_cfg.portfolio_table, &table);
+                        if (!pt.ok()) {
+                            portfolio_reason = "fallback:table-unusable";
+                            log_warn("portfolio table unusable (" + pt.message +
+                                     "); keeping selection");
+                        } else if (!table.matches_model(sha256_of_file(base.model_path))) {
+                            portfolio_reason = "fallback:model-mismatch";
+                            log_warn("portfolio table model fingerprint mismatch; keeping selection");
+                        } else {
+                            PortfolioRow row;
+                            if (table.recommend(profile, &row)) {
+                                portfolio_choice = row.combo;
+                                portfolio_reason = "table:" + row.key;
+                                if (cfg.qg_bound) {
+                                    // Explicit user intent wins over the table.
+                                    portfolio_choice = "qg_bound";
+                                    portfolio_reason = "user-override";
+                                } else if (row.combo == "gate-p16") {
+                                    routed_qg_bound = true;
+                                    routed_sel_pages = 16;
+                                    routed_local_rows = 0;
+                                } else if (row.combo == "gate-p24-local32") {
+                                    routed_qg_bound = true;
+                                    routed_sel_pages = 24;
+                                    routed_local_rows = 32;
+                                } else if (row.combo == "dense") {
+                                    // A routed dense run still goes through the
+                                    // selector for audit, but the prefill is dense.
+                                    routed_qg_bound = false;
+                                }
+                            } else {
+                                portfolio_reason = "fallback:no-match";
+                            }
+                        }
+                    }
 
                     // Derive attention gather indices for non-dense plans;
                     // an empty result (covers-all or disabled) keeps the
@@ -622,17 +683,17 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
                     // AR006: bound gating takes precedence and needs no
                     // plan-level row sets at all.
                     std::string qg_source;
-                    if (cfg.qg_bound && !popts.enable_head_adaptive &&
+                    if (routed_qg_bound && !popts.enable_head_adaptive &&
                         !selection.dense) {
                         popts.enable_qg_bound = true;
-                        popts.qg_sel_pages = cfg.qg_sel_pages;
-                        popts.qg_local_rows = cfg.qg_local_rows;
+                        popts.qg_sel_pages = routed_sel_pages;
+                        popts.qg_local_rows = routed_local_rows;
                         popts.qg_pool_pages = cfg.qg_pool_pages;
                         popts.enable_query_gating = false;
                         popts.enable_pool_blocks = false;
                         qg_source = "attention-bound";
                         log_debug("bound gating plan: sel_pages=" +
-                                  std::to_string(cfg.qg_sel_pages) +
+                                  std::to_string(popts.qg_sel_pages) +
                                   " local_rows=" +
                                   std::to_string(cfg.qg_local_rows));
                     } else if (cfg.query_gating && !popts.enable_head_adaptive &&
@@ -839,6 +900,10 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
                     sample.qg_source = qg_source;
                     sample.budget_source = plan.budget_source;
                     sample.anchor_blocks = selection.anchor_blocks;
+                    sample.phrase_blocks = selection.phrase_blocks;
+                    sample.specific_terms = selection.specific_terms;
+                    sample.portfolio_choice = portfolio_choice;
+                    sample.portfolio_reason = portfolio_reason;
                     sample.mmr_penalized = selection.mmr_penalized;
                     log_info("case=" + sample.case_id + " mode=" + sample.mode +
                              " quality=" + std::to_string(sample.quality) +

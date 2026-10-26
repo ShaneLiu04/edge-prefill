@@ -160,7 +160,69 @@ python3 benchmarks/scripts/check_expected_ar007.py \
 b=0.25 只有 0.36。若你的机器上推荐值明显偏离（例如 4K 也要 0.25），
 先看 `summary.md` 里 `floor-missed` 标记，再决定是否手工覆盖 `budget`。
 
-## 8. 报告模板
+## 8. AR008：短语准入与组合路由
+
+### 8.1 一条命令看懂收益
+
+```bash
+./repro.sh ar008
+```
+
+它做三件事：跑组合矩阵（5 数据集 × 4 组合，含 dense 参照）→ 由实测生成
+`benchmarks/results/ar008-portfolio/portfolio.txt` → 用 `check_portfolio.py`
+校验"路由组合不劣于最佳固定组合"（Pareto）。产物：`matrix.csv/matrix.md`。
+
+### 8.2 单独验收短语准入（多针判别符）
+
+```bash
+BIN=build-wsl/edge-prefill
+MODEL=models/qwen2.5-1.5b-instruct-q4_k_m.gguf
+for pw in 0.0 0.5; do
+  printf '%s\n' "mode = balanced" "budget = 0.05" "attn_top_k = 24" \
+    "qg_bound = false" "embedding_model =" "phrase_weight = $pw" \
+    "threads = 16" "warmup = 0" "max_new_tokens = 16" "repeats = 1" > /tmp/pha_$pw.conf
+  $BIN bench --config /tmp/pha_$pw.conf --model $MODEL \
+      --data-dir benchmarks/data/deep/multineedle --out /tmp/pha_$pw --bench-skip-dense
+done
+```
+
+判读：`phrase_weight=0` 应复现 AR007 的 q≈0.33（唯一判别符是单个数字，被过滤丢弃）；
+`0.5` 应达到 q≥0.9。审计列 `phrase_blocks`（短语命中块数）与 `specific_terms`
+（判别词数）为 0 说明你的数据里没有可判别短语——这时短语准入不会改变任何结果。
+
+### 8.3 组合路由怎么用
+
+```bash
+# 由实测表驱动（推荐）：conf 里只写 portfolio
+printf '%s\n' "mode = balanced" "attn_top_k = 24" "qg_bound = false" \
+  "budget_curve = benchmarks/results/ar007-sweep/budget_curve.txt" \
+  "portfolio = benchmarks/results/ar008-portfolio/portfolio.txt" \
+  "threads = 16" "max_new_tokens = 16" "repeats = 1" > /tmp/routed.conf
+$BIN bench --config /tmp/routed.conf --model $MODEL \
+    --data-dir benchmarks/data/explen/len32k --out /tmp/routed-32k --bench-skip-dense
+```
+
+看 `raw.csv` 的 `portfolio_choice` / `portfolio_reason`：
+
+| 值 | 含义 |
+|---|---|
+| `selection` | 选择级稀疏（最快，质量达标时的默认） |
+| `gate-p16` / `gate-p24-local32` | 图内页门控（质量优先臂，路由在 `selection` 达不到质量底线时选择它） |
+| `none` + `disabled` | 没配 `portfolio`，路由未启用（默认行为） |
+| 任意 + `fallback:model-mismatch` | 表是为别的模型生成的，已自动回退到 `selection` |
+| 任意 + `user-override` | conf 里显式写了 `qg_bound`，用户意图优先 |
+
+### 8.4 判读标准
+
+| 指标 | 通过线 | 说明 |
+|---|---|---|
+| 多针 q（b=0.05） | ≥0.9 | AR007 为 0.33；这是判别符修复的直接证据 |
+| 单针 8K/16K q | ≥0.95 | 短语准入不得伤害原任务 |
+| PHA 开销 | ≤2% TTFT | `phrase_weight=0` vs `0.5` 同会话对比 |
+| 组合闸门 | `check_portfolio.py` PASS | 路由组合 Pareto 不劣于最佳固定组合 |
+| 注入劣化 | 必须 FAIL | `--inject=len16k:gate-p16` 应报违规（自测闸门有效） |
+
+## 9. 报告模板
 
 ```
 机器: <CPU/GPU, 核心数, 内存>, 会话: <日期>

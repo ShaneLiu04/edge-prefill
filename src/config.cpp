@@ -293,6 +293,14 @@ Status parse_config_file(const std::string& path, Config* out) {
                                      "mmr_lambda must be in [0,1]");
             }
             out->mmr_lambda = d;
+        } else if (key == "phrase_weight") {
+            if (!parse_double(value, &d) || !(d >= 0.0 && d <= 2.0)) {
+                return Status::error(ErrorCode::InvalidArgument,
+                                     "phrase_weight must be in [0,2]");
+            }
+            out->phrase_weight = d;
+        } else if (key == "portfolio" || key == "portfolio_table") {
+            out->portfolio_table = value;
         } else if (key == "budget_curve") {
             out->budget_curve = value;
         } else if (key == "repeats") {

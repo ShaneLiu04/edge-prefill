@@ -57,6 +57,13 @@ struct Config {
     double anchor_stride_scale = 1.0;
     double mmr_threshold = 0.60;
     double mmr_lambda = 0.50;
+    // AR008 FR-1: weight of the positional phrase (bigram) admission
+    // signal. 0 disables the feature and restores AR007 selection exactly.
+    double phrase_weight = 0.50;
+    // AR008 FR-2: measured execution-combination table. Empty keeps the
+    // configured (or default) path — routing is opt-in, exactly like the
+    // budget curve.
+    std::string portfolio_table;
     // AR007 FR-3: measured budget-vs-quality curve. Empty disables the
     // length-adaptive budget (behavior falls back to the mode default).
     std::string budget_curve;

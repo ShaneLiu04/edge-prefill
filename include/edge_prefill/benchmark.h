@@ -72,6 +72,10 @@ struct BenchmarkConfig {
     double mmr_threshold = 0.60;
     double mmr_lambda = 0.50;
     std::string budget_curve;
+    // AR008 FR-1/FR-2: positional phrase admission weight and the measured
+    // execution-combination table (opt-in; empty keeps the configured path).
+    double phrase_weight = 0.50;
+    std::string portfolio_table;
     // GPU offload: layers above this index move to the GPU backend (99 =
     // full offload). 0 keeps everything on CPU.
     int32_t n_gpu_layers = 0;
