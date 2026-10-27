@@ -1,0 +1,9 @@
+task,case,ttft_ms,e2e_ms,prefill_tps,kv_bytes,quality,dense,prompt_tokens,selected_tokens,mode,budget,attn_top_k,repeats,ppl_dense,ppl_sparse,query_gating,qg_groups,score_source,semantic_score_ms,draft_score_ms,qg_source,budget_source,anchor_blocks,mmr_penalized,phrase_blocks,specific_terms,coverage_queries,portfolio_choice,portfolio_reason
+niah,mf-01-r1@8530,166385.9866,230075.8146,51.55499772,246052056,1,1,8578,8578,dense,1,0,1,0,0,0,0,lexical,0,0,,override,0,0,0,0,0,dense,disabled
+niah,mf-01-r1@8530,83007.67398,88855.15303,103.3406572,246052056,1,1,8578,8578,dense,1,0,1,0,0,0,0,lexical,0,0,,override,0,0,0,0,0,dense,disabled
+niah,mf-01-r2@8530,76471.28054,82188.24191,112.173757,246052056,1,1,8578,8578,dense,1,0,1,0,0,0,0,lexical,0,0,,override,0,0,0,0,0,dense,disabled
+niah,mf-01-r2@8530,75934.59136,81799.05131,112.9665994,246052056,1,1,8578,8578,dense,1,0,1,0,0,0,0,lexical,0,0,,override,0,0,0,0,0,dense,disabled
+niah,mf-02-r1@8527,76546.63687,82730.24845,112.0241819,245966004,1,1,8575,8575,dense,1,0,1,0,0,0,0,lexical,0,0,,override,0,0,0,0,0,dense,disabled
+niah,mf-02-r1@8527,77055.18182,83871.21523,111.2851442,245966004,1,1,8575,8575,dense,1,0,1,0,0,0,0,lexical,0,0,,override,0,0,0,0,0,dense,disabled
+niah,mf-02-r2@8527,82948.43875,92709.18911,103.3782568,245966004,0.9,1,8575,8575,dense,1,0,1,0,0,0,0,lexical,0,0,,override,0,0,0,0,0,dense,disabled
+niah,mf-02-r2@8527,84764.88055,94405.35665,101.1628991,245966004,0.9,1,8575,8575,dense,1,0,1,0,0,0,0,lexical,0,0,,override,0,0,0,0,0,dense,disabled

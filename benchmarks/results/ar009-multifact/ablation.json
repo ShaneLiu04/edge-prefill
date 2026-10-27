@@ -1,0 +1,57 @@
+{
+  "model_sha256": "6a1a2eb6d15622bf3c96857206351ba97e1af16c30d7a74ee38970e434e9407e",
+  "budget": 0.05,
+  "phrase_weight": 0.5,
+  "max_new_tokens": 48,
+  "threads": 16,
+  "cells": [
+    {
+      "dataset": "deep/multifact8k",
+      "coverage_weight": 0.0,
+      "tag": "multifact8k-cw0",
+      "cases": 16,
+      "q_mean": 0.4883458646875,
+      "q_min": 0.4285714286,
+      "q_p10": 0.4285714286,
+      "covered_queries": 0.0,
+      "selected": 443,
+      "ttft_median": 2766.7022450000004
+    },
+    {
+      "dataset": "deep/multifact8k",
+      "coverage_weight": 3.0,
+      "tag": "multifact8k-cw3",
+      "cases": 16,
+      "q_mean": 0.87825507396875,
+      "q_min": 0.7058823529,
+      "q_p10": 0.7777777778,
+      "covered_queries": 3.25,
+      "selected": 443,
+      "ttft_median": 2926.742974
+    },
+    {
+      "dataset": "deep/multifact8k-hard",
+      "coverage_weight": 0.0,
+      "tag": "multifact8k-hard-cw0",
+      "cases": 16,
+      "q_mean": 0.2608695652,
+      "q_min": 0.2608695652,
+      "q_p10": 0.2608695652,
+      "covered_queries": 0.0,
+      "selected": 445,
+      "ttft_median": 2642.0656105
+    },
+    {
+      "dataset": "deep/multifact8k-hard",
+      "coverage_weight": 3.0,
+      "tag": "multifact8k-hard-cw3",
+      "cases": 16,
+      "q_mean": 0.65210377601875,
+      "q_min": 0.4285714286,
+      "q_p10": 0.5,
+      "covered_queries": 6.5,
+      "selected": 445,
+      "ttft_median": 3217.9713925
+    }
+  ]
+}

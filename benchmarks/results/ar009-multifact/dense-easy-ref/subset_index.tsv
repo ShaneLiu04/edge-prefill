@@ -1,0 +1,5 @@
+id	task	context_path	question	answer
+mf-01-r1	niah	contexts/mf-01.txt	List the secret passcodes for the vaults one, two and three.	MAGENTA-FALCON-8200 COBALT-JACKAL-8297 AMBER-BISON-8394
+mf-01-r2	niah	contexts/mf-01.txt	List the secret passcodes for the vaults four, five and six.	VIOLET-OTTER-8491 CRIMSON-MARLIN-8588 TEAL-LYNX-8685
+mf-02-r1	niah	contexts/mf-02.txt	List the secret passcodes for the vaults seven, eight and nine.	SILVER-PANTHER-8782 INDIGO-CONDOR-8879 SCARLET-RAVEN-8976
+mf-02-r2	niah	contexts/mf-02.txt	List the secret passcodes for the vaults ten, eleven and twelve.	OLIVE-HERON-9073 MAGENTA-FALCON-9170 COBALT-JACKAL-9267

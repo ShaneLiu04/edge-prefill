@@ -1,0 +1,5 @@
+dataset,coverage_weight,cases,q_mean,q_min,q_p10,covered_queries,selected,ttft_median
+deep/multifact8k,0.0,16,0.4883,0.4286,0.4286,0.0,443,2766.7
+deep/multifact8k,3.0,16,0.8783,0.7059,0.7778,3.25,443,2926.7
+deep/multifact8k-hard,0.0,16,0.2609,0.2609,0.2609,0.0,445,2642.1
+deep/multifact8k-hard,3.0,16,0.6521,0.4286,0.5,6.5,445,3218.0
