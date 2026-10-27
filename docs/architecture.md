@@ -101,6 +101,31 @@ contiguous) and incremental MMR (near-duplicate blocks are penalised only when
 their Jaccard similarity exceeds `mmr_threshold`). `Selection.anchor_blocks`
 and `Selection.mmr_penalized` are printed into `raw.csv` as audit columns.
 
+## Multi-fact coverage admission (AR009)
+
+AR008 made admission optimal for *one* fact per question. A question that asks
+for several facts ("list the passcodes for the vaults one, three and five")
+needs one block per fact, and a relevance-ranked fill spends the budget on the
+single strongest match (measured: 0.488 of the facts at b=0.05, 0.261 with six
+asked facts).
+
+**Sub-queries.** The selector treats every rare query term (present in at most
+two blocks) as a sub-query - rarity, not token length, because a length filter
+drops short keys like `one`/`two` while keeping template words. Each sub-query
+gets one anchor at `argmax(idf_p + lexical[b])`; this replaces the AR007 entity
+heuristic whenever coverage is active (they are the same idea, and running both
+starved the fill).
+
+**Facility-location fill.** The greedy score gains
+`coverage_weight * Σ_p max(0, idf_p - covered_p) / idf_max`, i.e. the best
+*uncovered* fact a block would contribute. A block that matches most of the
+question is treated as a question echo and never counts as evidence - the chat
+template repeats the question in the final block, and without that exclusion the
+whole question is "covered" before the first fact is admitted. With fewer than
+two sub-queries no structure is built at all, which is why single-fact families
+keep a bit-for-bit identical selection. `Selection.coverage_queries` (audit
+column `coverage_queries`) reports how many requested facts were covered.
+
 ## Phrase-aware admission and combination routing (AR008)
 
 Two findings drove AR008. First, the selector filtered query terms with

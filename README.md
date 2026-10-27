@@ -53,6 +53,18 @@ serving. EdgePrefill plans and executes a sparse prefill:
    and `check_portfolio.py` refuses any combination that is Pareto-worse than
    the best fixed one.
 
+8. **Multi-fact coverage admission (AR009)** - a question can ask for several
+   facts at once ("list the passcodes for the vaults one, three and five").
+   AR008's admission is single-fact optimal: it spends the whole budget on the
+   single strongest match, so on a new multi-fact family (6 or 12 planted
+   facts, 3 or 6 asked per row) it recovered only 0.49 / 0.26 of the facts.
+   The selector now extracts the *rare* query terms as sub-queries, gives each
+   one an anchor, and adds a submodular facility-location gain
+   (`Σ max(0, idf_p - covered_p)`) to the fill score, so every requested fact
+   has to be paid for. Quality 0.488 -> **0.878** and 0.261 -> **0.652** at the
+   same budget; single-fact families keep a bit-for-bit identical selection.
+   `--coverage-weight 0` restores AR008 exactly.
+
 Sparse paths are lossy by construction. Every benchmark report pairs latency
 with a quality metric (needle accuracy, QA overlap, or PPL retention), and
 `budget=1.0` / all switches off remain numerically equivalent to dense.
@@ -119,6 +131,7 @@ EDGE_PREFILL_TEST_MODEL=/path/to/model.gguf ./build/edge_prefill_tests
 | `--mmr-lambda F` | MMR penalty weight on near-duplicate blocks (AR007) | 0.5 |
 | `--mmr-threshold F` | Jaccard similarity above which MMR applies (AR007) | 0.6 |
 | `--phrase-weight F` | positional phrase admission weight, 0 = AR007 behavior (AR008) | 0.5 |
+| `--coverage-weight F` | multi-fact coverage weight, 0 = AR008 selection exactly (AR009) | 3.0 |
 | `--portfolio P` | measured execution-combination table (AR008) | — |
 | `--qg-bound on\|off` | in-graph query-aware page gating (AR006) | off |
 | `--qg-sel-pages N` | pages kept per ubatch by the gate (quality knob) | 16 |
@@ -197,6 +210,32 @@ machine, only the admission signal changed. Full matrix (5 datasets × 4
 combinations, dense reference per dataset) and the routed table live in
 `benchmarks/results/ar008-portfolio/`; `./repro.sh ar008` regenerates them and
 runs the Pareto gate.
+
+### AR009: multi-fact coverage admission
+
+AR008's multi-needle set asks one fact per row, so a top-1 selector looks
+perfect. The new `gen_multifact.py` family plants 6 or 12 facts and asks 3 or 6
+of them per row, scoring partial credit:
+
+| Setup | Prompt | TTFT | Quality | facts covered |
+| --- | ---: | ---: | --- | ---: |
+| selection, `coverage_weight=0` (AR008) | 6 facts, ask 3, b=0.05 | 2.77 s | **0.488** | 0/3 |
+| selection, `coverage_weight=3` | 6 facts, ask 3, b=0.05 | 2.93 s | **0.878** | 3.25/3 |
+| selection, `coverage_weight=0` (AR008) | 12 facts, ask 6, b=0.05 | 2.64 s | **0.261** | 0/6 |
+| selection, `coverage_weight=3` | 12 facts, ask 6, b=0.05 | 3.22 s | **0.652** | 6.50/6 |
+| selection, `coverage_weight=3` | 4K / 16K / multi-needle | unchanged | 1.000 | n/a (single fact) |
+| dense (2-context subset) | 6 facts, ask 3 | 8.5K full prompt | 0.975 | reference |
+
+`facts covered` is the `coverage_queries` audit column. On single-fact families
+fewer than two rare terms exist, so no coverage structure is built and the
+selection is bit-for-bit the AR008 one (4K/16K/multi-needle verified). The hard
+tier is honest about its ceiling: 0.652 is below the 0.85 target because six
+answer sentences do not fit comfortably in 445 tokens, not because facts are
+missing from the context.
+
+`./repro.sh ar009` regenerates both datasets, runs the ablation and gates it
+with `check_expected_ar009.py` (floors, not recorded values; a disabled feature
+fails the gate). Full report: `benchmarks/results/ar009-multifact/REPORT.md`.
 
 The gated path runs without an embedding model (`semantic_score_ms = 0`).
 Absolute TTFT depends on the host (this session ran up to 3x slower than the

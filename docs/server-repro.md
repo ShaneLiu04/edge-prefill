@@ -222,7 +222,50 @@ $BIN bench --config /tmp/routed.conf --model $MODEL \
 | 组合闸门 | `check_portfolio.py` PASS | 路由组合 Pareto 不劣于最佳固定组合 |
 | 注入劣化 | 必须 FAIL | `--inject=len16k:gate-p16` 应报违规（自测闸门有效） |
 
-## 9. 报告模板
+## 9. AR009：多事实覆盖准入
+
+### 9.1 一条命令
+
+```bash
+./repro.sh ar009          # 生成两档数据 + 消融 + 闸门（约 10-15 分钟 CPU）
+```
+
+### 9.2 手动跑（推荐在大机器上改规模）
+
+```bash
+# 1) 生成数据（确定性，固定 seed）
+python3 benchmarks/scripts/gen_multifact.py \
+  --out benchmarks/data/deep/multifact8k --words 7500 --cases 8 \
+  --facts 6 --asked 3 --rows-per-context 2 --seed 41
+python3 benchmarks/scripts/gen_multifact.py \
+  --out benchmarks/data/deep/multifact8k-hard --words 7500 --cases 8 \
+  --facts 12 --asked 6 --rows-per-context 2 --seed 43
+
+# 2) 消融：coverage_weight=0 是 AR008，3 是 AR009
+python3 benchmarks/scripts/ar009_ablation.py \
+  --bin build-wsl/edge-prefill --model models/qwen2.5-1.5b-instruct-q4_k_m.gguf \
+  --out benchmarks/results/ar009-multifact --force
+
+# 3) 闸门（地板值，不是抄录值）
+python3 benchmarks/scripts/check_expected_ar009.py \
+  benchmarks/results/ar009-multifact \
+  benchmarks/matrix/multifact/expected_ar009.csv
+```
+
+### 9.3 判读标准
+
+| 指标 | 通过线 | 说明 |
+|---|---|---|
+| multifact8k q_mean | ≥0.85（实测 0.878） | AR008 为 0.488 |
+| multifact8k-hard q_mean | ≥0.60（实测 0.652） | AR008 为 0.261；6 条答案句受预算限制 |
+| `coverage_queries` | ≥ 提问数−1 | 证明事实确实进了上下文 |
+| 单事实族 | 选择逐位不变 | 4K/16K/mn 的 `selected_tokens` 与质量都不变 |
+| 负向自测 | 必须 FAIL | 把 cw=3 行改写成 cw=0 值，闸门应报 3 类违规 |
+
+模型规模更大时 `q` 的绝对值会变，但"cw=3 明显高于 cw=0"这一**同条件对比**
+应保持；若不再成立，先查 `coverage_queries` 是否为 0（说明子查询没提取出来）。
+
+## 10. 报告模板
 
 ```
 机器: <CPU/GPU, 核心数, 内存>, 会话: <日期>
