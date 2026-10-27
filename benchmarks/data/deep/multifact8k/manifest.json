@@ -1,0 +1,134 @@
+{
+  "cases": 16,
+  "rows": [
+    {
+      "answer": "MAGENTA-FALCON-8200 COBALT-JACKAL-8297 AMBER-BISON-8394",
+      "context_path": "contexts/mf-01.txt",
+      "context_sha256": "1b4d5bd9888f441e7a5be5bd1244320c6f2ce7bbf6d2e08d974ee6b7891d5608",
+      "id": "mf-01-r1",
+      "question": "List the secret passcodes for the vaults one, two and three.",
+      "task": "niah"
+    },
+    {
+      "answer": "VIOLET-OTTER-8491 CRIMSON-MARLIN-8588 TEAL-LYNX-8685",
+      "context_path": "contexts/mf-01.txt",
+      "context_sha256": "1b4d5bd9888f441e7a5be5bd1244320c6f2ce7bbf6d2e08d974ee6b7891d5608",
+      "id": "mf-01-r2",
+      "question": "List the secret passcodes for the vaults four, five and six.",
+      "task": "niah"
+    },
+    {
+      "answer": "SILVER-PANTHER-8782 INDIGO-CONDOR-8879 SCARLET-RAVEN-8976",
+      "context_path": "contexts/mf-02.txt",
+      "context_sha256": "6b7c5ef645c42dc8163de0735cb6c6393922899b63f68f97c8f94033d4a22dfc",
+      "id": "mf-02-r1",
+      "question": "List the secret passcodes for the vaults seven, eight and nine.",
+      "task": "niah"
+    },
+    {
+      "answer": "OLIVE-HERON-9073 MAGENTA-FALCON-9170 COBALT-JACKAL-9267",
+      "context_path": "contexts/mf-02.txt",
+      "context_sha256": "6b7c5ef645c42dc8163de0735cb6c6393922899b63f68f97c8f94033d4a22dfc",
+      "id": "mf-02-r2",
+      "question": "List the secret passcodes for the vaults ten, eleven and twelve.",
+      "task": "niah"
+    },
+    {
+      "answer": "AMBER-BISON-9364 VIOLET-OTTER-9461 CRIMSON-MARLIN-9558",
+      "context_path": "contexts/mf-03.txt",
+      "context_sha256": "f8d944156b8ad4724f2e5f1ac17e23d4df7c3c17a5d68de32d83588298547b1d",
+      "id": "mf-03-r1",
+      "question": "List the secret passcodes for the vaults one, two and three.",
+      "task": "niah"
+    },
+    {
+      "answer": "TEAL-LYNX-9655 SILVER-PANTHER-9752 INDIGO-CONDOR-9849",
+      "context_path": "contexts/mf-03.txt",
+      "context_sha256": "f8d944156b8ad4724f2e5f1ac17e23d4df7c3c17a5d68de32d83588298547b1d",
+      "id": "mf-03-r2",
+      "question": "List the secret passcodes for the vaults four, five and six.",
+      "task": "niah"
+    },
+    {
+      "answer": "SCARLET-RAVEN-9946 OLIVE-HERON-10043 MAGENTA-FALCON-10140",
+      "context_path": "contexts/mf-04.txt",
+      "context_sha256": "f9d1efecb72bc4536c60add9c61e0d8b7a4b9abd198a5d05d299ca693250ed3a",
+      "id": "mf-04-r1",
+      "question": "List the secret passcodes for the vaults seven, eight and nine.",
+      "task": "niah"
+    },
+    {
+      "answer": "COBALT-JACKAL-10237 AMBER-BISON-10334 VIOLET-OTTER-10431",
+      "context_path": "contexts/mf-04.txt",
+      "context_sha256": "f9d1efecb72bc4536c60add9c61e0d8b7a4b9abd198a5d05d299ca693250ed3a",
+      "id": "mf-04-r2",
+      "question": "List the secret passcodes for the vaults ten, eleven and twelve.",
+      "task": "niah"
+    },
+    {
+      "answer": "CRIMSON-MARLIN-10528 TEAL-LYNX-10625 SILVER-PANTHER-10722",
+      "context_path": "contexts/mf-05.txt",
+      "context_sha256": "d9b7a9d27e937c0752dfe075633820adaad47ded8b5d01217d2f47a2a15b3fd3",
+      "id": "mf-05-r1",
+      "question": "List the secret passcodes for the vaults one, two and three.",
+      "task": "niah"
+    },
+    {
+      "answer": "INDIGO-CONDOR-10819 SCARLET-RAVEN-10916 OLIVE-HERON-11013",
+      "context_path": "contexts/mf-05.txt",
+      "context_sha256": "d9b7a9d27e937c0752dfe075633820adaad47ded8b5d01217d2f47a2a15b3fd3",
+      "id": "mf-05-r2",
+      "question": "List the secret passcodes for the vaults four, five and six.",
+      "task": "niah"
+    },
+    {
+      "answer": "MAGENTA-FALCON-11110 COBALT-JACKAL-11207 AMBER-BISON-11304",
+      "context_path": "contexts/mf-06.txt",
+      "context_sha256": "d3a5a5ed08c685843744f135b4a4436b9ab44c59c08e686d3518055c716f1dca",
+      "id": "mf-06-r1",
+      "question": "List the secret passcodes for the vaults seven, eight and nine.",
+      "task": "niah"
+    },
+    {
+      "answer": "VIOLET-OTTER-11401 CRIMSON-MARLIN-11498 TEAL-LYNX-11595",
+      "context_path": "contexts/mf-06.txt",
+      "context_sha256": "d3a5a5ed08c685843744f135b4a4436b9ab44c59c08e686d3518055c716f1dca",
+      "id": "mf-06-r2",
+      "question": "List the secret passcodes for the vaults ten, eleven and twelve.",
+      "task": "niah"
+    },
+    {
+      "answer": "SILVER-PANTHER-11692 INDIGO-CONDOR-11789 SCARLET-RAVEN-11886",
+      "context_path": "contexts/mf-07.txt",
+      "context_sha256": "883d0f95f48105c5918fad2035e87d2a3f19c5e6a4918acf00f84aa08fbaf6d3",
+      "id": "mf-07-r1",
+      "question": "List the secret passcodes for the vaults one, two and three.",
+      "task": "niah"
+    },
+    {
+      "answer": "OLIVE-HERON-11983 MAGENTA-FALCON-12080 COBALT-JACKAL-12177",
+      "context_path": "contexts/mf-07.txt",
+      "context_sha256": "883d0f95f48105c5918fad2035e87d2a3f19c5e6a4918acf00f84aa08fbaf6d3",
+      "id": "mf-07-r2",
+      "question": "List the secret passcodes for the vaults four, five and six.",
+      "task": "niah"
+    },
+    {
+      "answer": "AMBER-BISON-12274 VIOLET-OTTER-12371 CRIMSON-MARLIN-12468",
+      "context_path": "contexts/mf-08.txt",
+      "context_sha256": "c455e22462f26d420edf8a6e83afa856416ab3dd31c7895c420777eea53d2b18",
+      "id": "mf-08-r1",
+      "question": "List the secret passcodes for the vaults seven, eight and nine.",
+      "task": "niah"
+    },
+    {
+      "answer": "TEAL-LYNX-12565 SILVER-PANTHER-12662 INDIGO-CONDOR-12759",
+      "context_path": "contexts/mf-08.txt",
+      "context_sha256": "c455e22462f26d420edf8a6e83afa856416ab3dd31c7895c420777eea53d2b18",
+      "id": "mf-08-r2",
+      "question": "List the secret passcodes for the vaults ten, eleven and twelve.",
+      "task": "niah"
+    }
+  ],
+  "sha256": "dd93a46c726e6214b12b99360e1b8b6517ce50bbd3af55e3fa8a61c79ec12385"
+}

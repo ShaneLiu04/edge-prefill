@@ -1,0 +1,17 @@
+id	task	context_path	question	answer
+mf-01-r1	niah	contexts/mf-01.txt	List the secret passcodes for the vaults one, two and three.	MAGENTA-FALCON-8200 COBALT-JACKAL-8297 AMBER-BISON-8394
+mf-01-r2	niah	contexts/mf-01.txt	List the secret passcodes for the vaults four, five and six.	VIOLET-OTTER-8491 CRIMSON-MARLIN-8588 TEAL-LYNX-8685
+mf-02-r1	niah	contexts/mf-02.txt	List the secret passcodes for the vaults seven, eight and nine.	SILVER-PANTHER-8782 INDIGO-CONDOR-8879 SCARLET-RAVEN-8976
+mf-02-r2	niah	contexts/mf-02.txt	List the secret passcodes for the vaults ten, eleven and twelve.	OLIVE-HERON-9073 MAGENTA-FALCON-9170 COBALT-JACKAL-9267
+mf-03-r1	niah	contexts/mf-03.txt	List the secret passcodes for the vaults one, two and three.	AMBER-BISON-9364 VIOLET-OTTER-9461 CRIMSON-MARLIN-9558
+mf-03-r2	niah	contexts/mf-03.txt	List the secret passcodes for the vaults four, five and six.	TEAL-LYNX-9655 SILVER-PANTHER-9752 INDIGO-CONDOR-9849
+mf-04-r1	niah	contexts/mf-04.txt	List the secret passcodes for the vaults seven, eight and nine.	SCARLET-RAVEN-9946 OLIVE-HERON-10043 MAGENTA-FALCON-10140
+mf-04-r2	niah	contexts/mf-04.txt	List the secret passcodes for the vaults ten, eleven and twelve.	COBALT-JACKAL-10237 AMBER-BISON-10334 VIOLET-OTTER-10431
+mf-05-r1	niah	contexts/mf-05.txt	List the secret passcodes for the vaults one, two and three.	CRIMSON-MARLIN-10528 TEAL-LYNX-10625 SILVER-PANTHER-10722
+mf-05-r2	niah	contexts/mf-05.txt	List the secret passcodes for the vaults four, five and six.	INDIGO-CONDOR-10819 SCARLET-RAVEN-10916 OLIVE-HERON-11013
+mf-06-r1	niah	contexts/mf-06.txt	List the secret passcodes for the vaults seven, eight and nine.	MAGENTA-FALCON-11110 COBALT-JACKAL-11207 AMBER-BISON-11304
+mf-06-r2	niah	contexts/mf-06.txt	List the secret passcodes for the vaults ten, eleven and twelve.	VIOLET-OTTER-11401 CRIMSON-MARLIN-11498 TEAL-LYNX-11595
+mf-07-r1	niah	contexts/mf-07.txt	List the secret passcodes for the vaults one, two and three.	SILVER-PANTHER-11692 INDIGO-CONDOR-11789 SCARLET-RAVEN-11886
+mf-07-r2	niah	contexts/mf-07.txt	List the secret passcodes for the vaults four, five and six.	OLIVE-HERON-11983 MAGENTA-FALCON-12080 COBALT-JACKAL-12177
+mf-08-r1	niah	contexts/mf-08.txt	List the secret passcodes for the vaults seven, eight and nine.	AMBER-BISON-12274 VIOLET-OTTER-12371 CRIMSON-MARLIN-12468
+mf-08-r2	niah	contexts/mf-08.txt	List the secret passcodes for the vaults ten, eleven and twelve.	TEAL-LYNX-12565 SILVER-PANTHER-12662 INDIGO-CONDOR-12759
