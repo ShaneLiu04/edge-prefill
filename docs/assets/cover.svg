@@ -1,0 +1,144 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640" role="img" aria-label="EdgePrefill AR008 cover">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#070B14"/>
+      <stop offset="0.55" stop-color="#0A1120"/>
+      <stop offset="1" stop-color="#0D1728"/>
+    </linearGradient>
+    <radialGradient id="glowTeal" cx="50%" cy="50%" r="50%">
+      <stop offset="0" stop-color="#14B8A6" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#14B8A6" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="glowIndigo" cx="50%" cy="50%" r="50%">
+      <stop offset="0" stop-color="#4F46E5" stop-opacity="0.42"/>
+      <stop offset="1" stop-color="#4F46E5" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="topLine" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#14B8A6" stop-opacity="0"/>
+      <stop offset="0.28" stop-color="#2DD4BF" stop-opacity="0.85"/>
+      <stop offset="0.62" stop-color="#5EEAD4" stop-opacity="0.35"/>
+      <stop offset="1" stop-color="#14B8A6" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="mark" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#5EEAD4"/>
+      <stop offset="0.5" stop-color="#2DD4BF"/>
+      <stop offset="1" stop-color="#0EA5A0"/>
+    </linearGradient>
+    <linearGradient id="titleGrad" x1="0" y1="0" x2="1" y2="0.25">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="0.7" stop-color="#E6FFFB"/>
+      <stop offset="1" stop-color="#99F6E4"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#2DD4BF"/>
+      <stop offset="1" stop-color="#14B8A6" stop-opacity="0"/>
+    </linearGradient>
+    <pattern id="pageGrid" width="48" height="48" patternUnits="userSpaceOnUse">
+      <path d="M 48 0 L 0 0 0 48" fill="none" stroke="#94A3B8" stroke-width="1" opacity="0.055"/>
+    </pattern>
+    <filter id="panelShadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="14" stdDeviation="18" flood-color="#000000" flood-opacity="0.45"/>
+    </filter>
+    <filter id="textGlow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="0" stdDeviation="12" flood-color="#2DD4BF" flood-opacity="0.18"/>
+    </filter>
+  </defs>
+
+  <rect width="1280" height="640" fill="url(#bg)"/>
+  <ellipse cx="1150" cy="80" rx="460" ry="320" fill="url(#glowTeal)" opacity="0.45"/>
+  <ellipse cx="170" cy="640" rx="520" ry="280" fill="url(#glowIndigo)" opacity="0.32"/>
+  <rect width="1280" height="640" fill="url(#pageGrid)"/>
+  <rect x="0" y="0" width="1280" height="3" fill="url(#topLine)"/>
+
+  <g font-family="Segoe UI, Microsoft YaHei, PingFang SC, Arial, sans-serif">
+    <g filter="url(#textGlow)">
+      <rect x="80" y="72" width="44" height="44" rx="12" fill="url(#mark)"/>
+      <rect x="92" y="82" width="20" height="4.5" rx="2.25" fill="#042F2E"/>
+      <rect x="92" y="91.75" width="13" height="4.5" rx="2.25" fill="#042F2E"/>
+      <rect x="92" y="101.5" width="20" height="4.5" rx="2.25" fill="#042F2E"/>
+      <rect x="92" y="82" width="4.5" height="24" rx="2.25" fill="#042F2E"/>
+    </g>
+
+    <text x="142" y="102" font-size="12.5" font-weight="600" letter-spacing="2.6" fill="#5EEAD4">EDGE INFERENCE / AR009 ST ACCEPTED</text>
+
+    <text x="78" y="228" font-size="92" font-weight="700" letter-spacing="-2.5" fill="url(#titleGrad)">EdgePrefill</text>
+    <rect x="80" y="250" width="120" height="4" rx="2" fill="url(#accent)"/>
+
+    <text x="80" y="305" font-size="24" font-weight="500" fill="#E2E8F0">面向端侧长上下文的分层稀疏 Prefill 引擎</text>
+
+    <text x="80" y="350" font-size="15" fill="#94A3B8">Multi-fact coverage admission and a measured execution portfolio</text>
+    <text x="80" y="373" font-size="15" fill="#94A3B8">for 4K-32K prefill on a pinned llama.cpp backend.</text>
+
+    <text x="80" y="440" font-size="36" font-weight="700" fill="#F8FAFC">24.9x</text>
+    <text x="80" y="464" font-size="10.5" font-weight="600" letter-spacing="1.8" fill="#64748B">8K CPU</text>
+
+    <text x="270" y="440" font-size="36" font-weight="700" fill="#F8FAFC">0.878</text>
+    <text x="270" y="464" font-size="10.5" font-weight="600" letter-spacing="1.8" fill="#64748B">MULTI-FACT Q</text>
+
+    <text x="460" y="440" font-size="36" font-weight="700" fill="#F8FAFC">1.00</text>
+    <text x="460" y="464" font-size="10.5" font-weight="600" letter-spacing="1.8" fill="#64748B">SINGLE-FACT Q</text>
+
+    <rect x="80" y="502" width="680" height="1" fill="#1E293B"/>
+    <text x="80" y="536" font-size="12.5" letter-spacing="1.4" fill="#64748B">C++17 / CMAKE / LLAMA.CPP 3BB63CBC / AR001-AR009</text>
+    <text x="80" y="558" font-size="11" letter-spacing="0.8" fill="#475569">hard tier 0.652 / 32K gate 12.8x / GPU 12.78x (AR004)</text>
+  </g>
+
+  <g filter="url(#panelShadow)">
+    <rect x="780" y="96" width="420" height="448" rx="24" fill="#0B1424" fill-opacity="0.9" stroke="#1E293B"/>
+    <rect x="780.5" y="96.5" width="419" height="447" rx="23.5" fill="none" stroke="#2DD4BF" stroke-opacity="0.08"/>
+  </g>
+
+  <g font-family="Segoe UI, Microsoft YaHei, PingFang SC, Arial, sans-serif">
+    <text x="818" y="137" font-size="11.5" font-weight="700" letter-spacing="2.2" fill="#5EEAD4">EXECUTION PORTFOLIO</text>
+    <text x="818" y="160" font-size="10.5" letter-spacing="1.2" fill="#64748B">QUALITY FLOOR 0.95 / MULTI-FACT COVERAGE</text>
+    <rect x="818" y="174" width="344" height="1" fill="#1E293B"/>
+
+    <text x="818" y="196" font-size="8.5" letter-spacing="1.2" fill="#475569">DATASET</text>
+    <text x="890" y="196" font-size="8.5" letter-spacing="1.2" fill="#475569">ROUTE</text>
+    <text x="1068" y="196" font-size="8.5" letter-spacing="1.2" fill="#475569" text-anchor="end">SPEEDUP</text>
+    <text x="1162" y="196" font-size="8.5" letter-spacing="1.2" fill="#475569" text-anchor="end">Q</text>
+
+    <text x="818" y="229" font-size="12" font-weight="600" fill="#E2E8F0">4K</text>
+    <rect x="886" y="215" width="112" height="18" rx="9" fill="#0F2E2A" stroke="#14B8A6" stroke-opacity="0.55"/>
+    <text x="942" y="228" font-size="8" letter-spacing="0.8" fill="#5EEAD4" text-anchor="middle">SELECTION</text>
+    <text x="1068" y="231" font-size="18" font-weight="700" fill="#F8FAFC" text-anchor="end">12.0x</text>
+    <text x="1162" y="230" font-size="10" fill="#94A3B8" text-anchor="end">1.00</text>
+
+    <text x="818" y="261" font-size="12" font-weight="600" fill="#E2E8F0">8K</text>
+    <rect x="886" y="247" width="112" height="18" rx="9" fill="#0F2E2A" stroke="#14B8A6" stroke-opacity="0.55"/>
+    <text x="942" y="260" font-size="8" letter-spacing="0.8" fill="#5EEAD4" text-anchor="middle">SELECTION</text>
+    <text x="1068" y="263" font-size="18" font-weight="700" fill="#F8FAFC" text-anchor="end">24.9x</text>
+    <text x="1162" y="262" font-size="10" fill="#94A3B8" text-anchor="end">1.00</text>
+
+    <text x="818" y="293" font-size="12" font-weight="600" fill="#E2E8F0">16K</text>
+    <rect x="886" y="279" width="112" height="18" rx="9" fill="#0F2E2A" stroke="#14B8A6" stroke-opacity="0.55"/>
+    <text x="942" y="292" font-size="8" letter-spacing="0.8" fill="#5EEAD4" text-anchor="middle">SELECTION</text>
+    <text x="1068" y="295" font-size="18" font-weight="700" fill="#F8FAFC" text-anchor="end">19.1x</text>
+    <text x="1162" y="294" font-size="10" fill="#94A3B8" text-anchor="end">1.00</text>
+
+    <rect x="810" y="307" width="352" height="28" rx="8" fill="#F59E0B" fill-opacity="0.08" stroke="#F59E0B" stroke-opacity="0.18"/>
+    <text x="818" y="325" font-size="12" font-weight="600" fill="#F8FAFC">32K</text>
+    <rect x="886" y="311" width="112" height="18" rx="9" fill="#3B2606" stroke="#F59E0B" stroke-opacity="0.65"/>
+    <text x="942" y="324" font-size="8" letter-spacing="0.7" fill="#FBBF24" text-anchor="middle">GATE P24+L32</text>
+    <text x="1068" y="327" font-size="18" font-weight="700" fill="#F8FAFC" text-anchor="end">12.8x</text>
+    <text x="1162" y="326" font-size="10" fill="#94A3B8" text-anchor="end">1.00</text>
+
+    <text x="818" y="357" font-size="12" font-weight="600" fill="#E2E8F0">MN 8K</text>
+    <rect x="886" y="343" width="112" height="18" rx="9" fill="#0F2E2A" stroke="#14B8A6" stroke-opacity="0.55"/>
+    <text x="942" y="356" font-size="8" letter-spacing="0.8" fill="#5EEAD4" text-anchor="middle">SELECTION</text>
+    <text x="1068" y="359" font-size="18" font-weight="700" fill="#F8FAFC" text-anchor="end">11.2x</text>
+    <text x="1162" y="358" font-size="10" fill="#94A3B8" text-anchor="end">1.00</text>
+
+    <text x="818" y="386" font-size="9" letter-spacing="0.4" fill="#94A3B8">32K selection 36.8x / q=0.88 -&gt; gate 12.8x / q=1.00</text>
+
+    <rect x="818" y="398" width="344" height="76" rx="10" fill="#082F2E" stroke="#14B8A6" stroke-opacity="0.35"/>
+    <text x="832" y="418" font-size="10" letter-spacing="1.1" font-weight="700" fill="#5EEAD4">MULTI-FACT COVERAGE</text>
+    <text x="832" y="436" font-size="9.5" letter-spacing="0.4" fill="#E2E8F0">6 facts / ask 3: q 0.488 -&gt; 0.878</text>
+    <text x="832" y="452" font-size="9.5" letter-spacing="0.4" fill="#E2E8F0">12 facts / ask 6: q 0.261 -&gt; 0.652</text>
+    <text x="832" y="468" font-size="8.5" letter-spacing="0.4" fill="#94A3B8">coverage_weight=3 / single-fact exact</text>
+
+    <text x="818" y="494" font-size="9" letter-spacing="1" fill="#64748B">PORTFOLIO ROWS Q=1.00 / Q FLOOR 0.95</text>
+    <text x="818" y="526" font-size="9" letter-spacing="1.1" fill="#64748B">AR009 T016 / 20 CELLS / 5 DATASETS</text>
+    <text x="1162" y="526" font-size="9" letter-spacing="1.1" fill="#64748B" text-anchor="end">AR009 ST</text>
+  </g>
+</svg>

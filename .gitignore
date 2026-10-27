@@ -27,3 +27,6 @@ benchmarks/results/exp-dump*/
 # Local verification trees (AR009)
 build-asan/
 build-clean/
+
+# Local agent instructions (not published)
+AGENTS.md
