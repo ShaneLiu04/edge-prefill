@@ -299,6 +299,12 @@ Status parse_config_file(const std::string& path, Config* out) {
                                      "phrase_weight must be in [0,2]");
             }
             out->phrase_weight = d;
+        } else if (key == "coverage_weight") {
+            if (!parse_double(value, &d) || !(d >= 0.0 && d <= 10.0)) {
+                return Status::error(ErrorCode::InvalidArgument,
+                                     "coverage_weight must be in [0,10]");
+            }
+            out->coverage_weight = d;
         } else if (key == "portfolio" || key == "portfolio_table") {
             out->portfolio_table = value;
         } else if (key == "budget_curve") {

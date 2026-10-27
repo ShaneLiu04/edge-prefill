@@ -39,7 +39,7 @@ Status Reporter::write_raw_csv(const std::string& path) {
            "selected_tokens,mode,budget,attn_top_k,repeats,ppl_dense,ppl_sparse,"
            "query_gating,qg_groups,score_source,semantic_score_ms,draft_score_ms,"
            "qg_source,budget_source,anchor_blocks,mmr_penalized,phrase_blocks,"
-           "specific_terms,"
+           "specific_terms,coverage_queries,"
            "portfolio_choice,portfolio_reason\n";
     out << std::setprecision(10);
     for (const auto& s : samples_) {
@@ -53,6 +53,7 @@ Status Reporter::write_raw_csv(const std::string& path) {
             << s.semantic_score_ms << ',' << s.draft_score_ms << ','
             << s.qg_source << ',' << s.budget_source << ',' << s.anchor_blocks
             << ',' << s.mmr_penalized << ',' << s.phrase_blocks << ',' << s.specific_terms << ','
+            << s.coverage_queries << ','
             << (s.portfolio_choice.empty() ? "none" : s.portfolio_choice) << ','
             << s.portfolio_reason << '\n';
     }

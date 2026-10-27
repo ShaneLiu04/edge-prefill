@@ -471,3 +471,128 @@ TEST_CASE(selector_phrase_weight_zero_matches_ar007) {
     CHECK_EQ(on.dense, off.dense);
     CHECK(on.selected_tokens <= off.selected_tokens + 32u * 4u);
 }
+
+// AR009 FR-2: multi-fact coverage. A prompt can hold several independent
+// facts and a single question can ask for several of them at once. The AW
+// budget then only has room for a handful of blocks, so the admission has to
+// pay for every requested fact instead of spending everything on the single
+// strongest lexical match.
+namespace {
+
+struct MultiFactFixture {
+    std::vector<llama_token> tokens;
+    std::vector<std::string> pieces;
+
+    // key -> block index. Each fact sentence lives in one block and is
+    // identified by one rare word ("one", "two", ...), which is exactly how
+    // the generated multi-fact family is laid out.
+    explicit MultiFactFixture(const std::vector<std::pair<uint32_t, std::string>>& facts,
+                              const std::string& echo = "") {
+        constexpr uint32_t n = 8192;
+        tokens.resize(n);
+        pieces.assign(n, "filler");
+        for (uint32_t i = 0; i < n; ++i) tokens[i] = static_cast<llama_token>(i % 1000);
+        for (const auto& fact : facts) {
+            const uint32_t base = fact.first * 32u;
+            pieces[base] = "the";
+            pieces[base + 1] = "secret";
+            pieces[base + 2] = "passcode";
+            pieces[base + 3] = "is";
+            pieces[base + 4] = fact.second;
+        }
+        if (!echo.empty() && n > 32) {
+            // The chat template repeats the question in the final block.
+            pieces[n - 1] = echo;
+        }
+    }
+};
+
+SelectionOptions multi_fact_options(double coverage_weight) {
+    auto opts = options(0.05);
+    opts.coverage_stride = 0;
+    opts.phrase_weight = 0.5;
+    opts.coverage_weight = coverage_weight;
+    return opts;
+}
+
+bool contains_block(const Selection& sel, uint32_t block) {
+    for (int32_t tok : sel.token_indices) {
+        if (static_cast<uint32_t>(tok) / 32u == block) return true;
+    }
+    return false;
+}
+
+const std::string kMultiFactQuery =
+        "List the secret passcodes for the vaults one, two and three.";
+
+} // namespace
+
+// AR009 zero-regression switch: coverage_weight=0 must leave the AR008 ranking
+// untouched and report zero covered sub-queries.
+TEST_CASE(selector_coverage_off_matches_ar008) {
+    MultiFactFixture f({{20, "one"}, {60, "two"}, {100, "three"}, {140, "four"},
+                        {180, "five"}, {220, "six"}});
+    auto on = multi_fact_options(0.0);
+    Selection a;
+    Selection b;
+    BlockSelector selector;
+    CHECK_OK(selector.select(f.tokens, kMultiFactQuery, f.pieces, on, nullptr, &a));
+    CHECK_OK(selector.select(f.tokens, kMultiFactQuery, f.pieces, on, nullptr, &b));
+    CHECK_EQ(a.coverage_queries, 0u);
+    CHECK_EQ(a.token_indices, b.token_indices);
+    CHECK(!a.dense);
+}
+
+// The point of AR009: every requested fact must end up in the context. With
+// coverage off the admission pins at most one of the three asked facts; with
+// coverage on all three are admitted and reported in the audit column.
+TEST_CASE(selector_coverage_admits_every_requested_fact) {
+    MultiFactFixture f({{20, "one"}, {60, "two"}, {100, "three"}, {140, "four"},
+                        {180, "five"}, {220, "six"}});
+    BlockSelector selector;
+    Selection off;
+    CHECK_OK(selector.select(f.tokens, kMultiFactQuery, f.pieces,
+                             multi_fact_options(0.0), nullptr, &off));
+    Selection on;
+    CHECK_OK(selector.select(f.tokens, kMultiFactQuery, f.pieces,
+                             multi_fact_options(3.0), nullptr, &on));
+    CHECK_EQ(on.coverage_queries, 3u);
+    CHECK(contains_block(on, 20));
+    CHECK(contains_block(on, 60));
+    CHECK(contains_block(on, 100));
+    // The unasked facts must not be dragged in as a side effect.
+    CHECK(on.selected_tokens <= off.selected_tokens + 32u * 4u);
+}
+
+// The chat template repeats the question in the last block, so that block
+// contains every sub-query at once. It must never count as evidence: doing so
+// marks the whole question "covered" before the first fact is admitted.
+TEST_CASE(selector_coverage_ignores_question_echo) {
+    MultiFactFixture f({{20, "one"}, {60, "two"}, {100, "three"}},
+                       "list the secret passcodes for the vaults one two and three");
+    Selection sel;
+    BlockSelector selector;
+    CHECK_OK(selector.select(f.tokens, kMultiFactQuery, f.pieces,
+                             multi_fact_options(3.0), nullptr, &sel));
+    CHECK_EQ(sel.coverage_queries, 3u);
+    CHECK(contains_block(sel, 20));
+    CHECK(contains_block(sel, 60));
+    CHECK(contains_block(sel, 100));
+}
+
+// A single-fact question has nothing to cover: the selection must be identical
+// to AR008 and the audit column must stay zero, which is what keeps the whole
+// single-needle family bit-for-bit unchanged.
+TEST_CASE(selector_coverage_is_noop_for_single_fact) {
+    MultiFactFixture f({{20, "one"}, {60, "two"}, {100, "three"}});
+    BlockSelector selector;
+    Selection off;
+    Selection on;
+    CHECK_OK(selector.select(f.tokens, "What is the secret passcode for vault two?",
+                             f.pieces, multi_fact_options(0.0), nullptr, &off));
+    CHECK_OK(selector.select(f.tokens, "What is the secret passcode for vault two?",
+                             f.pieces, multi_fact_options(3.0), nullptr, &on));
+    CHECK_EQ(on.coverage_queries, 0u);
+    CHECK_EQ(on.token_indices, off.token_indices);
+    CHECK_EQ(on.selected_tokens, off.selected_tokens);
+}

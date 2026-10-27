@@ -23,3 +23,7 @@ __pycache__/
 # Experiment scratch directories (reports under benchmarks/results/exp*/
 # are committed; transient dumps are not)
 benchmarks/results/exp-dump*/
+
+# Local verification trees (AR009)
+build-asan/
+build-clean/

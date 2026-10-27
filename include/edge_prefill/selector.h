@@ -62,6 +62,9 @@ struct Selection {
     // the prompt/question carried in total.
     uint32_t phrase_blocks = 0;
     uint32_t specific_terms = 0;
+    // AR009 FR-2 audit: discriminative sub-queries (requested facts) whose
+    // evidence the admission actually covered.
+    uint32_t coverage_queries = 0;
     // AR008 FR-2 profile input: top-1 lexical score over the lexical sum.
     // A high value means the evidence is concentrated in one block, which
     // is exactly when selection-level sparsity is safe.
@@ -93,6 +96,10 @@ struct SelectionOptions {
     // block score. 0 disables the feature and restores AR007 behaviour
     // bit-for-bit (no phrase set is built at all).
     double phrase_weight = 0.50;
+    // AR009 FR-2: sub-query coverage weight (facility-location gain added to
+    // the fill score). 0 disables multi-fact coverage and restores the AR008
+    // ranking bit-for-bit; only multi-term queries are affected either way.
+    double coverage_weight = 3.0;
     SelectorWeights weights;
 };
 

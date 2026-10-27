@@ -75,6 +75,7 @@ struct BenchmarkConfig {
     // AR008 FR-1/FR-2: positional phrase admission weight and the measured
     // execution-combination table (opt-in; empty keeps the configured path).
     double phrase_weight = 0.50;
+    double coverage_weight = 3.0;
     std::string portfolio_table;
     // GPU offload: layers above this index move to the GPU backend (99 =
     // full offload). 0 keeps everything on CPU.

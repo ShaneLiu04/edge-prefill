@@ -7,6 +7,7 @@
 #   ./repro.sh budget   # AR007 budget-vs-quality sweep + curve (~15 min)
 #   ./repro.sh ar007    # AR007 acceptance campaign + expected gate (dense is slow)
 #   ./repro.sh ar008    # AR008 combination matrix + portfolio gate (dense is slow)
+#   ./repro.sh ar009    # AR009 multi-fact coverage ablation + expected gate
 #
 # Every step is fail-fast (set -euo pipefail) and prints the exact command
 # it runs. Models are downloaded with SHA256 verification into ./models
@@ -200,8 +201,27 @@ case "${SUITE}" in
             || fail "routed combination is worse than the best fixed combination"
         OUT="${ROOT}/benchmarks/results/ar008-portfolio"
         ;;
+    ar009)
+        # AR009 FR-3: regenerate the deterministic multi-fact families, run the
+        # coverage ablation (AR008 ranking vs coverage-fair fill) and gate the
+        # result. Both tiers are selection-level only, so this is fast.
+        python3 benchmarks/scripts/gen_multifact.py \
+            --out "${ROOT}/benchmarks/data/deep/multifact8k" \
+            --words 7500 --cases 8 --facts 6 --asked 3 --rows-per-context 2 --seed 41
+        python3 benchmarks/scripts/gen_multifact.py \
+            --out "${ROOT}/benchmarks/data/deep/multifact8k-hard" \
+            --words 7500 --cases 8 --facts 12 --asked 6 --rows-per-context 2 --seed 43
+        python3 benchmarks/scripts/ar009_ablation.py \
+            --bin "${BIN}" --model "${MAIN_MODEL}" \
+            --out "${ROOT}/benchmarks/results/ar009-multifact" --force
+        python3 benchmarks/scripts/check_expected_ar009.py \
+            "${ROOT}/benchmarks/results/ar009-multifact" \
+            "${ROOT}/benchmarks/matrix/multifact/expected_ar009.csv" \
+            || fail "multi-fact coverage is below the AR009 floors"
+        OUT="${ROOT}/benchmarks/results/ar009-multifact"
+        ;;
     *)
-        fail "unknown suite: ${SUITE} (smoke|matrix|full|budget|ar007|ar008)"
+        fail "unknown suite: ${SUITE} (smoke|matrix|full|budget|ar007|ar008|ar009)"
         ;;
 esac
 
@@ -209,9 +229,14 @@ if [[ -f "${OUT}/matrix.md" ]]; then
     echo
     cat "${OUT}/matrix.md"
 fi
+if [[ -f "${OUT}/ablation.md" ]]; then
+    echo
+    cat "${OUT}/ablation.md"
+fi
 
 if [[ "${CHECK_EXPECTED}" == "1" && "${SUITE}" != "smoke" && "${SUITE}" != "budget" \
-      && "${SUITE}" != "ar007" && "${SUITE}" != "ar008" ]]; then
+      && "${SUITE}" != "ar007" && "${SUITE}" != "ar008" \
+      && "${SUITE}" != "ar009" ]]; then
     step "expected-results gate"
     python3 benchmarks/scripts/check_expected.py \
         --matrix "${OUT}/matrix.csv" \

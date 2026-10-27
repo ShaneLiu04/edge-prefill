@@ -62,6 +62,9 @@ struct Sample {
     // phrase, and which execution combination the portfolio router picked.
     uint32_t phrase_blocks = 0;
     uint32_t specific_terms = 0;
+    // AR009 FR-2 audit: requested facts (rare query terms) whose evidence the
+    // admission actually covered. 0 on single-fact prompts, where coverage is off.
+    uint32_t coverage_queries = 0;
     std::string portfolio_choice = "none";
     std::string portfolio_reason;
 };

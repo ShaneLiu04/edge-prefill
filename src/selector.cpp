@@ -224,19 +224,29 @@ Status BlockSelector::select(const std::vector<llama_token>& tokens,
     // which is exactly the discriminator that separates "vault 5" from
     // "vault 6"; positional phrases must see it.
     const bool phrase_enabled = opts.phrase_weight > 0.0;
-    std::vector<std::vector<std::string>> block_seq;
+    // The unfiltered per-block word sequence feeds both the phrase signal and
+    // the AR009 coverage sub-queries, so it is always built (one string per
+    // term, no extra tokenisation).
+    std::vector<std::vector<std::string>> block_seq(n_blocks);
     std::vector<std::string> flat_seq;
+    std::vector<uint32_t> flat_tok;
     if (phrase_enabled) {
-        block_seq.assign(n_blocks, {});
         flat_seq.reserve(n_tokens * 2);
+        flat_tok.reserve(n_tokens * 2);
     }
     for (uint32_t i = 0; i < n_tokens; ++i) {
         const std::string norm = normalize_piece(token_pieces[i]);
         auto terms = terms_from_text(norm);
         for (const auto& term : terms) {
+            block_seq[i / block_size].push_back(term);
             if (phrase_enabled) {
-                block_seq[i / block_size].push_back(term);
                 flat_seq.push_back(term);
+                // A piece can hold several words, so a flat-sequence index is
+                // not a token index. The phrase co-occurrence below needs the
+                // token each term came from (the previous code indexed per_pos
+                // with the flat index and read past the end whenever a piece
+                // held more than one word).
+                flat_tok.push_back(i);
             }
             if (term.size() >= 2 || static_cast<unsigned char>(term[0]) >= 0x80) {
                 block_terms[i / block_size].push_back(term);
@@ -416,8 +426,8 @@ Status BlockSelector::select(const std::vector<llama_token>& tokens,
                 if (flat[i].empty() || flat[i + 1].empty()) continue;
                 const auto it = phrase_weight.find(flat[i] + " " + flat[i + 1]);
                 if (it == phrase_weight.end()) continue;
-                per_pos[i] += it->second;
-                per_pos[i + 1] += it->second;
+                per_pos[flat_tok[i]] += it->second;
+                per_pos[flat_tok[i + 1]] += it->second;
             }
         }
     }
@@ -611,12 +621,127 @@ Status BlockSelector::select(const std::vector<llama_token>& tokens,
         stride_anchors.insert(best);
     }
 
+    // AR009 FR-2: sub-query coverage. Bounded so a question that repeats many
+    // discriminative terms cannot turn the greedy into an O(n^2 * P) scan.
+    constexpr size_t kMaxCoverageSubqueries = 8;
+    const double coverage_weight = opts.coverage_weight;
+    // AR009 FR-2: coverage sub-queries. A question can ask for several facts
+    // at once ("list the passcodes for vault 1, 2 and 3"). A top-k fill then
+    // spends the whole budget on the single strongest match and the sibling
+    // facts are never admitted. Submodular facility location fixes that: each
+    // discriminative query term is a sub-query and contributes the gain of its
+    // best *uncovered* block, so the greedy step is forced to pay for every
+    // fact in turn. With fewer than two sub-queries every gain is zero and the
+    // ranking stays bit-for-bit the AR008 one.
+    std::vector<double> sub_idf;
+    std::vector<std::vector<char>> sub_hit;  // [sub-query][block]
+    std::vector<double> covered;
+    double sub_idf_max = 0.0;
+    {
+        // Sub-queries are the query *terms* that are rare in the prompt, not
+        // the bigrams: an enumerated question ("the vaults one, two and
+        // three") never contains "vault two" as an adjacent pair, while the
+        // word "two" still identifies its block. Rarity in the prompt is the
+        // criterion, not token length: a length heuristic silently drops
+        // short keys ("one", "two") and keeps template words ("passcodes").
+        std::unordered_set<std::string> seen;
+        std::vector<std::string> subs;
+        for (const auto& term : query_seq) {
+            if (term.size() < 2) continue;
+            if (!seen.insert(term).second) continue;
+            subs.push_back(term);
+        }
+        std::sort(subs.begin(), subs.end());
+        std::vector<std::pair<double, const std::string*>> ranked;
+        std::vector<std::vector<char>> hits_by_sub;
+        for (const auto& term : subs) {
+            std::vector<char> hits(n_blocks, 0);
+            uint32_t n_hits = 0;
+            for (uint32_t b = 0; b < n_blocks; ++b) {
+                for (const auto& t : block_seq[b]) {
+                    if (t != term) continue;
+                    hits[b] = 1;
+                    ++n_hits;
+                    break;
+                }
+            }
+            // Only *specific* terms can identify a fact. A term that occurs in
+            // most fact blocks ("vault", "secret", "passcode") is satisfied by
+            // any of them, so giving it its own anchor wastes the budget on
+            // the first fact and dilutes the coverage gain. Two blocks is the
+            // tolerance for a sentence that straddles a block boundary.
+            if (n_hits == 0 || n_hits > 2) continue;
+            const double idf = std::log((static_cast<double>(n_blocks) + 1.0) /
+                                        (static_cast<double>(n_hits) + 1.0)) + 1.0;
+            ranked.emplace_back(idf, &term);
+            hits_by_sub.push_back(std::move(hits));
+        }
+        std::vector<size_t> order(ranked.size());
+        for (size_t i = 0; i < order.size(); ++i) order[i] = i;
+        std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) {
+            if (std::abs(ranked[a].first - ranked[b].first) > 1e-12) {
+                return ranked[a].first > ranked[b].first;
+            }
+            return *ranked[a].second < *ranked[b].second;
+        });
+        if (order.size() > kMaxCoverageSubqueries) order.resize(kMaxCoverageSubqueries);
+        for (size_t i : order) {
+            sub_idf.push_back(ranked[i].first);
+            sub_idf_max = std::max(sub_idf_max, ranked[i].first);
+            sub_hit.push_back(std::move(hits_by_sub[i]));
+        }
+        if (sub_idf.size() < 2 || coverage_weight <= 0.0) {
+            sub_idf.clear();
+            sub_hit.clear();
+            sub_idf_max = 0.0;
+        } else {
+            covered.assign(sub_idf.size(), 0.0);
+        }
+    }
+    // The chat template repeats the question in the final block, so that block
+    // contains every sub-query at once. Treating it as evidence would mark the
+    // whole question "covered" before the first real fact is admitted (the
+    // first measurement round did exactly that: coverage stayed at 0 and the
+    // selection was identical to AR008). A block that echoes most of the
+    // question is never evidence, so it is dropped from the sub-query hits.
+    if (!sub_idf.empty()) {
+        const size_t echo_threshold = std::max<size_t>(2, (sub_idf.size() + 1) / 2);
+        for (uint32_t b = 0; b < n_blocks; ++b) {
+            size_t n_hit = 0;
+            for (size_t p = 0; p < sub_idf.size(); ++p) {
+                if (sub_hit[p][b]) ++n_hit;
+            }
+            if (n_hit < echo_threshold) continue;
+            for (size_t p = 0; p < sub_idf.size(); ++p) sub_hit[p][b] = 0;
+        }
+    }
+    // Coverage gain of block b: how much of the still-uncovered sub-query IDF
+    // it would add, normalised to [0,1] so it composes with the fused score.
+    auto block_covers = [&](uint32_t b) {
+        if (sub_idf_max <= 0.0) return 0.0;
+        double gain = 0.0;
+        for (size_t p = 0; p < sub_idf.size(); ++p) {
+            if (sub_hit[p][b]) gain += std::max(0.0, sub_idf[p] - covered[p]);
+        }
+        return gain / sub_idf_max;
+    };
+    auto mark_covered = [&](uint32_t b) {
+        for (size_t p = 0; p < sub_idf.size(); ++p) {
+            if (sub_hit[p][b]) covered[p] = sub_idf[p];
+        }
+    };
+
     // AR007 FR-2: entity anchors. Distinct question terms that look specific
     // (digits, long words, CJK) get their best context block pinned, so a
     // multi-fact question keeps one anchor per fact instead of spending the
     // whole budget on the single strongest lexical match.
     std::set<uint32_t> entity_anchors;
-    if (!query_terms.empty()) {
+    // AR009: when sub-query coverage is active it *replaces* the AR007 entity
+    // heuristic. Both do "one anchor per fact", but the heuristic keys on token
+    // length (so the short keys "one"/"two" never qualify) and has no budget
+    // awareness: on an 8K prompt with 6 planted facts it pinned 10 blocks
+    // (320 tokens of a 429-token budget), which starved the relevance fill.
+    if (!query_terms.empty() && sub_idf.empty()) {
         const uint32_t df_cap = std::max<uint32_t>(2, n_blocks / 50);
         std::vector<const std::string*> specific;
         for (const auto& term : query_terms) {
@@ -658,9 +783,39 @@ Status BlockSelector::select(const std::vector<llama_token>& tokens,
         // win by a tokenisation accident, and anchoring on every template
         // hit drags competing answers into the context, which measurably
         // confuses the model ("vault 3" answered as "vault 1").
+        if (!sub_idf.empty()) {
+            // Multi-fact question: every requested fact gets its own anchor.
+            // Pinning all blocks of one term would represent a single fact and
+            // leave the rest of the answer outside the context.
+            const uint32_t phrase_budget = target / 2;
+            uint32_t used = 0;
+            for (size_t p = 0; p < sub_idf.size(); ++p) {
+                uint32_t best = n_blocks;
+                double best_score = 0.0;
+                for (uint32_t b = 0; b < n_blocks; ++b) {
+                    if (!sub_hit[p][b]) continue;
+                    // Pure facility location: sub-query p scores its own block.
+                    // Summing the other sub-queries' IDF made every sub pick
+                    // the same "richest" block, so the remaining facts fell
+                    // through to no anchor at all. Ties go to the block that is
+                    // most relevant to the whole question.
+                    const double score = sub_idf[p] + lexical[b];
+                    if (best == n_blocks || score > best_score) {
+                        best_score = score;
+                        best = b;
+                    }
+                }
+                if (best == n_blocks || phrase_anchors.count(best)) continue;
+                const uint32_t size = std::min(block_size, n_tokens - best * block_size);
+                if (used + size > phrase_budget && !phrase_anchors.empty()) continue;
+                phrase_anchors.insert(best);
+                used += size;
+            }
+        }
         std::string best_phrase;
         uint32_t best_df = 0;
         for (const auto& p : query_phrases) {
+            if (sub_idf.size() >= 2) break;
             const auto it = phrase_df.find(p);
             if (it == phrase_df.end() || it->second == 0) continue;
             if (best_phrase.empty() || it->second < best_df) {
@@ -745,6 +900,7 @@ Status BlockSelector::select(const std::vector<llama_token>& tokens,
         selected_blocks.insert(b);
         selected_tokens += std::min(block_size, n_tokens - b * block_size);
     }
+    for (uint32_t b : selected_blocks) mark_covered(b);
 
     // Incremental MMR: max_sim[b] tracks the highest similarity between b
     // and any selected block and is refreshed only when a block is added, so
@@ -792,7 +948,8 @@ Status BlockSelector::select(const std::vector<llama_token>& tokens,
         double best_score = 0.0;
         for (uint32_t b = 0; b < n_blocks; ++b) {
             if (selected_blocks.count(b)) continue;
-            const double score = adjusted[b] + (adjacent[b] ? kSpanGrowWeight : 0.0);
+            const double score = adjusted[b] + (adjacent[b] ? kSpanGrowWeight : 0.0) +
+                                 coverage_weight * block_covers(b);
             if (score > best_score || (score == best_score && best != n_blocks && b < best)) {
                 best_score = score;
                 best = b;
@@ -802,6 +959,7 @@ Status BlockSelector::select(const std::vector<llama_token>& tokens,
         selected_blocks.insert(best);
         selected_tokens += std::min(block_size, n_tokens - best * block_size);
         mark_adjacent(best);
+        mark_covered(best);
         for (uint32_t c = 0; c < n_blocks; ++c) {
             if (selected_blocks.count(c)) continue;
             const double j = jaccard(c, best);
@@ -813,6 +971,9 @@ Status BlockSelector::select(const std::vector<llama_token>& tokens,
     }
     for (uint32_t b = 0; b < n_blocks; ++b) {
         if (mmr_hit[b]) ++out->mmr_penalized;
+    }
+    for (size_t p = 0; p < sub_idf.size(); ++p) {
+        if (covered[p] > 0.0) ++out->coverage_queries;
     }
 
     const uint32_t limit = static_cast<uint32_t>(std::ceil(target * 1.05));

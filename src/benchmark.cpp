@@ -237,6 +237,7 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
     base.mmr_lambda = cfg.mmr_lambda;
     base.budget_curve = cfg.budget_curve;
     base.phrase_weight = cfg.phrase_weight;
+    base.coverage_weight = cfg.coverage_weight;
     base.portfolio_table = cfg.portfolio_table;
     if (!base.budget_curve.empty()) {
         BudgetCurve curve;
@@ -445,6 +446,7 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
                     sopts.mmr_threshold = run_cfg.mmr_threshold;
                     sopts.mmr_lambda = run_cfg.mmr_lambda;
                     sopts.phrase_weight = run_cfg.phrase_weight;
+                    sopts.coverage_weight = run_cfg.coverage_weight;
                     sopts.weights = run_cfg.weights;
                     // AR005: semantic-priority fusion defaults when the
                     // embedding engine is active and the user has not
@@ -902,6 +904,7 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
                     sample.anchor_blocks = selection.anchor_blocks;
                     sample.phrase_blocks = selection.phrase_blocks;
                     sample.specific_terms = selection.specific_terms;
+                    sample.coverage_queries = selection.coverage_queries;
                     sample.portfolio_choice = portfolio_choice;
                     sample.portfolio_reason = portfolio_reason;
                     sample.mmr_penalized = selection.mmr_penalized;

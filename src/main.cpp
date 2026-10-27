@@ -109,6 +109,8 @@ struct Args {
     bool portfolio_table_set = false;
     double phrase_weight = 0.0;
     bool phrase_weight_set = false;
+    double coverage_weight = -1.0;
+    bool coverage_weight_set = false;
     double anchor_ratio = 0.0;
     bool anchor_ratio_set = false;
     double anchor_stride_scale = 0.0;
@@ -148,6 +150,7 @@ void usage() {
         "  --budget-curve P  --anchor-ratio F  --anchor-stride-scale F\n"
         "  --mmr-lambda F  --mmr-threshold F   (AR007 admission controls)\n"
         "  --phrase-weight F  --portfolio P    (AR008 phrase + combination routing)\n"
+        "  --coverage-weight F                 (AR009 multi-fact coverage, 0 = off)\n"
         "  --draft-model M   --attn-top-k N  --attn-top-k-layers 4,8,16\n"
         "  --embedding-model P  (bge-small style GGUF; activates semantic gating)\n"
         "  --selector-w-lexical F  --selector-w-diversity F\n"
@@ -564,6 +567,12 @@ Status parse_args(int argc, char** argv, Args* args) {
             if (!st.ok()) return st;
             args->phrase_weight = std::stod(value);
             args->phrase_weight_set = true;
+        } else if (flag == "--coverage-weight") {
+            std::string value;
+            auto st = next(&value);
+            if (!st.ok()) return st;
+            args->coverage_weight = std::stod(value);
+            args->coverage_weight_set = true;
         } else if (flag == "--anchor-ratio") {
             std::string value;
             auto st = next(&value);
@@ -670,6 +679,7 @@ Status apply_common_config(const Args& args, Config* cfg) {
     if (args.budget_curve_set) cfg->budget_curve = args.budget_curve;
     if (args.portfolio_table_set) cfg->portfolio_table = args.portfolio_table;
     if (args.phrase_weight_set) cfg->phrase_weight = args.phrase_weight;
+    if (args.coverage_weight_set) cfg->coverage_weight = args.coverage_weight;
     if (args.anchor_ratio_set) cfg->anchor_ratio = args.anchor_ratio;
     if (args.anchor_stride_scale_set) cfg->anchor_stride_scale = args.anchor_stride_scale;
     if (args.mmr_lambda_set) cfg->mmr_lambda = args.mmr_lambda;
@@ -1214,6 +1224,7 @@ Status plan_command(const Args& args) {
     if (args.budget_curve_set) cfg.budget_curve = args.budget_curve;
     if (args.portfolio_table_set) cfg.portfolio_table = args.portfolio_table;
     if (args.phrase_weight_set) cfg.phrase_weight = args.phrase_weight;
+    if (args.coverage_weight_set) cfg.coverage_weight = args.coverage_weight;
     if (args.anchor_ratio_set) cfg.anchor_ratio = args.anchor_ratio;
     if (args.anchor_stride_scale_set) cfg.anchor_stride_scale = args.anchor_stride_scale;
     if (args.mmr_lambda_set) cfg.mmr_lambda = args.mmr_lambda;
@@ -1308,6 +1319,7 @@ Status bench_command(const Args& args) {
     bench.mmr_lambda = cfg.mmr_lambda;
     bench.budget_curve = cfg.budget_curve;
     bench.phrase_weight = cfg.phrase_weight;
+    bench.coverage_weight = cfg.coverage_weight;
     bench.portfolio_table = cfg.portfolio_table;
     bench.n_gpu_layers = cfg.n_gpu_layers;
     bench.out_dir = cfg.results_dir;
