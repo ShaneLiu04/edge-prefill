@@ -1,0 +1,12 @@
+# Keep shell/Python scripts LF so a Windows checkout still runs under WSL/Git
+# Bash. Without this, git's core.autocrlf rewrites repro.sh to CRLF and
+# `bash repro.sh` dies with "syntax error near $'\r'" (found while verifying a
+# fresh Gitee clone on AR010).
+*.sh            text eol=lf
+*.py            text eol=lf
+*.txt           text eol=lf
+*.csv           text eol=lf
+*.md            text eol=lf
+*.json          text eol=lf
+*.conf          text eol=lf
+CMakeLists.txt  text eol=lf

@@ -8,6 +8,7 @@
 #   ./repro.sh ar007    # AR007 acceptance campaign + expected gate (dense is slow)
 #   ./repro.sh ar008    # AR008 combination matrix + portfolio gate (dense is slow)
 #   ./repro.sh ar009    # AR009 multi-fact coverage ablation + expected gate
+#   ./repro.sh ar010    # AR010 evidence-first admission: matrix + table + gate
 #
 # Every step is fail-fast (set -euo pipefail) and prints the exact command
 # it runs. Models are downloaded with SHA256 verification into ./models
@@ -201,6 +202,29 @@ case "${SUITE}" in
             || fail "routed combination is worse than the best fixed combination"
         OUT="${ROOT}/benchmarks/results/ar008-portfolio"
         ;;
+    ar010)
+        # AR010 FR-4: measure the five-arm matrix, derive the routing table from
+        # it and gate the routed result (Pareto + injected degraded arm).
+        python3 benchmarks/scripts/ar010_matrix.py \
+            --bin "${BIN}" --model "${MAIN_MODEL}" \
+            --out "${ROOT}/benchmarks/results/ar010-evidence-first"
+        python3 benchmarks/scripts/ar010_matrix.py \
+            --bin "${BIN}" --model "${MAIN_MODEL}" \
+            --out "${ROOT}/benchmarks/results/ar010-evidence-first" \
+            --datasets deep/multifact8k,deep/multifact8k-hard \
+            --arms selection,selection-prior,gate-p16,gate-p24-local32 \
+            --flat-budget 0.05 --max-new-tokens 48
+        python3 benchmarks/scripts/ar010_report.py \
+            "${ROOT}/benchmarks/results/ar010-evidence-first"
+        python3 benchmarks/scripts/ar010_report.py \
+            "${ROOT}/benchmarks/results/ar010-evidence-first" --gate \
+            || fail "routed arm is worse than the best fixed arm"
+        python3 benchmarks/scripts/ar010_report.py \
+            "${ROOT}/benchmarks/results/ar010-evidence-first" --gate \
+            --inject deep/len32k:selection-prior > /dev/null 2>&1 \
+            && fail "gate did not reject the injected degraded arm"
+        OUT="${ROOT}/benchmarks/results/ar010-evidence-first"
+        ;;
     ar009)
         # AR009 FR-3: regenerate the deterministic multi-fact families, run the
         # coverage ablation (AR008 ranking vs coverage-fair fill) and gate the
@@ -221,7 +245,7 @@ case "${SUITE}" in
         OUT="${ROOT}/benchmarks/results/ar009-multifact"
         ;;
     *)
-        fail "unknown suite: ${SUITE} (smoke|matrix|full|budget|ar007|ar008|ar009)"
+        fail "unknown suite: ${SUITE} (smoke|matrix|full|budget|ar007|ar008|ar009|ar010)"
         ;;
 esac
 
@@ -236,7 +260,7 @@ fi
 
 if [[ "${CHECK_EXPECTED}" == "1" && "${SUITE}" != "smoke" && "${SUITE}" != "budget" \
       && "${SUITE}" != "ar007" && "${SUITE}" != "ar008" \
-      && "${SUITE}" != "ar009" ]]; then
+      && "${SUITE}" != "ar009" && "${SUITE}" != "ar010" ]]; then
     step "expected-results gate"
     python3 benchmarks/scripts/check_expected.py \
         --matrix "${OUT}/matrix.csv" \

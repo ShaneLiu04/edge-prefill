@@ -65,6 +65,10 @@ struct Selection {
     // AR009 FR-2 audit: discriminative sub-queries (requested facts) whose
     // evidence the admission actually covered.
     uint32_t coverage_queries = 0;
+    // AR010 FR-3 audit: selected blocks that carry evidence, and why the fill
+    // stopped ("budget" | "evidence-exhausted" | "no-signal" | "dense").
+    uint32_t evidence_blocks = 0;
+    std::string stop_reason = "budget";
     // AR008 FR-2 profile input: top-1 lexical score over the lexical sum.
     // A high value means the evidence is concentrated in one block, which
     // is exactly when selection-level sparsity is safe.
@@ -100,6 +104,13 @@ struct SelectionOptions {
     // the fill score). 0 disables multi-fact coverage and restores the AR008
     // ranking bit-for-bit; only multi-term queries are affected either way.
     double coverage_weight = 3.0;
+    // AR010 FR-1: priors (position/diversity) may only order blocks that carry
+    // evidence. 1 = saturating gate (default), 0 = legacy additive fusion.
+    double prior_gate = 1.0;
+    // AR010 FR-2: allow prior-only blocks to fill the remaining budget after
+    // the evidence is exhausted. 0 makes the admission content-sized: the
+    // selection stops as soon as no block carries evidence.
+    double fill_priors = 1.0;
     SelectorWeights weights;
 };
 

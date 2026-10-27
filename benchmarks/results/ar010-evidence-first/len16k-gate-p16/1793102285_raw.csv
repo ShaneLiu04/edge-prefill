@@ -1,0 +1,5 @@
+task,case,ttft_ms,e2e_ms,prefill_tps,kv_bytes,quality,dense,prompt_tokens,selected_tokens,mode,budget,attn_top_k,repeats,ppl_dense,ppl_sparse,query_gating,qg_groups,score_source,semantic_score_ms,draft_score_ms,qg_source,budget_source,anchor_blocks,mmr_penalized,phrase_blocks,specific_terms,coverage_queries,evidence_blocks,stop_reason,portfolio_choice,portfolio_reason
+niah,niah-01@15523,5120.047374,5527.967732,221.6962281,32557044,1,0,15567,1135,balanced,0.25,0,1,0,0,1,1,lexical,0,0,attention-bound,override,36,0,3,4,0,4,evidence-exhausted,selection,disabled
+niah,niah-02@15507,5056.991572,5543.928566,221.2855763,32098100,1,0,15551,1119,balanced,0.25,0,1,0,0,1,1,lexical,0,0,attention-bound,override,35,0,2,4,0,3,evidence-exhausted,selection,disabled
+niah,niah-03@15559,5170.951709,5564.167434,220.2776504,32671780,1,0,15603,1139,balanced,0.25,1107,1,0,0,1,1,lexical,0,0,attention-bound,override,35,0,3,4,2,4,evidence-exhausted,selection,disabled
+niah,niah-04@15542,5011.962366,5409.226882,223.8723776,32184152,1,0,15586,1122,balanced,0.25,0,1,0,0,1,1,lexical,0,0,attention-bound,override,36,0,2,4,0,3,evidence-exhausted,selection,disabled

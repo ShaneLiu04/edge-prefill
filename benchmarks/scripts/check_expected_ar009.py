@@ -26,7 +26,8 @@ import sys
 
 def read_csv(path):
     with open(path, newline="", encoding="utf-8") as f:
-        return list(csv.DictReader(f))
+        lines = [ln for ln in f if not ln.lstrip().startswith("#")]
+    return list(csv.DictReader(lines))
 
 
 def main(argv):

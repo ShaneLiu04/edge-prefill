@@ -94,13 +94,23 @@ double cosine(const Vec64& a, const Vec64& b) {
 
 void minmax(std::vector<double>* values) {
     if (values->empty()) return;
-    const auto [lo, hi] = std::minmax_element(values->begin(), values->end());
-    const double range = *hi - *lo;
+    const auto [lo_it, hi_it] = std::minmax_element(values->begin(), values->end());
+    // The bounds must be copied *before* the loop: they are iterators into the
+    // very vector that is being overwritten. Reading `*lo_it` inside the loop
+    // returned 0 as soon as the minimum element had been normalised, so every
+    // element after it was mapped to `v / range` instead of `(v - lo) / range`
+    // and the signal was no longer in [0, 1] (measured: diversity up to 3.2,
+    // position up to 1.16 at 32K). The over-ranged priors then outranked the
+    // lexical evidence and the 32K admission spent 62% of its budget on
+    // zero-evidence filler blocks.
+    const double lo = *lo_it;
+    const double hi = *hi_it;
+    const double range = hi - lo;
     if (range < 1e-12) {
         for (double& v : *values) v = 0.5;
         return;
     }
-    for (double& v : *values) v = (v - *lo) / range;
+    for (double& v : *values) v = (v - lo) / range;
 }
 
 std::string reason_for(bool dense, double budget) {
@@ -204,6 +214,7 @@ Status BlockSelector::select(const std::vector<llama_token>& tokens,
 
     if (n_tokens < opts.min_dense_tokens || opts.budget >= 0.95) {
         out->dense = true;
+        out->stop_reason = "dense";
         out->reason = reason_for(true, opts.budget);
         out->selected_tokens = n_tokens;
         out->token_indices.resize(n_tokens);
@@ -540,6 +551,28 @@ Status BlockSelector::select(const std::vector<llama_token>& tokens,
         }
     }
 
+    // AR010 FR-1: split the block score into two kinds of quantity.
+    //
+    //   evidence = does this block contain what the question asks for?
+    //   prior    = is it a good place to put attention (sink/recent, dense text)?
+    //
+    // Piling both into one additive score lets a prior *create* admission: at
+    // 32K the diversity/position terms alone pushed 30 zero-evidence filler
+    // blocks into a 50-block selection (62% of the budget). Priors now only
+    // order blocks that already carry evidence, with a saturating gain so that
+    // "almost no evidence" buys "almost no prior".
+    constexpr double kPriorSat = 0.25;
+    std::vector<double> evidence(n_blocks, 0.0);
+    std::vector<double> prior(n_blocks, 0.0);
+    double evidence_max = 0.0;
+    for (uint32_t b = 0; b < n_blocks; ++b) {
+        evidence[b] = weights.lexical * lexical[b] +
+                      (draft_enabled ? weights.draft * draft_scores[b] : 0.0) +
+                      opts.phrase_weight * phrase[b];
+        prior[b] = weights.diversity * diversity[b] + weights.position * position[b];
+        evidence_max = std::max(evidence_max, evidence[b]);
+    }
+    const double sat_ref = std::max(1e-12, kPriorSat * evidence_max);
     std::vector<double> fused(n_blocks, 0.0);
     for (uint32_t b = 0; b < n_blocks; ++b) {
         out->signals[b].lexical = lexical[b];
@@ -547,9 +580,10 @@ Status BlockSelector::select(const std::vector<llama_token>& tokens,
         out->signals[b].position = position[b];
         out->signals[b].draft = draft_enabled ? draft_scores[b] : 0.0;
         out->signals[b].phrase = phrase[b];
-        fused[b] = weights.lexical * lexical[b] + weights.diversity * diversity[b] +
-                   weights.position * position[b] + weights.draft * draft_scores[b] +
-                   opts.phrase_weight * phrase[b];
+        const double gate = opts.prior_gate > 0.5
+                                    ? std::min(1.0, evidence[b] / sat_ref)
+                                    : 1.0;
+        fused[b] = evidence[b] + gate * prior[b];
         out->signals[b].fused = fused[b];
     }
 
@@ -902,6 +936,7 @@ Status BlockSelector::select(const std::vector<llama_token>& tokens,
     }
     for (uint32_t b : selected_blocks) mark_covered(b);
 
+
     // Incremental MMR: max_sim[b] tracks the highest similarity between b
     // and any selected block and is refreshed only when a block is added, so
     // the fill is O(n_blocks^2) set operations instead of O(n_blocks^3).
@@ -943,6 +978,12 @@ Status BlockSelector::select(const std::vector<llama_token>& tokens,
     };
     for (uint32_t b : selected_blocks) mark_adjacent(b);
 
+    // AR010 FR-2: the fill has an explicit stopping rule instead of relying on
+    // "the best score happens to be exactly 0". "Fill the budget" used to be a
+    // side effect of numerically broken priors; with correct normalisation the
+    // same loop stopped at 210/443 tokens and quality collapsed (4K 1.000 ->
+    // 0.500, multi-fact 0.878 -> 0.579).
+    const bool fill_priors = opts.fill_priors > 0.5;
     while (selected_tokens < target) {
         uint32_t best = n_blocks;
         double best_score = 0.0;
@@ -955,7 +996,14 @@ Status BlockSelector::select(const std::vector<llama_token>& tokens,
                 best = b;
             }
         }
-        if (best == n_blocks || best_score <= 0.0) break;
+        if (best == n_blocks) {
+            out->stop_reason = "no-signal";
+            break;
+        }
+        if (evidence[best] <= 0.0 && !fill_priors) {
+            out->stop_reason = "evidence-exhausted";
+            break;
+        }
         selected_blocks.insert(best);
         selected_tokens += std::min(block_size, n_tokens - best * block_size);
         mark_adjacent(best);
@@ -975,6 +1023,10 @@ Status BlockSelector::select(const std::vector<llama_token>& tokens,
     for (size_t p = 0; p < sub_idf.size(); ++p) {
         if (covered[p] > 0.0) ++out->coverage_queries;
     }
+    for (uint32_t b : selected_blocks) {
+        if (evidence[b] > 0.0) ++out->evidence_blocks;
+    }
+    if (selected_tokens >= target) out->stop_reason = "budget";
 
     const uint32_t limit = static_cast<uint32_t>(std::ceil(target * 1.05));
     if (selected_tokens > limit) {

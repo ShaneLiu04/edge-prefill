@@ -111,6 +111,10 @@ struct Args {
     bool phrase_weight_set = false;
     double coverage_weight = -1.0;
     bool coverage_weight_set = false;
+    double prior_gate = -1.0;
+    bool prior_gate_set = false;
+    double fill_priors = -1.0;
+    bool fill_priors_set = false;
     double anchor_ratio = 0.0;
     bool anchor_ratio_set = false;
     double anchor_stride_scale = 0.0;
@@ -573,6 +577,18 @@ Status parse_args(int argc, char** argv, Args* args) {
             if (!st.ok()) return st;
             args->coverage_weight = std::stod(value);
             args->coverage_weight_set = true;
+        } else if (flag == "--prior-gate") {
+            std::string value;
+            auto st = next(&value);
+            if (!st.ok()) return st;
+            args->prior_gate = std::stod(value);
+            args->prior_gate_set = true;
+        } else if (flag == "--fill-priors") {
+            std::string value;
+            auto st = next(&value);
+            if (!st.ok()) return st;
+            args->fill_priors = std::stod(value);
+            args->fill_priors_set = true;
         } else if (flag == "--anchor-ratio") {
             std::string value;
             auto st = next(&value);
@@ -680,6 +696,8 @@ Status apply_common_config(const Args& args, Config* cfg) {
     if (args.portfolio_table_set) cfg->portfolio_table = args.portfolio_table;
     if (args.phrase_weight_set) cfg->phrase_weight = args.phrase_weight;
     if (args.coverage_weight_set) cfg->coverage_weight = args.coverage_weight;
+    if (args.prior_gate_set) cfg->prior_gate = args.prior_gate;
+    if (args.fill_priors_set) cfg->fill_priors = args.fill_priors;
     if (args.anchor_ratio_set) cfg->anchor_ratio = args.anchor_ratio;
     if (args.anchor_stride_scale_set) cfg->anchor_stride_scale = args.anchor_stride_scale;
     if (args.mmr_lambda_set) cfg->mmr_lambda = args.mmr_lambda;
@@ -1225,6 +1243,8 @@ Status plan_command(const Args& args) {
     if (args.portfolio_table_set) cfg.portfolio_table = args.portfolio_table;
     if (args.phrase_weight_set) cfg.phrase_weight = args.phrase_weight;
     if (args.coverage_weight_set) cfg.coverage_weight = args.coverage_weight;
+    if (args.prior_gate_set) cfg.prior_gate = args.prior_gate;
+    if (args.fill_priors_set) cfg.fill_priors = args.fill_priors;
     if (args.anchor_ratio_set) cfg.anchor_ratio = args.anchor_ratio;
     if (args.anchor_stride_scale_set) cfg.anchor_stride_scale = args.anchor_stride_scale;
     if (args.mmr_lambda_set) cfg.mmr_lambda = args.mmr_lambda;
@@ -1320,6 +1340,8 @@ Status bench_command(const Args& args) {
     bench.budget_curve = cfg.budget_curve;
     bench.phrase_weight = cfg.phrase_weight;
     bench.coverage_weight = cfg.coverage_weight;
+    bench.prior_gate = cfg.prior_gate;
+    bench.fill_priors = cfg.fill_priors;
     bench.portfolio_table = cfg.portfolio_table;
     bench.n_gpu_layers = cfg.n_gpu_layers;
     bench.out_dir = cfg.results_dir;

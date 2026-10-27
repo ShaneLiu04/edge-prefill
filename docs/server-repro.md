@@ -265,7 +265,66 @@ python3 benchmarks/scripts/check_expected_ar009.py \
 模型规模更大时 `q` 的绝对值会变，但"cw=3 明显高于 cw=0"这一**同条件对比**
 应保持；若不再成立，先查 `coverage_queries` 是否为 0（说明子查询没提取出来）。
 
-## 10. 报告模板
+## 10. AR010：证据优先准入与组合再择优
+
+### 10.1 一条命令
+
+```bash
+./repro.sh ar010     # 五臂矩阵 + 重新生成组合表 + Pareto 闸门 + 注入自测
+```
+
+### 10.2 手动跑（推荐在大机器/GPU 上改规模）
+
+```bash
+# 1) 五臂矩阵（4K/8K/16K/32K/多针；dense 每数据集一次）
+python3 benchmarks/scripts/ar010_matrix.py \
+  --bin build/edge-prefill --model models/qwen2.5-1.5b-instruct-q4_k_m.gguf \
+  --out benchmarks/results/ar010-evidence-first --force
+
+# 2) 多事实族（固定 budget=0.05，答案需要 48 token）
+python3 benchmarks/scripts/ar010_matrix.py \
+  --bin build/edge-prefill --model models/qwen2.5-1.5b-instruct-q4_k_m.gguf \
+  --out benchmarks/results/ar010-evidence-first \
+  --datasets deep/multifact8k,deep/multifact8k-hard \
+  --arms selection,selection-prior,gate-p16,gate-p24-local32 \
+  --flat-budget 0.05 --max-new-tokens 48
+
+# 3) 生成表并过闸门
+python3 benchmarks/scripts/ar010_report.py benchmarks/results/ar010-evidence-first
+python3 benchmarks/scripts/ar010_report.py benchmarks/results/ar010-evidence-first --gate
+python3 benchmarks/scripts/ar010_report.py benchmarks/results/ar010-evidence-first \
+  --gate --inject deep/len32k:selection-prior   # 必须 FAIL
+```
+
+### 10.3 GPU（CUDA）复现
+
+```bash
+cmake -S . -B build-cuda -DCMAKE_BUILD_TYPE=Release -DGGML_CUDA=ON
+cmake --build build-cuda -j
+
+# 稀疏 + 门控一致性（同一 conf，--n-gpu-layers 99 打开全量卸载）
+./build-cuda/edge-prefill bench --config <conf> --model M.gguf \
+  --data-dir benchmarks/data/explen/len8k --out /tmp/gpu-check --n-gpu-layers 99
+```
+
+判读：`quality` 与 `selected_tokens` 必须与 CPU 完全一致（选择在主机侧），
+`qg_source` 必须是 `attention-bound`。本机实测（RTX 5000 16GB）稀疏 4K 与
+门控 8K 均一致，GPU 快 4.8-5.5×；dense 路径在 CUDA 上会切成数百个 graph split，
+未纳入结论。
+
+### 10.4 判读标准
+
+| 指标 | 通过线 | 说明 |
+|---|---|---|
+| 4K/8K/16K/多针 q | =1.000 | 不得为了省 token 掉质量 |
+| 32K q（无门控） | ≥0.99 | AR009 为 0.875，必须靠门控 |
+| 32K TTFT | 低于门控臂 | 本机 2260 ms vs 5443 ms |
+| 多事实 easy/hard | ≥0.80 / ≥0.60 | 更正后的 AR009 地板 |
+| 组合闸门 | PASS 7/7 | 路由不劣于最佳固定臂 |
+| 注入劣化 | 必须 FAIL | `--inject deep/len32k:selection-prior` |
+| GPU 一致性 | q/sel 逐例一致 | 选择在主机侧，图侧需 `qg_source` 正确 |
+
+## 11. 报告模板
 
 ```
 机器: <CPU/GPU, 核心数, 内存>, 会话: <日期>

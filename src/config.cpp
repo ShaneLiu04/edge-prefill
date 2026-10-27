@@ -305,6 +305,16 @@ Status parse_config_file(const std::string& path, Config* out) {
                                      "coverage_weight must be in [0,10]");
             }
             out->coverage_weight = d;
+        } else if (key == "prior_gate") {
+            if (!parse_double(value, &d) || !(d >= 0.0 && d <= 1.0)) {
+                return Status::error(ErrorCode::InvalidArgument, "prior_gate must be in [0,1]");
+            }
+            out->prior_gate = d;
+        } else if (key == "fill_priors") {
+            if (!parse_double(value, &d) || !(d >= 0.0 && d <= 1.0)) {
+                return Status::error(ErrorCode::InvalidArgument, "fill_priors must be in [0,1]");
+            }
+            out->fill_priors = d;
         } else if (key == "portfolio" || key == "portfolio_table") {
             out->portfolio_table = value;
         } else if (key == "budget_curve") {

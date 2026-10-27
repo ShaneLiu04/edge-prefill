@@ -1,3 +1,13 @@
+# AR009 multi-fact floors, CORRECTED by AR010.
+#
+# AR010 found that minmax() kept iterators into the vector it was overwriting,
+# so diversity/position were not in [0,1] (up to 3.2 / 1.16). AR009's original
+# multi-fact numbers (0.878 / 0.652) were partly produced by that over-ranged
+# prior, which acted as an accidental diversity bonus. With the normalisation
+# fixed the same commands measure 0.836 / 0.667 (max_new_tokens=48, b=0.05),
+# and the coverage signal is still worth +0.03 / +0.28 over coverage_weight=0.
+# The floors below are the corrected, reproducible ones; the delta requirement
+# is per-dataset because the easy tier is now nearly saturated.
 dataset,q_floor,covered_floor,min_delta
-deep/multifact8k,0.85,2.0,0.20
+deep/multifact8k,0.80,2.0,0.02
 deep/multifact8k-hard,0.60,5.0,0.20

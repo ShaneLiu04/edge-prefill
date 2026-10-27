@@ -1,0 +1,17 @@
+task,case,ttft_ms,e2e_ms,prefill_tps,kv_bytes,quality,dense,prompt_tokens,selected_tokens,mode,budget,attn_top_k,repeats,ppl_dense,ppl_sparse,query_gating,qg_groups,score_source,semantic_score_ms,draft_score_ms,qg_source,budget_source,anchor_blocks,mmr_penalized,phrase_blocks,specific_terms,coverage_queries,evidence_blocks,stop_reason,portfolio_choice,portfolio_reason
+niah,niah-01@7762,51328.48329,52085.18708,152.0817845,223908008,1,1,7806,7806,dense,1,0,1,0,0,0,0,lexical,0,0,,override,0,0,0,0,0,0,dense,dense,disabled
+niah,niah-01@7762,52373.01141,53188.9917,149.0480259,223908008,1,1,7806,7806,dense,1,0,1,0,0,0,0,lexical,0,0,,override,0,0,0,0,0,0,dense,dense,disabled
+niah,niah-01@7762,53969.61266,54807.31425,144.6385513,223908008,1,1,7806,7806,dense,1,0,1,0,0,0,0,lexical,0,0,,override,0,0,0,0,0,0,dense,dense,disabled
+niah,niah-01@7762,51299.94054,52030.84795,152.1657033,223908008,1,1,7806,7806,dense,1,0,1,0,0,0,0,lexical,0,0,,override,0,0,0,0,0,0,dense,dense,disabled
+niah,niah-02@7782,50560.2286,51373.28382,154.787418,224481688,1,1,7826,7826,dense,1,0,1,0,0,0,0,lexical,0,0,,override,0,0,0,0,0,0,dense,dense,disabled
+niah,niah-02@7782,51830.99158,52655.66518,150.9925668,224481688,1,1,7826,7826,dense,1,0,1,0,0,0,0,lexical,0,0,,override,0,0,0,0,0,0,dense,dense,disabled
+niah,niah-02@7782,50093.05359,50885.30819,156.231191,224481688,1,1,7826,7826,dense,1,0,1,0,0,0,0,lexical,0,0,,override,0,0,0,0,0,0,dense,dense,disabled
+niah,niah-02@7782,50199.37141,50904.50818,155.9001348,224481688,1,1,7826,7826,dense,1,0,1,0,0,0,0,lexical,0,0,,override,0,0,0,0,0,0,dense,dense,disabled
+niah,niah-03@7768,52065.52885,52779.53442,150.0435207,224080112,1,1,7812,7812,dense,1,0,1,0,0,0,0,lexical,0,0,,override,0,0,0,0,0,0,dense,dense,disabled
+niah,niah-03@7768,48950.51369,49642.7225,159.5917263,224080112,1,1,7812,7812,dense,1,0,1,0,0,0,0,lexical,0,0,,override,0,0,0,0,0,0,dense,dense,disabled
+niah,niah-03@7768,50176.92843,50857.96313,155.6909652,224080112,1,1,7812,7812,dense,1,0,1,0,0,0,0,lexical,0,0,,override,0,0,0,0,0,0,dense,dense,disabled
+niah,niah-03@7768,49472.45244,50189.61219,157.9079916,224080112,1,1,7812,7812,dense,1,0,1,0,0,0,0,lexical,0,0,,override,0,0,0,0,0,0,dense,dense,disabled
+niah,niah-04@7760,48420.61554,49216.27241,161.1729724,223850640,1,1,7804,7804,dense,1,0,1,0,0,0,0,lexical,0,0,,override,0,0,0,0,0,0,dense,dense,disabled
+niah,niah-04@7760,49382.31365,50264.93938,158.0341043,223850640,1,1,7804,7804,dense,1,0,1,0,0,0,0,lexical,0,0,,override,0,0,0,0,0,0,dense,dense,disabled
+niah,niah-04@7760,51519.86478,52291.27596,151.4773486,223850640,1,1,7804,7804,dense,1,0,1,0,0,0,0,lexical,0,0,,override,0,0,0,0,0,0,dense,dense,disabled
+niah,niah-04@7760,48946.51303,49636.2137,159.4412968,223850640,1,1,7804,7804,dense,1,0,1,0,0,0,0,lexical,0,0,,override,0,0,0,0,0,0,dense,dense,disabled

@@ -1,0 +1,8 @@
+default = selection
+deep/len32k = selection
+deep/multifact8k = selection
+deep/multifact8k-hard = gate-p16
+deep/multineedle = selection
+explen/len16k = selection
+explen/len4k = selection
+explen/len8k = selection

@@ -62,6 +62,9 @@ struct Config {
     double phrase_weight = 0.50;
     // AR009 FR-2: multi-fact coverage weight (0 = AR008 selection exactly).
     double coverage_weight = 3.0;
+    // AR010 FR-1/FR-2: evidence-gated priors and content-sized admission.
+    double prior_gate = 1.0;
+    double fill_priors = 1.0;
     // AR008 FR-2: measured execution-combination table. Empty keeps the
     // configured (or default) path — routing is opt-in, exactly like the
     // budget curve.

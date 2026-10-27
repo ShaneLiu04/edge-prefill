@@ -1,0 +1,7 @@
+task,case,ttft_ms,e2e_ms,prefill_tps,kv_bytes,quality,dense,prompt_tokens,selected_tokens,mode,budget,attn_top_k,repeats,ppl_dense,ppl_sparse,query_gating,qg_groups,score_source,semantic_score_ms,draft_score_ms,qg_source,budget_source,anchor_blocks,mmr_penalized,phrase_blocks,specific_terms,coverage_queries,evidence_blocks,stop_reason,portfolio_choice,portfolio_reason
+niah,mn-01-n1@7803,2773.470103,3860.289788,140.9983549,11216148,1,0,7847,391,balanced,0.05,0,1,0,0,0,0,lexical,0,0,,model,8,0,5,4,0,6,budget,selection,disabled
+niah,mn-01-n2@7803,2711.846226,4028.498107,144.1889281,11216148,1,0,7847,391,balanced,0.05,0,1,0,0,0,0,lexical,0,0,,model,9,0,5,4,0,6,budget,selection,disabled
+niah,mn-01-n3@7803,2480.189374,4043.98677,157.6564589,11216148,1,0,7847,391,balanced,0.05,0,1,0,0,0,0,lexical,0,0,,model,9,0,5,4,0,6,budget,selection,disabled
+niah,mn-02-n4@7823,2717.622727,4227.15028,151.2414494,11789828,1,0,7867,411,balanced,0.05,0,1,0,0,0,0,lexical,0,0,,model,7,0,4,4,0,6,budget,selection,disabled
+niah,mn-02-n5@7823,2760.740483,3927.870207,148.8795995,11789828,1,0,7867,411,balanced,0.05,0,1,0,0,0,0,lexical,0,0,,model,9,0,5,4,0,6,budget,selection,disabled
+niah,mn-02-n6@7823,3939.381475,7788.079228,104.3342901,11789828,1,0,7867,411,balanced,0.05,0,1,0,0,0,0,lexical,0,0,,model,8,0,4,4,0,6,budget,selection,disabled

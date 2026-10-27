@@ -1,5 +1,14 @@
 # AR009 acceptance: multi-fact coverage admission
 
+> **Correction from AR010 (2026-10-27).** AR010 found that `minmax()` kept
+> iterators into the vector it was overwriting, so `diversity`/`position` were
+> not in [0,1] (up to 3.2 / 1.16). Part of the gain reported below came from
+> that over-ranged prior. With the normalisation fixed, the same commands
+> measure **0.836 / 0.667** (versus 0.878 / 0.652 below), and the coverage
+> signal is still worth +0.03 / +0.28 over `coverage_weight=0`. The corrected
+> floors live in `benchmarks/matrix/multifact/expected_ar009.csv`; see
+> `benchmarks/results/ar010-evidence-first/REPORT.md` section 5.
+
 Every number comes from one session on the same host (Xeon 6234, 16 threads,
 Qwen2.5-1.5B-Instruct Q4_K_M, `max_new_tokens=48`, `warmup=0`, `repeats=1`),
 `budget=0.05`, `phrase_weight=0.5`. Absolute TTFT varies across sessions on this

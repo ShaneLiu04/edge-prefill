@@ -65,6 +65,9 @@ struct Sample {
     // AR009 FR-2 audit: requested facts (rare query terms) whose evidence the
     // admission actually covered. 0 on single-fact prompts, where coverage is off.
     uint32_t coverage_queries = 0;
+    // AR010 FR-3 audit.
+    uint32_t evidence_blocks = 0;
+    std::string stop_reason = "budget";
     std::string portfolio_choice = "none";
     std::string portfolio_reason;
 };

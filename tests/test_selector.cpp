@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <numeric>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -595,4 +596,98 @@ TEST_CASE(selector_coverage_is_noop_for_single_fact) {
     CHECK_EQ(on.coverage_queries, 0u);
     CHECK_EQ(on.token_indices, off.token_indices);
     CHECK_EQ(on.selected_tokens, off.selected_tokens);
+}
+
+// AR010 FR-1: every signal must be min-max normalised into [0,1]. The previous
+// implementation kept iterators into the vector it was overwriting, so the
+// lower bound became 0 as soon as the minimum element had been normalised and
+// the signal was mapped to v/range instead of (v-lo)/range (measured: diversity
+// up to 3.2, position up to 1.16 at 32K). The over-ranged priors then outranked
+// lexical evidence and 62% of the 32K budget went to zero-evidence blocks.
+TEST_CASE(selector_signals_are_bounded_after_normalisation) {
+    constexpr uint32_t n = 8192;
+    std::vector<llama_token> tokens(n);
+    std::vector<std::string> pieces(n, "filler");
+    for (uint32_t i = 0; i < n; ++i) tokens[i] = static_cast<llama_token>(i % 1000);
+    // Evidence spread unevenly so the minimum is not the first element.
+    pieces[17 * 32 + 3] = "needle";
+    pieces[90 * 32 + 7] = "needle";
+    pieces[150 * 32 + 1] = "needle";
+
+    Selection sel;
+    BlockSelector selector;
+    CHECK_OK(selector.select(tokens, "needle", pieces, options(0.10), nullptr, &sel));
+    CHECK(!sel.signals.empty());
+    double max_seen = 0.0;
+    for (const auto& sig : sel.signals) {
+        CHECK(sig.lexical >= -1e-9 && sig.lexical <= 1.0 + 1e-9);
+        CHECK(sig.diversity >= -1e-9 && sig.diversity <= 1.0 + 1e-9);
+        CHECK(sig.position >= -1e-9 && sig.position <= 1.0 + 1e-9);
+        CHECK(sig.phrase >= -1e-9 && sig.phrase <= 1.0 + 1e-9);
+        max_seen = std::max(max_seen, sig.lexical);
+    }
+    CHECK(max_seen > 0.999);  // the max of a normalised signal is exactly 1
+}
+
+// AR010 FR-2: with fill_priors=0 the admission is content-sized. Every block
+// that is not a structural anchor must carry evidence, and the fill reports why
+// it stopped instead of silently relying on "the best score happens to be 0".
+TEST_CASE(selector_content_sized_admission_stops_on_evidence) {
+    constexpr uint32_t n = 8192;
+    std::vector<llama_token> tokens(n);
+    std::vector<std::string> pieces(n, "filler");
+    for (uint32_t i = 0; i < n; ++i) tokens[i] = static_cast<llama_token>(i % 1000);
+    pieces[20 * 32 + 4] = "needle";
+
+    auto opts = options(0.20);  // 1638 tokens: far more than the evidence needs
+    opts.fill_priors = 0.0;
+    opts.prior_gate = 1.0;
+    Selection fit;
+    BlockSelector selector;
+    CHECK_OK(selector.select(tokens, "needle", pieces, opts, nullptr, &fit));
+    CHECK_EQ(fit.stop_reason, "evidence-exhausted");
+    CHECK(fit.selected_tokens < static_cast<uint32_t>(std::ceil(n * 0.20)));
+    CHECK(fit.evidence_blocks >= 1u);
+    std::set<uint32_t> anchors(fit.mandatory_blocks.begin(), fit.mandatory_blocks.end());
+    for (uint32_t b : fit.block_indices) {
+        if (anchors.count(b)) continue;
+        CHECK(fit.signals[b].lexical > 0.0 || fit.signals[b].phrase > 0.0);
+    }
+
+    // fill_priors=1 keeps the AR007 contract: the budget is a quota and is
+    // filled with positional/coverage sampling after the evidence is gone.
+    auto qopts = opts;
+    qopts.fill_priors = 1.0;
+    Selection quota;
+    CHECK_OK(selector.select(tokens, "needle", pieces, qopts, nullptr, &quota));
+    CHECK_EQ(quota.stop_reason, "budget");
+    CHECK(quota.selected_tokens > fit.selected_tokens);
+    CHECK(quota.selected_tokens >= static_cast<uint32_t>(std::ceil(n * 0.20 * 0.95)));
+}
+
+// AR010 FR-1: the prior gate must not change *whether* evidence is admitted,
+// only how the remaining budget is ordered; with prior_gate=0 the same
+// evidence block is still selected.
+TEST_CASE(selector_prior_gate_keeps_evidence_admitted) {
+    constexpr uint32_t n = 8192;
+    std::vector<llama_token> tokens(n);
+    std::vector<std::string> pieces(n, "filler");
+    for (uint32_t i = 0; i < n; ++i) tokens[i] = static_cast<llama_token>(i % 1000);
+    pieces[200 * 32 + 4] = "needle";  // near the tail: high positional prior
+
+    auto opts = options(0.05);
+    opts.fill_priors = 0.0;
+    Selection gated;
+    BlockSelector selector;
+    CHECK_OK(selector.select(tokens, "needle", pieces, opts, nullptr, &gated));
+    auto legacy = opts;
+    legacy.prior_gate = 0.0;
+    Selection plain;
+    CHECK_OK(selector.select(tokens, "needle", pieces, legacy, nullptr, &plain));
+    const bool gated_has = std::find(gated.block_indices.begin(), gated.block_indices.end(), 200u)
+                           != gated.block_indices.end();
+    const bool plain_has = std::find(plain.block_indices.begin(), plain.block_indices.end(), 200u)
+                           != plain.block_indices.end();
+    CHECK(gated_has);
+    CHECK(plain_has);
 }

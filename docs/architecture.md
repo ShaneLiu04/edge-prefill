@@ -101,6 +101,32 @@ contiguous) and incremental MMR (near-duplicate blocks are penalised only when
 their Jaccard similarity exceeds `mmr_threshold`). `Selection.anchor_blocks`
 and `Selection.mmr_penalized` are printed into `raw.csv` as audit columns.
 
+## Evidence-first admission (AR010)
+
+The block score used to be one additive mixture of five signals, so a *prior*
+(recency, information density) could admit a block on its own. A 32K audit found
+62% of the budget going to blocks with zero lexical/phrase overlap. The root
+cause was a normalisation bug (`minmax` kept iterators into the vector it was
+overwriting, so diversity reached 3.2 instead of 1.0) plus a fill loop whose
+exit condition was "the best score is exactly zero" - i.e. "fill the budget"
+was a side effect rather than a policy.
+
+The score is now split:
+
+```text
+evidence = w_lex*lexical + w_phrase*phrase + w_draft*draft
+prior    = w_div*diversity + w_pos*position
+fused    = evidence + sat(evidence)*prior          sat(e) = min(1, e/(0.25*e_max))
+```
+
+`prior_gate=0` restores the additive mixture. The fill has an explicit
+`stop_reason` (`budget` / `evidence-exhausted` / `no-signal` / `dense`), and
+`fill_priors=0` makes the budget a ceiling instead of a quota: the context is
+sized by the evidence. That is what lets 32K reach q=1.000 with 525 tokens
+(2.4x faster than the in-graph gate at the same quality) and cuts the 4K-16K
+token counts by 1.4-2.8x at unchanged quality. New audit columns:
+`evidence_blocks`, `stop_reason`.
+
 ## Multi-fact coverage admission (AR009)
 
 AR008 made admission optimal for *one* fact per question. A question that asks
