@@ -28,3 +28,6 @@ benchmarks/results/exp-dump*/
 build-asan/
 build-clean/
 models
+
+# Local agent instructions (not published)
+AGENTS.md

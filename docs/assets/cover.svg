@@ -1,0 +1,144 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640" role="img" aria-label="EdgePrefill AR011 cover">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#070B14"/>
+      <stop offset="0.55" stop-color="#0A1120"/>
+      <stop offset="1" stop-color="#0D1728"/>
+    </linearGradient>
+    <radialGradient id="glowTeal" cx="50%" cy="50%" r="50%">
+      <stop offset="0" stop-color="#14B8A6" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#14B8A6" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="glowIndigo" cx="50%" cy="50%" r="50%">
+      <stop offset="0" stop-color="#4F46E5" stop-opacity="0.42"/>
+      <stop offset="1" stop-color="#4F46E5" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="topLine" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#14B8A6" stop-opacity="0"/>
+      <stop offset="0.28" stop-color="#2DD4BF" stop-opacity="0.85"/>
+      <stop offset="0.62" stop-color="#5EEAD4" stop-opacity="0.35"/>
+      <stop offset="1" stop-color="#14B8A6" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="mark" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#5EEAD4"/>
+      <stop offset="0.5" stop-color="#2DD4BF"/>
+      <stop offset="1" stop-color="#0EA5A0"/>
+    </linearGradient>
+    <linearGradient id="titleGrad" x1="0" y1="0" x2="1" y2="0.25">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="0.7" stop-color="#E6FFFB"/>
+      <stop offset="1" stop-color="#99F6E4"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#2DD4BF"/>
+      <stop offset="1" stop-color="#14B8A6" stop-opacity="0"/>
+    </linearGradient>
+    <pattern id="pageGrid" width="48" height="48" patternUnits="userSpaceOnUse">
+      <path d="M 48 0 L 0 0 0 48" fill="none" stroke="#94A3B8" stroke-width="1" opacity="0.055"/>
+    </pattern>
+    <filter id="panelShadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="14" stdDeviation="18" flood-color="#000000" flood-opacity="0.45"/>
+    </filter>
+    <filter id="textGlow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="0" stdDeviation="12" flood-color="#2DD4BF" flood-opacity="0.18"/>
+    </filter>
+  </defs>
+
+  <rect width="1280" height="640" fill="url(#bg)"/>
+  <ellipse cx="1150" cy="80" rx="460" ry="320" fill="url(#glowTeal)" opacity="0.45"/>
+  <ellipse cx="170" cy="640" rx="520" ry="280" fill="url(#glowIndigo)" opacity="0.32"/>
+  <rect width="1280" height="640" fill="url(#pageGrid)"/>
+  <rect x="0" y="0" width="1280" height="3" fill="url(#topLine)"/>
+
+  <g font-family="Segoe UI, Microsoft YaHei, PingFang SC, Arial, sans-serif">
+    <g filter="url(#textGlow)">
+      <rect x="80" y="72" width="44" height="44" rx="12" fill="url(#mark)"/>
+      <rect x="92" y="82" width="20" height="4.5" rx="2.25" fill="#042F2E"/>
+      <rect x="92" y="91.75" width="13" height="4.5" rx="2.25" fill="#042F2E"/>
+      <rect x="92" y="101.5" width="20" height="4.5" rx="2.25" fill="#042F2E"/>
+      <rect x="92" y="82" width="4.5" height="24" rx="2.25" fill="#042F2E"/>
+    </g>
+
+    <text x="142" y="102" font-size="12.5" font-weight="600" letter-spacing="2.6" fill="#5EEAD4">EDGE INFERENCE / AR011 ST ACCEPTED</text>
+
+    <text x="78" y="228" font-size="92" font-weight="700" letter-spacing="-2.5" fill="url(#titleGrad)">EdgePrefill</text>
+    <rect x="80" y="250" width="120" height="4" rx="2" fill="url(#accent)"/>
+
+    <text x="80" y="305" font-size="24" font-weight="500" fill="#E2E8F0">面向端侧长上下文的分层稀疏 Prefill 引擎</text>
+
+    <text x="80" y="350" font-size="15" fill="#94A3B8">Evidence-first, structure-bounded admission with 40-192x</text>
+    <text x="80" y="373" font-size="15" fill="#94A3B8">CPU prefill speedups on a pinned llama.cpp backend.</text>
+
+    <text x="80" y="440" font-size="30" font-weight="700" fill="#F8FAFC">40.4x</text>
+    <text x="80" y="462" font-size="9.5" font-weight="600" letter-spacing="1.5" fill="#64748B">4K CPU</text>
+
+    <text x="215" y="440" font-size="30" font-weight="700" fill="#F8FAFC">67.8x</text>
+    <text x="215" y="462" font-size="9.5" font-weight="600" letter-spacing="1.5" fill="#64748B">8K CPU</text>
+
+    <text x="350" y="440" font-size="30" font-weight="700" fill="#F8FAFC">124.5x</text>
+    <text x="350" y="462" font-size="9.5" font-weight="600" letter-spacing="1.5" fill="#64748B">16K CPU</text>
+
+    <text x="505" y="440" font-size="30" font-weight="700" fill="#F8FAFC">~192x</text>
+    <text x="505" y="462" font-size="9.5" font-weight="600" letter-spacing="1.5" fill="#64748B">32K CPU</text>
+
+    <text x="80" y="484" font-size="10" letter-spacing="0.8" fill="#475569">SINGLE-FACT Q = 1.00 / 7 DATASETS ROUTED TO AR011</text>
+
+    <rect x="80" y="502" width="680" height="1" fill="#1E293B"/>
+    <text x="80" y="536" font-size="12.5" letter-spacing="1.4" fill="#64748B">C++17 / CMAKE / LLAMA.CPP 3BB63CBC / AR001-AR011</text>
+    <text x="80" y="558" font-size="11" letter-spacing="0.8" fill="#475569">GPU 8K 24x / multi-fact hard q_min 0.087 -&gt; 0.571 / q = NIAH accuracy</text>
+  </g>
+
+  <g filter="url(#panelShadow)">
+    <rect x="780" y="96" width="420" height="448" rx="24" fill="#0B1424" fill-opacity="0.9" stroke="#1E293B"/>
+    <rect x="780.5" y="96.5" width="419" height="447" rx="23.5" fill="none" stroke="#2DD4BF" stroke-opacity="0.08"/>
+  </g>
+
+  <g font-family="Segoe UI, Microsoft YaHei, PingFang SC, Arial, sans-serif">
+    <text x="818" y="137" font-size="11.5" font-weight="700" letter-spacing="2.2" fill="#5EEAD4">STRUCTURE-BOUNDED ADMISSION</text>
+    <text x="818" y="160" font-size="10.5" letter-spacing="1.2" fill="#64748B">7/7 ROUTED / SINGLE-FACT Q=1.00</text>
+    <rect x="818" y="174" width="344" height="1" fill="#1E293B"/>
+
+    <text x="818" y="196" font-size="8.5" letter-spacing="1.2" fill="#475569">DATASET</text>
+    <text x="1015" y="196" font-size="8.5" letter-spacing="1.2" fill="#475569" text-anchor="end">SPEEDUP</text>
+    <text x="1100" y="196" font-size="8.5" letter-spacing="1.2" fill="#475569" text-anchor="end">TOKENS</text>
+    <text x="1162" y="196" font-size="8.5" letter-spacing="1.2" fill="#475569" text-anchor="end">Q</text>
+
+    <text x="818" y="229" font-size="12" font-weight="600" fill="#E2E8F0">4K</text>
+    <text x="1015" y="231" font-size="18" font-weight="700" fill="#F8FAFC" text-anchor="end">40.4x</text>
+    <text x="1100" y="230" font-size="10" fill="#94A3B8" text-anchor="end">146</text>
+    <text x="1162" y="230" font-size="10" fill="#94A3B8" text-anchor="end">1.00</text>
+
+    <text x="818" y="261" font-size="12" font-weight="600" fill="#E2E8F0">8K</text>
+    <text x="1015" y="263" font-size="18" font-weight="700" fill="#F8FAFC" text-anchor="end">67.8x</text>
+    <text x="1100" y="262" font-size="10" fill="#94A3B8" text-anchor="end">188</text>
+    <text x="1162" y="262" font-size="10" fill="#94A3B8" text-anchor="end">1.00</text>
+
+    <text x="818" y="293" font-size="12" font-weight="600" fill="#E2E8F0">16K</text>
+    <text x="1015" y="295" font-size="18" font-weight="700" fill="#F8FAFC" text-anchor="end">124.5x</text>
+    <text x="1100" y="294" font-size="10" fill="#94A3B8" text-anchor="end">280</text>
+    <text x="1162" y="294" font-size="10" fill="#94A3B8" text-anchor="end">1.00</text>
+
+    <rect x="810" y="307" width="352" height="28" rx="8" fill="#14B8A6" fill-opacity="0.08" stroke="#2DD4BF" stroke-opacity="0.18"/>
+    <text x="818" y="325" font-size="12" font-weight="600" fill="#F8FAFC">32K</text>
+    <text x="1015" y="327" font-size="18" font-weight="700" fill="#5EEAD4" text-anchor="end">~192x</text>
+    <text x="1100" y="326" font-size="10" fill="#94A3B8" text-anchor="end">525</text>
+    <text x="1162" y="326" font-size="10" fill="#94A3B8" text-anchor="end">1.00</text>
+
+    <text x="818" y="357" font-size="12" font-weight="600" fill="#E2E8F0">MN 8K</text>
+    <text x="1015" y="359" font-size="18" font-weight="700" fill="#F8FAFC" text-anchor="end">59.4x</text>
+    <text x="1100" y="358" font-size="10" fill="#94A3B8" text-anchor="end">247</text>
+    <text x="1162" y="358" font-size="10" fill="#94A3B8" text-anchor="end">1.00</text>
+
+    <text x="818" y="386" font-size="9" letter-spacing="0.4" fill="#94A3B8">32K dense is a 2-case subset; ~192x vs 447 s</text>
+
+    <rect x="818" y="404" width="344" height="76" rx="10" fill="#082F2E" stroke="#14B8A6" stroke-opacity="0.35"/>
+    <text x="832" y="424" font-size="10" letter-spacing="1.1" font-weight="700" fill="#5EEAD4">STRUCTURE vs EVIDENCE</text>
+    <text x="832" y="442" font-size="9.5" letter-spacing="0.4" fill="#E2E8F0">4K -35% / 8K -18% / multi-needle -23% tokens</text>
+    <text x="832" y="457" font-size="9.5" letter-spacing="0.4" fill="#E2E8F0">multi-fact hard q_min 0.087 -&gt; 0.571</text>
+    <text x="832" y="472" font-size="8.5" letter-spacing="0.4" fill="#94A3B8">embedding zero-gain / coverage_reserve off</text>
+
+    <text x="818" y="500" font-size="9" letter-spacing="1" fill="#64748B">AR011 VS AR010: QUALITY NO WORSE / TOKENS LOWER</text>
+    <text x="818" y="526" font-size="9" letter-spacing="1.1" fill="#64748B">AR011 T014 / 7 DATASETS / ALL ROUTED</text>
+    <text x="1162" y="526" font-size="9" letter-spacing="1.1" fill="#64748B" text-anchor="end">AR011 ST</text>
+  </g>
+</svg>
