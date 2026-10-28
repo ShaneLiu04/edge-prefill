@@ -1,0 +1,393 @@
+{
+  "global_floor": 0.95,
+  "floors": {
+    "deep/multifact8k": [
+      0.8359618408875,
+      0.4285714286
+    ],
+    "deep/len32k": [
+      0.95,
+      0.95
+    ],
+    "explen/len16k": [
+      0.95,
+      0.95
+    ],
+    "explen/len4k": [
+      0.95,
+      0.95
+    ],
+    "explen/len8k": [
+      0.95,
+      0.95
+    ],
+    "deep/multifact8k-hard": [
+      0.667182624115,
+      0.08695652174
+    ],
+    "deep/multineedle": [
+      0.95,
+      0.95
+    ]
+  },
+  "table": {
+    "deep/len32k": {
+      "arm": "ar011",
+      "reason": "iso-quality, fewest tokens",
+      "q_mean": 1.0,
+      "q_min": 1.0,
+      "selected": 525,
+      "ttft_median": 2329.1
+    },
+    "deep/multifact8k": {
+      "arm": "ar011",
+      "reason": "iso-quality, fewest tokens",
+      "q_mean": 0.836,
+      "q_min": 0.4286,
+      "selected": 431,
+      "ttft_median": 2002.2
+    },
+    "deep/multifact8k-hard": {
+      "arm": "ar011",
+      "reason": "iso-quality, fewest tokens",
+      "q_mean": 0.7086,
+      "q_min": 0.5714,
+      "selected": 445,
+      "ttft_median": 1952.3
+    },
+    "deep/multineedle": {
+      "arm": "ar011",
+      "reason": "iso-quality, fewest tokens",
+      "q_mean": 1.0,
+      "q_min": 1.0,
+      "selected": 247,
+      "ttft_median": 1164.7
+    },
+    "explen/len16k": {
+      "arm": "ar011",
+      "reason": "iso-quality, fewest tokens",
+      "q_mean": 1.0,
+      "q_min": 1.0,
+      "selected": 280,
+      "ttft_median": 1387.1
+    },
+    "explen/len4k": {
+      "arm": "ar011",
+      "reason": "iso-quality, fewest tokens",
+      "q_mean": 1.0,
+      "q_min": 1.0,
+      "selected": 146,
+      "ttft_median": 754.5
+    },
+    "explen/len8k": {
+      "arm": "ar011",
+      "reason": "iso-quality, fewest tokens",
+      "q_mean": 1.0,
+      "q_min": 1.0,
+      "selected": 188,
+      "ttft_median": 1027.8
+    }
+  },
+  "cells": [
+    {
+      "dataset_key": "len16k",
+      "arm": "ar010",
+      "cases": 4,
+      "q_mean": 1.0,
+      "q_min": 1.0,
+      "ttft_median": 1444.2691,
+      "selected": 280,
+      "structure": 48,
+      "span_trimmed": 0,
+      "dataset": "explen/len16k"
+    },
+    {
+      "dataset_key": "len16k",
+      "arm": "ar011",
+      "cases": 4,
+      "q_mean": 1.0,
+      "q_min": 1.0,
+      "ttft_median": 1387.093,
+      "selected": 280,
+      "structure": 48,
+      "span_trimmed": 0,
+      "dataset": "explen/len16k"
+    },
+    {
+      "dataset_key": "len16k",
+      "arm": "dense",
+      "cases": 4,
+      "q_mean": 1.0,
+      "q_min": 1.0,
+      "ttft_median": 172619.7575,
+      "selected": 15576,
+      "structure": 0,
+      "span_trimmed": 0,
+      "dataset": "explen/len16k"
+    },
+    {
+      "dataset_key": "len16k",
+      "arm": "gate-p16",
+      "cases": 4,
+      "q_mean": 1.0,
+      "q_min": 1.0,
+      "ttft_median": 5480.339,
+      "selected": 1128,
+      "structure": 48,
+      "span_trimmed": 0,
+      "dataset": "explen/len16k"
+    },
+    {
+      "dataset_key": "len32k",
+      "arm": "ar010",
+      "cases": 4,
+      "q_mean": 1.0,
+      "q_min": 1.0,
+      "ttft_median": 2371.2968,
+      "selected": 525,
+      "structure": 45,
+      "span_trimmed": 0,
+      "dataset": "deep/len32k"
+    },
+    {
+      "dataset_key": "len32k",
+      "arm": "ar011",
+      "cases": 4,
+      "q_mean": 1.0,
+      "q_min": 1.0,
+      "ttft_median": 2329.0797,
+      "selected": 525,
+      "structure": 45,
+      "span_trimmed": 0,
+      "dataset": "deep/len32k"
+    },
+    {
+      "dataset_key": "len32k",
+      "arm": "gate-p16",
+      "cases": 4,
+      "q_mean": 1.0,
+      "q_min": 1.0,
+      "ttft_median": 5953.2582,
+      "selected": 1165,
+      "structure": 45,
+      "span_trimmed": 0,
+      "dataset": "deep/len32k"
+    },
+    {
+      "dataset_key": "len4k",
+      "arm": "ar010",
+      "cases": 4,
+      "q_mean": 1.0,
+      "q_min": 1.0,
+      "ttft_median": 1046.363,
+      "selected": 226,
+      "structure": 50,
+      "span_trimmed": 0,
+      "dataset": "explen/len4k"
+    },
+    {
+      "dataset_key": "len4k",
+      "arm": "ar011",
+      "cases": 4,
+      "q_mean": 1.0,
+      "q_min": 1.0,
+      "ttft_median": 754.5047,
+      "selected": 146,
+      "structure": 50,
+      "span_trimmed": 0,
+      "dataset": "explen/len4k"
+    },
+    {
+      "dataset_key": "len4k",
+      "arm": "dense",
+      "cases": 16,
+      "q_mean": 1.0,
+      "q_min": 1.0,
+      "ttft_median": 30500.1701,
+      "selected": 3946,
+      "structure": 0,
+      "span_trimmed": 0,
+      "dataset": "explen/len4k"
+    },
+    {
+      "dataset_key": "len4k",
+      "arm": "gate-p16",
+      "cases": 4,
+      "q_mean": 1.0,
+      "q_min": 1.0,
+      "ttft_median": 1630.899,
+      "selected": 354,
+      "structure": 50,
+      "span_trimmed": 0,
+      "dataset": "explen/len4k"
+    },
+    {
+      "dataset_key": "len8k",
+      "arm": "ar010",
+      "cases": 4,
+      "q_mean": 1.0,
+      "q_min": 1.0,
+      "ttft_median": 1091.1636,
+      "selected": 228,
+      "structure": 52,
+      "span_trimmed": 0,
+      "dataset": "explen/len8k"
+    },
+    {
+      "dataset_key": "len8k",
+      "arm": "ar011",
+      "cases": 4,
+      "q_mean": 1.0,
+      "q_min": 1.0,
+      "ttft_median": 1027.8307,
+      "selected": 188,
+      "structure": 52,
+      "span_trimmed": 0,
+      "dataset": "explen/len8k"
+    },
+    {
+      "dataset_key": "len8k",
+      "arm": "dense",
+      "cases": 16,
+      "q_mean": 1.0,
+      "q_min": 1.0,
+      "ttft_median": 69670.7978,
+      "selected": 7812,
+      "structure": 0,
+      "span_trimmed": 0,
+      "dataset": "explen/len8k"
+    },
+    {
+      "dataset_key": "len8k",
+      "arm": "gate-p16",
+      "cases": 4,
+      "q_mean": 1.0,
+      "q_min": 1.0,
+      "ttft_median": 3036.2973,
+      "selected": 628,
+      "structure": 52,
+      "span_trimmed": 0,
+      "dataset": "explen/len8k"
+    },
+    {
+      "dataset_key": "multifact8k",
+      "arm": "ar010",
+      "cases": 16,
+      "q_mean": 0.836,
+      "q_min": 0.4286,
+      "ttft_median": 1924.0209,
+      "selected": 431,
+      "structure": 47,
+      "span_trimmed": 0,
+      "dataset": "deep/multifact8k"
+    },
+    {
+      "dataset_key": "multifact8k",
+      "arm": "ar011",
+      "cases": 16,
+      "q_mean": 0.836,
+      "q_min": 0.4286,
+      "ttft_median": 2002.2048,
+      "selected": 431,
+      "structure": 47,
+      "span_trimmed": 0,
+      "dataset": "deep/multifact8k"
+    },
+    {
+      "dataset_key": "multifact8k",
+      "arm": "gate-p16",
+      "cases": 16,
+      "q_mean": 0.836,
+      "q_min": 0.4286,
+      "ttft_median": 1931.5754,
+      "selected": 431,
+      "structure": 47,
+      "span_trimmed": 0,
+      "dataset": "deep/multifact8k"
+    },
+    {
+      "dataset_key": "multifact8k-hard",
+      "arm": "ar010",
+      "cases": 16,
+      "q_mean": 0.6672,
+      "q_min": 0.087,
+      "ttft_median": 1996.8659,
+      "selected": 445,
+      "structure": 49,
+      "span_trimmed": 0,
+      "dataset": "deep/multifact8k-hard"
+    },
+    {
+      "dataset_key": "multifact8k-hard",
+      "arm": "ar011",
+      "cases": 16,
+      "q_mean": 0.7086,
+      "q_min": 0.5714,
+      "ttft_median": 1952.2985,
+      "selected": 445,
+      "structure": 49,
+      "span_trimmed": 0,
+      "dataset": "deep/multifact8k-hard"
+    },
+    {
+      "dataset_key": "multifact8k-hard",
+      "arm": "gate-p16",
+      "cases": 16,
+      "q_mean": 0.6672,
+      "q_min": 0.087,
+      "ttft_median": 1932.7813,
+      "selected": 445,
+      "structure": 49,
+      "span_trimmed": 0,
+      "dataset": "deep/multifact8k-hard"
+    },
+    {
+      "dataset_key": "multineedle",
+      "arm": "ar010",
+      "cases": 6,
+      "q_mean": 1.0,
+      "q_min": 1.0,
+      "ttft_median": 1790.0124,
+      "selected": 321,
+      "structure": 49,
+      "span_trimmed": 0,
+      "dataset": "deep/multineedle"
+    },
+    {
+      "dataset_key": "multineedle",
+      "arm": "ar011",
+      "cases": 6,
+      "q_mean": 1.0,
+      "q_min": 1.0,
+      "ttft_median": 1164.7144,
+      "selected": 247,
+      "structure": 49,
+      "span_trimmed": 36,
+      "dataset": "deep/multineedle"
+    },
+    {
+      "dataset_key": "multineedle",
+      "arm": "dense",
+      "cases": 24,
+      "q_mean": 1.0,
+      "q_min": 1.0,
+      "ttft_median": 69132.9941,
+      "selected": 7857,
+      "structure": 0,
+      "span_trimmed": 0,
+      "dataset": "deep/multineedle"
+    },
+    {
+      "dataset_key": "multineedle",
+      "arm": "gate-p16",
+      "cases": 6,
+      "q_mean": 1.0,
+      "q_min": 1.0,
+      "ttft_median": 3265.7499,
+      "selected": 673,
+      "structure": 49,
+      "span_trimmed": 0,
+      "dataset": "deep/multineedle"
+    }
+  ]
+}

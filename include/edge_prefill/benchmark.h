@@ -78,6 +78,12 @@ struct BenchmarkConfig {
     double coverage_weight = 3.0;
     double prior_gate = 1.0;
     double fill_priors = 1.0;
+    // AR011: structure-bounded admission (0 = AR010 accounting exactly).
+    uint32_t structure_budget = 0;
+    uint32_t anchor_span_radius = 0;
+    int coverage_reserve = 0;
+    int span_admission = 0;
+    uint32_t span_min_tokens = 24;
     std::string portfolio_table;
     // GPU offload: layers above this index move to the GPU backend (99 =
     // full offload). 0 keeps everything on CPU.

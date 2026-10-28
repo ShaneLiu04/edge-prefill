@@ -40,7 +40,8 @@ Status Reporter::write_raw_csv(const std::string& path) {
            "query_gating,qg_groups,score_source,semantic_score_ms,draft_score_ms,"
            "qg_source,budget_source,anchor_blocks,mmr_penalized,phrase_blocks,"
            "specific_terms,coverage_queries,evidence_blocks,stop_reason,"
-           "portfolio_choice,portfolio_reason\n";
+           "portfolio_choice,portfolio_reason,structure_tokens,evidence_tokens,"
+           "span_tokens,uncovered_facts\n";
     out << std::setprecision(10);
     for (const auto& s : samples_) {
         out << s.task << ',' << s.case_id << ',' << s.ttft_ms << ',' << s.e2e_ms << ','
@@ -56,7 +57,9 @@ Status Reporter::write_raw_csv(const std::string& path) {
             << s.coverage_queries << ',' << s.evidence_blocks << ','
             << (s.stop_reason.empty() ? "budget" : s.stop_reason) << ','
             << (s.portfolio_choice.empty() ? "none" : s.portfolio_choice) << ','
-            << s.portfolio_reason << '\n';
+            << s.portfolio_reason << ','
+            << s.structure_tokens << ',' << s.evidence_tokens << ','
+            << s.span_tokens << ',' << s.uncovered_facts << '\n';
     }
     return Status::success();
 }

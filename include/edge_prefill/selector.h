@@ -69,6 +69,14 @@ struct Selection {
     // stopped ("budget" | "evidence-exhausted" | "no-signal" | "dense").
     uint32_t evidence_blocks = 0;
     std::string stop_reason = "budget";
+    // AR011 FR-1/FR-2/FR-3 audit: how the admitted tokens split between the
+    // structural anchors (sink/recent, never trimmed) and everything that is
+    // evidence-driven, how many tokens the span pass trimmed away, and how many
+    // requested facts the reservation could not cover.
+    uint32_t structure_tokens = 0;
+    uint32_t evidence_tokens = 0;
+    uint32_t span_tokens = 0;
+    uint32_t uncovered_facts = 0;
     // AR008 FR-2 profile input: top-1 lexical score over the lexical sum.
     // A high value means the evidence is concentrated in one block, which
     // is exactly when selection-level sparsity is safe.
@@ -111,6 +119,22 @@ struct SelectionOptions {
     // the evidence is exhausted. 0 makes the admission content-sized: the
     // selection stops as soon as no block carries evidence.
     double fill_priors = 1.0;
+    // AR011 FR-1: absolute token budget for the structural anchors (sink +
+    // recent). 0 keeps the AR010 accounting where every anchor competes for a
+    // fraction of the whole budget. >0 turns the budget into
+    // "structure (fixed) + evidence (the rest)".
+    uint32_t structure_budget = 0;
+    // AR011 FR-1: radius of the best-lexical anchor window in blocks.
+    // 0 = AR010 (+-2 blocks).
+    uint32_t anchor_span_radius = 0;
+    // AR011 FR-2: reserve one evidence block per uncovered sub-query before the
+    // greedy fill runs. 0 = AR009 facility-location only.
+    int coverage_reserve = 0;
+    // AR011 FR-3: trim evidence blocks to a token span around the evidence peak,
+    // decoupling the admission granularity from the 32-token block granularity
+    // used by the attention pool. 0 = whole blocks (AR010).
+    int span_admission = 0;
+    uint32_t span_min_tokens = 24;
     SelectorWeights weights;
 };
 

@@ -324,7 +324,54 @@ cmake --build build-cuda -j
 | 注入劣化 | 必须 FAIL | `--inject deep/len32k:selection-prior` |
 | GPU 一致性 | q/sel 逐例一致 | 选择在主机侧，图侧需 `qg_source` 正确 |
 
-## 11. 报告模板
+## 11. AR011：结构锚点预算与证据预算分离
+
+### 11.1 一条命令
+
+```bash
+./repro.sh ar011     # 7 数据集 x 3 臂 + 组合表 + 不劣于 AR010 的闸门 + 注入自测
+```
+
+### 11.2 手动跑（大机器上可以只跑一个子集）
+
+```bash
+# 全量（4K/8K/16K/32K/多针/多事实两档）；多事实的 budget 与答案长度由脚本按数据集决定
+python3 benchmarks/scripts/ar011_matrix.py   --bin build/edge-prefill --model models/qwen2.5-1.5b-instruct-q4_k_m.gguf   --out benchmarks/results/ar011-structure-bounded --force
+
+# 只看某几个数据集（已有 raw.csv 的单元会复用，--force 会先清空该单元）
+python3 benchmarks/scripts/ar011_matrix.py   --datasets explen/len4k,deep/multineedle --arms ar010,ar011   --out benchmarks/results/ar011-structure-bounded
+
+# 生成表 + 闸门 + 注入自测（必须 FAIL）
+python3 benchmarks/scripts/ar011_report.py benchmarks/results/ar011-structure-bounded
+python3 benchmarks/scripts/ar011_report.py benchmarks/results/ar011-structure-bounded --gate
+python3 benchmarks/scripts/ar011_report.py benchmarks/results/ar011-structure-bounded \
+  --gate --inject explen/len8k:ar010
+```
+
+### 11.3 配置项（AR011）
+
+| conf 键 | CLI | 默认 | 作用 |
+|---|---|---|---|
+| `structure_budget` | `--structure-budget N` | 0 | 结构锚点绝对 token 预算；0 = AR010 记账；仅在锚点主导预算时生效 |
+| `anchor_span_radius` | `--anchor-span-radius N` | 0 | 最佳词法锚点窗口半径（0 = ±2 块）；实测 1 会伤多事实 |
+| `span_admission` | `--span-admission 0\|1` | 0 | 单事实下把证据块裁成句子级 token 段 |
+| `span_min_tokens` | `--span-min-tokens N` | 24 | 句子过短时的最小段长 |
+| `coverage_reserve` | `--coverage-reserve 0\|1` | 0 | 每事实保底一块（实测无稳定收益，默认关） |
+
+### 11.4 判读标准
+
+| 指标 | 通过线 | 说明 |
+|---|---|---|
+| 所有数据集 q_mean | 不低于 AR010 −0.01 | 单针 0.95 地板，多事实以 AR010 实测为地板 |
+| 准入 token | 不超过最优臂 1.05× | 4K 146、8K 188、多针 247、16K/32K 280/525 |
+| TTFT | 不超过最快臂 1.05× | 同会话比较，绝对值随机器浮动 |
+| 多事实 hard `q_min` | ≥0.57 | AR010 为 0.087 |
+| 组合闸门 | PASS 7/7 | 全部路由到 ar011 |
+| 注入劣化 | 必须 FAIL | `--inject explen/len8k:ar010` → token/TTFT 违规 |
+| GPU 一致性 | q/sel 逐例一致 | 准入在 host 侧；本机 4K 122/121/170/172 逐例相同，45.2 ms vs 1091.5 ms |
+| 开关全关 | 与 AR010 逐 token 一致 | 三个新开关默认 0，`selector_structure_budget_is_inert_*` 用例守护 |
+
+## 12. 报告模板
 
 ```
 机器: <CPU/GPU, 核心数, 内存>, 会话: <日期>

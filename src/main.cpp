@@ -115,6 +115,16 @@ struct Args {
     bool prior_gate_set = false;
     double fill_priors = -1.0;
     bool fill_priors_set = false;
+    int structure_budget = -1;
+    bool structure_budget_set = false;
+    int anchor_span_radius = -1;
+    bool anchor_span_radius_set = false;
+    int coverage_reserve = -1;
+    bool coverage_reserve_set = false;
+    int span_admission = -1;
+    bool span_admission_set = false;
+    int span_min_tokens = -1;
+    bool span_min_tokens_set = false;
     double anchor_ratio = 0.0;
     bool anchor_ratio_set = false;
     double anchor_stride_scale = 0.0;
@@ -155,6 +165,8 @@ void usage() {
         "  --mmr-lambda F  --mmr-threshold F   (AR007 admission controls)\n"
         "  --phrase-weight F  --portfolio P    (AR008 phrase + combination routing)\n"
         "  --coverage-weight F                 (AR009 multi-fact coverage, 0 = off)\n"
+        "  --structure-budget N  --anchor-span-radius N  (AR011 structure budget)\n"
+        "  --coverage-reserve 0|1  --span-admission 0|1  --span-min-tokens N\n"
         "  --draft-model M   --attn-top-k N  --attn-top-k-layers 4,8,16\n"
         "  --embedding-model P  (bge-small style GGUF; activates semantic gating)\n"
         "  --selector-w-lexical F  --selector-w-diversity F\n"
@@ -589,6 +601,36 @@ Status parse_args(int argc, char** argv, Args* args) {
             if (!st.ok()) return st;
             args->fill_priors = std::stod(value);
             args->fill_priors_set = true;
+        } else if (flag == "--structure-budget") {
+            std::string value;
+            auto st = next(&value);
+            if (!st.ok()) return st;
+            args->structure_budget = std::stoi(value);
+            args->structure_budget_set = true;
+        } else if (flag == "--anchor-span-radius") {
+            std::string value;
+            auto st = next(&value);
+            if (!st.ok()) return st;
+            args->anchor_span_radius = std::stoi(value);
+            args->anchor_span_radius_set = true;
+        } else if (flag == "--coverage-reserve") {
+            std::string value;
+            auto st = next(&value);
+            if (!st.ok()) return st;
+            args->coverage_reserve = std::stoi(value);
+            args->coverage_reserve_set = true;
+        } else if (flag == "--span-admission") {
+            std::string value;
+            auto st = next(&value);
+            if (!st.ok()) return st;
+            args->span_admission = std::stoi(value);
+            args->span_admission_set = true;
+        } else if (flag == "--span-min-tokens") {
+            std::string value;
+            auto st = next(&value);
+            if (!st.ok()) return st;
+            args->span_min_tokens = std::stoi(value);
+            args->span_min_tokens_set = true;
         } else if (flag == "--anchor-ratio") {
             std::string value;
             auto st = next(&value);
@@ -698,6 +740,14 @@ Status apply_common_config(const Args& args, Config* cfg) {
     if (args.coverage_weight_set) cfg->coverage_weight = args.coverage_weight;
     if (args.prior_gate_set) cfg->prior_gate = args.prior_gate;
     if (args.fill_priors_set) cfg->fill_priors = args.fill_priors;
+    if (args.structure_budget_set) cfg->structure_budget = static_cast<uint32_t>(
+        std::max(0, args.structure_budget));
+    if (args.anchor_span_radius_set) cfg->anchor_span_radius = static_cast<uint32_t>(
+        std::clamp(args.anchor_span_radius, 0, 2));
+    if (args.coverage_reserve_set) cfg->coverage_reserve = args.coverage_reserve > 0 ? 1 : 0;
+    if (args.span_admission_set) cfg->span_admission = args.span_admission > 0 ? 1 : 0;
+    if (args.span_min_tokens_set) cfg->span_min_tokens = static_cast<uint32_t>(
+        std::max(1, args.span_min_tokens));
     if (args.anchor_ratio_set) cfg->anchor_ratio = args.anchor_ratio;
     if (args.anchor_stride_scale_set) cfg->anchor_stride_scale = args.anchor_stride_scale;
     if (args.mmr_lambda_set) cfg->mmr_lambda = args.mmr_lambda;
@@ -914,6 +964,20 @@ Status run_command(const Args& args) {
     sopts.anchor_stride_scale = run_cfg.anchor_stride_scale;
     sopts.mmr_threshold = run_cfg.mmr_threshold;
     sopts.mmr_lambda = run_cfg.mmr_lambda;
+    // Admission knobs were only wired into the bench path; `run` silently used
+    // the struct defaults (fill_priors in particular defaults to 1), so a CLI
+    // experiment through `run` did not test what it claimed. Same class of bug
+    // as the AR009 bench.coverage_weight miss.
+    sopts.phrase_weight = run_cfg.phrase_weight;
+    sopts.coverage_weight = run_cfg.coverage_weight;
+    sopts.prior_gate = run_cfg.prior_gate;
+    sopts.fill_priors = run_cfg.fill_priors;
+    // AR011 structure-bounded admission.
+    sopts.structure_budget = run_cfg.structure_budget;
+    sopts.anchor_span_radius = run_cfg.anchor_span_radius;
+    sopts.coverage_reserve = run_cfg.coverage_reserve;
+    sopts.span_admission = run_cfg.span_admission;
+    sopts.span_min_tokens = run_cfg.span_min_tokens;
     sopts.weights = run_cfg.weights;
     // AR005: semantic evidence dominates the fusion when the embedding
     // engine is active, unless the user pinned weights or pure latency
@@ -1245,6 +1309,14 @@ Status plan_command(const Args& args) {
     if (args.coverage_weight_set) cfg.coverage_weight = args.coverage_weight;
     if (args.prior_gate_set) cfg.prior_gate = args.prior_gate;
     if (args.fill_priors_set) cfg.fill_priors = args.fill_priors;
+    if (args.structure_budget_set) cfg.structure_budget = static_cast<uint32_t>(
+        std::max(0, args.structure_budget));
+    if (args.anchor_span_radius_set) cfg.anchor_span_radius = static_cast<uint32_t>(
+        std::clamp(args.anchor_span_radius, 0, 2));
+    if (args.coverage_reserve_set) cfg.coverage_reserve = args.coverage_reserve > 0 ? 1 : 0;
+    if (args.span_admission_set) cfg.span_admission = args.span_admission > 0 ? 1 : 0;
+    if (args.span_min_tokens_set) cfg.span_min_tokens = static_cast<uint32_t>(
+        std::max(1, args.span_min_tokens));
     if (args.anchor_ratio_set) cfg.anchor_ratio = args.anchor_ratio;
     if (args.anchor_stride_scale_set) cfg.anchor_stride_scale = args.anchor_stride_scale;
     if (args.mmr_lambda_set) cfg.mmr_lambda = args.mmr_lambda;
@@ -1342,6 +1414,11 @@ Status bench_command(const Args& args) {
     bench.coverage_weight = cfg.coverage_weight;
     bench.prior_gate = cfg.prior_gate;
     bench.fill_priors = cfg.fill_priors;
+    bench.structure_budget = cfg.structure_budget;
+    bench.anchor_span_radius = cfg.anchor_span_radius;
+    bench.coverage_reserve = cfg.coverage_reserve;
+    bench.span_admission = cfg.span_admission;
+    bench.span_min_tokens = cfg.span_min_tokens;
     bench.portfolio_table = cfg.portfolio_table;
     bench.n_gpu_layers = cfg.n_gpu_layers;
     bench.out_dir = cfg.results_dir;

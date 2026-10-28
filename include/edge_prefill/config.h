@@ -65,6 +65,12 @@ struct Config {
     // AR010 FR-1/FR-2: evidence-gated priors and content-sized admission.
     double prior_gate = 1.0;
     double fill_priors = 1.0;
+    // AR011: structure-bounded admission (0 = AR010 accounting exactly).
+    uint32_t structure_budget = 0;
+    uint32_t anchor_span_radius = 0;
+    int coverage_reserve = 0;
+    int span_admission = 0;
+    uint32_t span_min_tokens = 24;
     // AR008 FR-2: measured execution-combination table. Empty keeps the
     // configured (or default) path — routing is opt-in, exactly like the
     // budget curve.

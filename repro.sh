@@ -9,6 +9,7 @@
 #   ./repro.sh ar008    # AR008 combination matrix + portfolio gate (dense is slow)
 #   ./repro.sh ar009    # AR009 multi-fact coverage ablation + expected gate
 #   ./repro.sh ar010    # AR010 evidence-first admission: matrix + table + gate
+#   ./repro.sh ar011    # AR011 structure-bounded admission: 7-set matrix + gate
 #
 # Every step is fail-fast (set -euo pipefail) and prints the exact command
 # it runs. Models are downloaded with SHA256 verification into ./models
@@ -23,6 +24,8 @@
 #   --cuda             build llama.cpp with CUDA (auto for `full` when
 #                      nvidia-smi is present)
 #   --no-expected      do not gate on expected.csv (exploration only)
+#   --llama-dir DIR    use an existing llama.cpp tree (also: EDGE_PREFILL_LLAMA_DIR)
+#                      - needed behind a proxy or on an air-gapped server
 set -euo pipefail
 
 SUITE="${1:-smoke}"
@@ -40,6 +43,9 @@ JOBS="$(nproc 2>/dev/null || echo 4)"
 SKIP_DOWNLOAD=0
 WANT_CUDA=0
 CHECK_EXPECTED=1
+# Offline / air-gapped builds: point at an existing llama.cpp tree instead of
+# letting CMake fetch the pinned tarball (behind a proxy the download can 407).
+LLAMA_DIR="${EDGE_PREFILL_LLAMA_DIR:-}"
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --models) MODELS="$2"; shift 2 ;;
@@ -47,6 +53,7 @@ while [[ $# -gt 0 ]]; do
         --skip-download) SKIP_DOWNLOAD=1; shift ;;
         --cuda) WANT_CUDA=1; shift ;;
         --no-expected) CHECK_EXPECTED=0; shift ;;
+        --llama-dir) LLAMA_DIR="$2"; shift 2 ;;
         *) echo "unknown option: $1" >&2; exit 2 ;;
     esac
 done
@@ -103,8 +110,13 @@ if [[ "${WANT_CUDA}" == "1" ]]; then
     CUDA_FLAG="ON"
 fi
 echo "cmake -S . -B ${BUILD_DIR} -DCMAKE_BUILD_TYPE=Release -DEDGE_PREFILL_WITH_CUDA=${CUDA_FLAG}"
+CMAKE_EXTRA=()
+if [[ -n "${LLAMA_DIR}" ]]; then
+    CMAKE_EXTRA+=("-DEDGE_PREFILL_LLAMA_DIR=${LLAMA_DIR}")
+    echo "using existing llama.cpp tree: ${LLAMA_DIR}"
+fi
 cmake -S . -B "${BUILD_DIR}" -DCMAKE_BUILD_TYPE=Release \
-      -DEDGE_PREFILL_WITH_CUDA="${CUDA_FLAG}" >/dev/null
+      -DEDGE_PREFILL_WITH_CUDA="${CUDA_FLAG}" ${CMAKE_EXTRA[@]+"${CMAKE_EXTRA[@]}"} >/dev/null
 cmake --build "${BUILD_DIR}" -j "${JOBS}"
 BIN="${BUILD_DIR}/edge-prefill"
 
@@ -224,6 +236,26 @@ case "${SUITE}" in
             --inject deep/len32k:selection-prior > /dev/null 2>&1 \
             && fail "gate did not reject the injected degraded arm"
         OUT="${ROOT}/benchmarks/results/ar010-evidence-first"
+        ;;
+    ar011)
+        # AR011 FR-4: measure the seven-dataset matrix against AR010, derive the
+        # no-regression table and gate it (quality, tokens, TTFT) including an
+        # injected degradation to prove the gate can fail. Sparse arms only:
+        # the multi-fact families need a 48-token answer and a flat 0.05 budget,
+        # which the matrix script applies per dataset.
+        python3 benchmarks/scripts/ar011_matrix.py \
+            --bin "${BIN}" --model "${MAIN_MODEL}" \
+            --out "${ROOT}/benchmarks/results/ar011-structure-bounded"
+        python3 benchmarks/scripts/ar011_report.py \
+            "${ROOT}/benchmarks/results/ar011-structure-bounded"
+        python3 benchmarks/scripts/ar011_report.py \
+            "${ROOT}/benchmarks/results/ar011-structure-bounded" --gate \
+            || fail "AR011 routing is worse than AR010 (quality, tokens or TTFT)"
+        python3 benchmarks/scripts/ar011_report.py \
+            "${ROOT}/benchmarks/results/ar011-structure-bounded" --gate \
+            --inject explen/len8k:ar010 > /dev/null 2>&1 \
+            && fail "gate did not reject the injected degraded arm"
+        OUT="${ROOT}/benchmarks/results/ar011-structure-bounded"
         ;;
     ar009)
         # AR009 FR-3: regenerate the deterministic multi-fact families, run the

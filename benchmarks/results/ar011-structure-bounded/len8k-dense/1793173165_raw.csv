@@ -1,0 +1,17 @@
+task,case,ttft_ms,e2e_ms,prefill_tps,kv_bytes,quality,dense,prompt_tokens,selected_tokens,mode,budget,attn_top_k,repeats,ppl_dense,ppl_sparse,query_gating,qg_groups,score_source,semantic_score_ms,draft_score_ms,qg_source,budget_source,anchor_blocks,mmr_penalized,phrase_blocks,specific_terms,coverage_queries,evidence_blocks,stop_reason,portfolio_choice,portfolio_reason,structure_tokens,evidence_tokens,span_tokens,uncovered_facts
+niah,niah-01@7762,70710.80673,72749.3496,110.3948145,223908008,1,1,7806,7806,dense,1,0,1,0,0,0,0,lexical,0,0,,override,0,0,0,0,0,0,dense,dense,disabled,0,0,0,0
+niah,niah-01@7762,70296.78092,72263.95138,111.0443397,223908008,1,1,7806,7806,dense,1,0,1,0,0,0,0,lexical,0,0,,override,0,0,0,0,0,0,dense,dense,disabled,0,0,0,0
+niah,niah-01@7762,69755.01721,72206.12041,111.9069047,223908008,1,1,7806,7806,dense,1,0,1,0,0,0,0,lexical,0,0,,override,0,0,0,0,0,0,dense,dense,disabled,0,0,0,0
+niah,niah-01@7762,71415.56329,74440.42662,109.3047863,223908008,1,1,7806,7806,dense,1,0,1,0,0,0,0,lexical,0,0,,override,0,0,0,0,0,0,dense,dense,disabled,0,0,0,0
+niah,niah-02@7782,71037.86085,74343.34802,110.1675033,224481688,1,1,7826,7826,dense,1,0,1,0,0,0,0,lexical,0,0,,override,0,0,0,0,0,0,dense,dense,disabled,0,0,0,0
+niah,niah-02@7782,70512.31172,73016.44948,110.9886649,224481688,1,1,7826,7826,dense,1,0,1,0,0,0,0,lexical,0,0,,override,0,0,0,0,0,0,dense,dense,disabled,0,0,0,0
+niah,niah-02@7782,69748.54145,71727.0895,112.203799,224481688,1,1,7826,7826,dense,1,0,1,0,0,0,0,lexical,0,0,,override,0,0,0,0,0,0,dense,dense,disabled,0,0,0,0
+niah,niah-02@7782,71406.03158,73377.85197,109.5995357,224481688,1,1,7826,7826,dense,1,0,1,0,0,0,0,lexical,0,0,,override,0,0,0,0,0,0,dense,dense,disabled,0,0,0,0
+niah,niah-03@7768,69593.05407,71048.65171,112.2537353,224080112,1,1,7812,7812,dense,1,0,1,0,0,0,0,lexical,0,0,,override,0,0,0,0,0,0,dense,dense,disabled,0,0,0,0
+niah,niah-03@7768,68020.46648,69789.9854,114.8488745,224080112,1,1,7812,7812,dense,1,0,1,0,0,0,0,lexical,0,0,,override,0,0,0,0,0,0,dense,dense,disabled,0,0,0,0
+niah,niah-03@7768,67514.89537,69126.2683,115.7088271,224080112,1,1,7812,7812,dense,1,0,1,0,0,0,0,lexical,0,0,,override,0,0,0,0,0,0,dense,dense,disabled,0,0,0,0
+niah,niah-03@7768,67553.02326,70888.265,115.643522,224080112,1,1,7812,7812,dense,1,0,1,0,0,0,0,lexical,0,0,,override,0,0,0,0,0,0,dense,dense,disabled,0,0,0,0
+niah,niah-04@7760,67856.54273,69909.29937,115.0083629,223850640,1,1,7804,7804,dense,1,0,1,0,0,0,0,lexical,0,0,,override,0,0,0,0,0,0,dense,dense,disabled,0,0,0,0
+niah,niah-04@7760,60776.03789,61592.26468,128.4069681,223850640,1,1,7804,7804,dense,1,0,1,0,0,0,0,lexical,0,0,,override,0,0,0,0,0,0,dense,dense,disabled,0,0,0,0
+niah,niah-04@7760,50706.7414,51490.52995,153.9063954,223850640,1,1,7804,7804,dense,1,0,1,0,0,0,0,lexical,0,0,,override,0,0,0,0,0,0,dense,dense,disabled,0,0,0,0
+niah,niah-04@7760,50280.87506,51031.66246,155.2090321,223850640,1,1,7804,7804,dense,1,0,1,0,0,0,0,lexical,0,0,,override,0,0,0,0,0,0,dense,dense,disabled,0,0,0,0

@@ -1,0 +1,17 @@
+task,case,ttft_ms,e2e_ms,prefill_tps,kv_bytes,quality,dense,prompt_tokens,selected_tokens,mode,budget,attn_top_k,repeats,ppl_dense,ppl_sparse,query_gating,qg_groups,score_source,semantic_score_ms,draft_score_ms,qg_source,budget_source,anchor_blocks,mmr_penalized,phrase_blocks,specific_terms,coverage_queries,evidence_blocks,stop_reason,portfolio_choice,portfolio_reason,structure_tokens,evidence_tokens,span_tokens,uncovered_facts
+niah,mf-01-r1@8530,1968.757207,3482.569905,228.6154389,12908504,1,0,8578,450,balanced,0.05,0,1,0,0,0,0,lexical,0,0,,override,6,0,7,4,3,10,budget,selection,disabled,34,416,0,0
+niah,mf-01-r2@8530,2061.844717,3877.072492,218.2639383,12908504,0.8421052632,0,8578,450,balanced,0.05,0,1,0,0,0,0,lexical,0,0,,override,6,0,7,3,3,10,budget,selection,disabled,34,416,0,0
+niah,mf-02-r1@8527,2243.631758,3684.727632,184.9785804,11904564,0.6,0,8575,415,balanced,0.05,0,1,0,0,0,0,lexical,0,0,,override,6,0,7,5,3,11,evidence-exhausted,selection,disabled,63,352,0,0
+niah,mf-02-r2@8527,1525.317731,3331.766329,230.1349601,10068788,0.8421052632,0,8575,351,balanced,0.05,0,1,0,0,0,0,lexical,0,0,,override,6,0,7,5,3,11,evidence-exhausted,selection,disabled,63,288,0,0
+niah,mf-03-r1@8519,1895.019568,5044.321847,231.6757173,12592980,1,0,8567,439,balanced,0.05,0,1,0,0,0,0,lexical,0,0,,override,6,0,8,4,4,12,budget,selection,disabled,55,384,0,0
+niah,mf-03-r2@8519,2041.274828,3606.253771,215.077048,12592980,0.7058823529,0,8567,439,balanced,0.05,0,1,0,0,0,0,lexical,0,0,,override,6,0,7,3,4,11,budget,selection,disabled,55,384,0,0
+niah,mf-04-r1@8503,2009.465538,3416.121414,210.51741,12134036,0.7777777778,0,8551,423,balanced,0.05,0,1,0,0,0,0,lexical,0,0,,override,6,0,7,5,3,11,budget,selection,disabled,39,384,0,0
+niah,mf-04-r2@8503,1737.232926,3365.449414,225.0855872,11216148,1,0,8551,391,balanced,0.05,0,1,0,0,0,0,lexical,0,0,,override,6,0,7,5,3,9,evidence-exhausted,selection,disabled,39,352,0,0
+niah,mf-05-r1@8527,2001.530202,3617.250237,223.3436594,12822452,1,0,8575,447,balanced,0.05,0,1,0,0,0,0,lexical,0,0,,override,6,0,7,4,3,12,budget,selection,disabled,63,384,0,0
+niah,mf-05-r2@8527,1945.567039,3416.209529,229.7685455,12822452,0.8421052632,0,8575,447,balanced,0.05,0,1,0,0,0,0,lexical,0,0,,override,6,0,7,3,3,10,budget,selection,disabled,63,384,0,0
+niah,mf-06-r1@8521,2002.879418,3540.165558,220.1975587,12650348,0.7368421053,0,8569,441,balanced,0.05,0,1,0,0,0,0,lexical,0,0,,override,6,0,10,5,4,12,budget,selection,disabled,57,384,0,0
+niah,mf-06-r2@8521,1813.976023,4098.185188,225.4877206,11732460,0.8,0,8569,409,balanced,0.05,0,1,0,0,0,0,lexical,0,0,,override,6,0,10,5,4,11,evidence-exhausted,selection,disabled,57,352,0,0
+niah,mf-07-r1@8530,2329.271676,6105.787649,193.2046075,12908504,1,0,8578,450,balanced,0.05,0,1,0,0,0,0,lexical,0,0,,override,6,0,7,4,3,11,budget,selection,disabled,34,416,0,0
+niah,mf-07-r2@8530,2495.623732,4405.592413,180.3250901,12908504,0.4285714286,0,8578,450,balanced,0.05,0,1,0,0,0,0,lexical,0,0,,override,6,0,7,3,3,10,budget,selection,disabled,34,416,0,0
+niah,mf-08-r1@8529,1965.128757,3542.32673,228.4989603,12879820,0.8,0,8577,449,balanced,0.05,0,1,0,0,0,0,lexical,0,0,,override,6,0,7,5,3,11,budget,selection,disabled,33,416,0,0
+niah,mf-08-r2@8529,2077.141951,3601.026845,216.1748889,12879820,1,0,8577,449,balanced,0.05,0,1,0,0,0,0,lexical,0,0,,override,6,0,7,5,3,10,budget,selection,disabled,33,416,0,0

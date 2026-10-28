@@ -274,9 +274,47 @@ effect of those broken priors rather than a policy.
 `./repro.sh ar010` re-measures the five-arm matrix, re-derives the table and
 runs the Pareto gate (plus an injected degraded arm that must fail). GPU
 consistency (CUDA, RTX 5000 16 GB) is documented in
-`benchmarks/results/ar010-evidence-first/REPORT.md` section 4.
+`benchmarks/results/ar010-evidence-first/REPORT.md` section 4. The gated path
+runs without an embedding model (`semantic_score_ms = 0`).
 
-The gated path runs without an embedding model (`semantic_score_ms = 0`).
+### AR011: structure-bounded admission
+
+Two audits set up this AR. First, TTFT is now proportional to the admitted
+token count (`selected / 155 token·s⁻¹` on this CPU), so the remaining lever is
+the *count*. Second, the count was not evidence: a 4K prompt at b=0.08 admitted
+310 tokens of which 9 of 10 blocks were mandatory anchors (sink, recent, the
+best-lexical ±2 window and phrase pins), i.e. `anchor_ratio` capped a fraction
+of a budget that the untrimmable anchors had already spent.
+
+| Setup | Prompt | q_mean | q_min | selected | TTFT |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| AR010 | 4K | 1.000 | 1.000 | 226 | 1046 ms |
+| **AR011** | 4K | 1.000 | 1.000 | **146** | **755 ms** |
+| AR010 | 8K | 1.000 | 1.000 | 228 | 1091 ms |
+| **AR011** | 8K | 1.000 | 1.000 | **188** | **1028 ms** |
+| AR010 | 16K / 32K | 1.000 | 1.000 | 280 / 525 | 1444 / 2371 ms |
+| **AR011** | 16K / 32K | 1.000 | 1.000 | 280 / 525 | 1387 / 2329 ms |
+| AR010 | multi-needle | 1.000 | 1.000 | 321 | 1790 ms |
+| **AR011** | multi-needle | 1.000 | 1.000 | **247** | **1165 ms** |
+| AR010 | multi-fact hard | 0.667 | **0.087** | 445 | 1997 ms |
+| **AR011** | multi-fact hard | **0.709** | **0.571** | 445 | 1952 ms |
+
+Structure (sink + recent) now gets an absolute token allowance and
+`anchor_ratio` only governs the remaining evidence budget - and only when the
+anchors actually dominate it (at 16K/32K they do not, so nothing changes).
+Span admission trims evidence blocks to the sentence around the evidence peak,
+decoupling the admission unit from the 32-token attention block; it is
+automatically skipped when several facts are asked, because a multi-fact answer
+needs one whole sentence per fact (measured: trimming there costs
+0.836 → 0.800 and `q_min` 0.174 → 0.000).
+
+`./repro.sh ar011` measures 7 datasets × 3 arms and gates the routed table
+against AR010 on quality, tokens *and* TTFT, with an injected regression that
+must fail. Two negative results are recorded in the AR011 report: the embedding
+(AR005) signal buys exactly zero quality on these families while adding 1-2.2 s
+of encoding scan, and the per-fact reservation fill has no reliable gain
+(+0.019 at b=0.03, -0.007 at b=0.02), so it ships off by default.
+
 Absolute TTFT depends on the host (this session ran up to 3x slower than the
 AR004 session on the same CPU); compare ratios measured in one session, and
 use `benchmarks/scripts/check_expected_ar006.py` for the machine-independent

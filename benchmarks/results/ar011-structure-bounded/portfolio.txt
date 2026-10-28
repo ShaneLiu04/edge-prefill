@@ -1,0 +1,8 @@
+default = ar011
+deep/len32k = ar011   # floor 0.950/0.950
+deep/multifact8k = ar011   # floor 0.836/0.429
+deep/multifact8k-hard = ar011   # floor 0.667/0.087
+deep/multineedle = ar011   # floor 0.950/0.950
+explen/len16k = ar011   # floor 0.950/0.950
+explen/len4k = ar011   # floor 0.950/0.950
+explen/len8k = ar011   # floor 0.950/0.950

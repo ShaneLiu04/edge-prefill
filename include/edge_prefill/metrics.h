@@ -68,6 +68,13 @@ struct Sample {
     // AR010 FR-3 audit.
     uint32_t evidence_blocks = 0;
     std::string stop_reason = "budget";
+    // AR011 FR-1/FR-2/FR-3 audit: structural vs evidence token split, tokens
+    // trimmed by the span pass, and requested facts the reservation could not
+    // cover.
+    uint32_t structure_tokens = 0;
+    uint32_t evidence_tokens = 0;
+    uint32_t span_tokens = 0;
+    uint32_t uncovered_facts = 0;
     std::string portfolio_choice = "none";
     std::string portfolio_reason;
 };

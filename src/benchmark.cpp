@@ -240,6 +240,11 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
     base.coverage_weight = cfg.coverage_weight;
     base.prior_gate = cfg.prior_gate;
     base.fill_priors = cfg.fill_priors;
+    base.structure_budget = cfg.structure_budget;
+    base.anchor_span_radius = cfg.anchor_span_radius;
+    base.coverage_reserve = cfg.coverage_reserve;
+    base.span_admission = cfg.span_admission;
+    base.span_min_tokens = cfg.span_min_tokens;
     base.portfolio_table = cfg.portfolio_table;
     if (!base.budget_curve.empty()) {
         BudgetCurve curve;
@@ -451,6 +456,11 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
                     sopts.coverage_weight = run_cfg.coverage_weight;
                     sopts.prior_gate = run_cfg.prior_gate;
                     sopts.fill_priors = run_cfg.fill_priors;
+                    sopts.structure_budget = run_cfg.structure_budget;
+                    sopts.anchor_span_radius = run_cfg.anchor_span_radius;
+                    sopts.coverage_reserve = run_cfg.coverage_reserve;
+                    sopts.span_admission = run_cfg.span_admission;
+                    sopts.span_min_tokens = run_cfg.span_min_tokens;
                     sopts.weights = run_cfg.weights;
                     // AR005: semantic-priority fusion defaults when the
                     // embedding engine is active and the user has not
@@ -911,6 +921,10 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
                     sample.coverage_queries = selection.coverage_queries;
                     sample.evidence_blocks = selection.evidence_blocks;
                     sample.stop_reason = selection.stop_reason;
+                    sample.structure_tokens = selection.structure_tokens;
+                    sample.evidence_tokens = selection.evidence_tokens;
+                    sample.span_tokens = selection.span_tokens;
+                    sample.uncovered_facts = selection.uncovered_facts;
                     sample.portfolio_choice = portfolio_choice;
                     sample.portfolio_reason = portfolio_reason;
                     sample.mmr_penalized = selection.mmr_penalized;

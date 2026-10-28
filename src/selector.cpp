@@ -150,6 +150,24 @@ std::string Selection::to_json() const {
     json.value(static_cast<uint64_t>(phrase_blocks));
     json.key("specific_terms");
     json.value(static_cast<uint64_t>(specific_terms));
+    json.key("coverage_queries");
+    json.value(static_cast<uint64_t>(coverage_queries));
+    json.key("evidence_blocks");
+    json.value(static_cast<uint64_t>(evidence_blocks));
+    json.key("stop_reason");
+    json.value(stop_reason);
+    json.key("anchor_blocks");
+    json.value(static_cast<uint64_t>(anchor_blocks));
+    json.key("mmr_penalized");
+    json.value(static_cast<uint64_t>(mmr_penalized));
+    json.key("structure_tokens");
+    json.value(static_cast<uint64_t>(structure_tokens));
+    json.key("evidence_tokens");
+    json.value(static_cast<uint64_t>(evidence_tokens));
+    json.key("span_tokens");
+    json.value(static_cast<uint64_t>(span_tokens));
+    json.key("uncovered_facts");
+    json.value(static_cast<uint64_t>(uncovered_facts));
     json.key("lexical_concentration");
     json.value(lexical_concentration);
     json.key("signals");
@@ -617,7 +635,14 @@ Status BlockSelector::select(const std::vector<llama_token>& tokens,
             mandatory.insert(best_lex);
             // Facts often straddle a block boundary; keep the neighbors of the
             // strongest lexical match so the answer span is never split away.
-            for (int32_t delta = -2; delta <= 2; ++delta) {
+            // AR011 FR-1: the window radius is configurable because +-2 blocks
+            // is 160 tokens at block_size=32 - a fifth of a 4K budget spent on
+            // neighbourhood protection alone.
+            const int32_t radius = opts.anchor_span_radius > 0
+                                           ? static_cast<int32_t>(
+                                                     std::min<uint32_t>(opts.anchor_span_radius, 2))
+                                           : 2;
+            for (int32_t delta = -radius; delta <= radius; ++delta) {
                 const int32_t b = static_cast<int32_t>(best_lex) + delta;
                 if (b >= 0 && b < static_cast<int32_t>(n_blocks)) {
                     mandatory.insert(static_cast<uint32_t>(b));
@@ -886,8 +911,48 @@ Status BlockSelector::select(const std::vector<llama_token>& tokens,
         for (uint32_t b : set) n += std::min(block_size, n_tokens - b * block_size);
         return n;
     };
-    const uint32_t anchor_cap = std::max<uint32_t>(block_size, static_cast<uint32_t>(
-        std::ceil(static_cast<double>(target) * std::clamp(opts.anchor_ratio, 0.05, 1.0))));
+    // AR011 FR-1: separate the *structural* anchors (sink + recent, never
+    // trimmed) from the evidence anchors. Measured before this change: a 4K
+    // prompt at b=0.08 selected 310 tokens of which 9/10 blocks were mandatory,
+    // i.e. anchor_ratio=0.35 was already breached by the untrimmable phrase
+    // anchors and the best-lexical +-2 window. The budget was a quota for
+    // structure, not for evidence.
+    std::set<uint32_t> structure_blocks;
+    for (uint32_t b = 0; b < std::min<uint32_t>(opts.sink_blocks, n_blocks); ++b) {
+        structure_blocks.insert(b);
+    }
+    structure_blocks.insert(n_blocks - 1);
+    const uint32_t structure_tokens = anchor_tokens(structure_blocks);
+    // The cap only has to be enforced when the anchors actually dominate the
+    // budget. At 16K the legacy anchor set is 288 tokens against a 781-token
+    // budget: the fill is evidence-limited there and structural accounting just
+    // admits *more* evidence (measured 280 -> 320 tokens for no quality gain).
+    // Where the budget is tight (4K/8K, multi-fact) the anchors are 70-90% of
+    // the budget and the accounting is what decides the context.
+    const uint32_t anchor_tokens_raw = anchor_tokens(anchors);
+    const bool structure_applies = opts.structure_budget > 0 &&
+                                   anchor_tokens_raw > target / 2;
+    uint32_t anchor_cap = 0;
+    if (structure_applies) {
+        // Structure gets an absolute allowance; anchor_ratio then applies to the
+        // remaining evidence budget instead of the whole budget.
+        uint32_t struct_budget = std::max<uint32_t>(structure_tokens, opts.structure_budget);
+        const uint32_t struct_max = std::max<uint32_t>(structure_tokens, target / 2);
+        if (struct_budget > struct_max) {
+            log_warn("structure_budget " + std::to_string(opts.structure_budget) +
+                     " exceeds half the token budget; clamping to " +
+                     std::to_string(struct_max));
+            struct_budget = struct_max;
+        }
+        const uint32_t evidence_budget = std::max<uint32_t>(
+            block_size, target > struct_budget ? target - struct_budget : block_size);
+        anchor_cap = struct_budget + static_cast<uint32_t>(std::ceil(
+            static_cast<double>(evidence_budget) *
+            std::clamp(opts.anchor_ratio, 0.05, 1.0)));
+    } else {
+        anchor_cap = std::max<uint32_t>(block_size, static_cast<uint32_t>(
+            std::ceil(static_cast<double>(target) * std::clamp(opts.anchor_ratio, 0.05, 1.0))));
+    }
     for (auto it = stride_anchors.rbegin(); it != stride_anchors.rend() &&
                                              anchor_tokens(anchors) > anchor_cap; ++it) {
         // Phrase anchors are the only discriminative evidence in the prompt;
@@ -904,6 +969,53 @@ Status BlockSelector::select(const std::vector<llama_token>& tokens,
         if (anchors.count(*it) && *it != 0 && *it != n_blocks - 1 && !mandatory.count(*it) &&
             !phrase_anchors.count(*it)) {
             anchors.erase(*it);
+        }
+    }
+    if (structure_applies) {
+        // AR011: the cap must also bind the anchors the legacy path protected.
+        // Drop phrase anchors (weakest evidence first, by fused score) and then
+        // shrink the best-lexical window, keeping the peak block itself.
+        std::vector<uint32_t> droppable;
+        for (uint32_t b : anchors) {
+            if (structure_blocks.count(b) || !phrase_anchors.count(b)) continue;
+            droppable.push_back(b);
+        }
+        std::sort(droppable.begin(), droppable.end(), [&](uint32_t a, uint32_t b) {
+            if (std::abs(fused[a] - fused[b]) > 1e-12) return fused[a] < fused[b];
+            return a > b;
+        });
+        for (uint32_t b : droppable) {
+            if (anchor_tokens(anchors) <= anchor_cap) break;
+            anchors.erase(b);
+        }
+        // Shrink best_lex +- radius: drop the ring furthest from the peak first.
+        if (anchor_tokens(anchors) > anchor_cap) {
+            uint32_t peak = n_blocks;
+            double peak_score = -1.0;
+            for (uint32_t b : anchors) {
+                if (structure_blocks.count(b)) continue;
+                if (fused[b] > peak_score) {
+                    peak_score = fused[b];
+                    peak = b;
+                }
+            }
+            if (peak != n_blocks) {
+                std::vector<uint32_t> ring;
+                for (uint32_t b : anchors) {
+                    if (structure_blocks.count(b) || b == peak) continue;
+                    ring.push_back(b);
+                }
+                std::sort(ring.begin(), ring.end(), [&](uint32_t a, uint32_t b) {
+                    const uint32_t da = a > peak ? a - peak : peak - a;
+                    const uint32_t db = b > peak ? b - peak : peak - b;
+                    if (da != db) return da > db;
+                    return a > b;
+                });
+                for (uint32_t b : ring) {
+                    if (anchor_tokens(anchors) <= anchor_cap) break;
+                    anchors.erase(b);
+                }
+            }
         }
     }
     mandatory = anchors;
@@ -935,6 +1047,51 @@ Status BlockSelector::select(const std::vector<llama_token>& tokens,
         selected_tokens += std::min(block_size, n_tokens - b * block_size);
     }
     for (uint32_t b : selected_blocks) mark_covered(b);
+
+    // AR011 FR-2: coverage reservation. The AR009 facility-location gain only
+    // *bribes* the greedy; it does not promise anything. Measured on the
+    // six-fact family the fill stopped with q_min=0.087 - two of the asked
+    // facts had no admitted evidence at all. Reserve one block per uncovered
+    // sub-query before the greedy starts, in IDF order, and report the
+    // shortfall honestly when the budget cannot hold them all.
+    if (opts.coverage_reserve > 0 && !sub_idf.empty()) {
+        std::vector<size_t> order(sub_idf.size());
+        for (size_t i = 0; i < order.size(); ++i) order[i] = i;
+        std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) {
+            if (std::abs(sub_idf[a] - sub_idf[b]) > 1e-12) return sub_idf[a] > sub_idf[b];
+            return a < b;
+        });
+        for (size_t p : order) {
+            if (covered[p] > 0.0) continue;
+            bool hittable = false;
+            for (uint32_t b = 0; b < n_blocks && !hittable; ++b) {
+                if (sub_hit[p][b]) hittable = true;
+            }
+            // A sub-query with no non-echo block anywhere cannot be covered by
+            // any policy; counting it as a shortfall would make single-fact
+            // prompts look broken (measured: 5 "uncovered" on a 1-fact prompt
+            // whose echo blocks are excluded by design).
+            if (!hittable) continue;
+            uint32_t best = n_blocks;
+            double best_score = -1.0;
+            for (uint32_t b = 0; b < n_blocks; ++b) {
+                if (selected_blocks.count(b) || !sub_hit[p][b]) continue;
+                if (best_score >= 0.0 && fused[b] <= best_score) continue;
+                const uint32_t size = std::min(block_size, n_tokens - b * block_size);
+                if (selected_tokens + size > target) continue;
+                best = b;
+                best_score = fused[b];
+            }
+            if (best == n_blocks) {
+                ++out->uncovered_facts;
+                continue;
+            }
+            selected_blocks.insert(best);
+            selected_tokens += std::min(block_size, n_tokens - best * block_size);
+            mark_covered(best);
+        }
+        if (out->uncovered_facts == 0) out->stop_reason = "facts-covered";
+    }
 
 
     // Incremental MMR: max_sim[b] tracks the highest similarity between b
@@ -1051,6 +1208,105 @@ Status BlockSelector::select(const std::vector<llama_token>& tokens,
         const uint32_t begin = b * block_size;
         const uint32_t end = std::min(n_tokens, begin + block_size);
         for (uint32_t i = begin; i < end; ++i) out->token_indices.push_back(i);
+    }
+
+    // AR011 FR-1 audit: split the admitted tokens into the structural anchors
+    // (sink/recent, never trimmed) and everything the evidence bought.
+    out->structure_tokens = anchor_tokens(structure_blocks);
+    out->evidence_tokens = out->token_indices.size() > out->structure_tokens
+                                   ? static_cast<uint32_t>(out->token_indices.size()) -
+                                             out->structure_tokens
+                                   : 0;
+
+    // AR011 FR-3: span admission. The admission unit and the execution unit are
+    // different concerns: the attention pool addresses 32-token blocks, but a
+    // needle sentence is ~20 tokens, so a whole-block admission pays for the
+    // filler around it. Keep a token span centred on the evidence peak inside
+    // each non-structural block. Blocks with no positive evidence score stay
+    // whole (never guess), and neighbours that are already selected extend the
+    // span so a cross-block answer is not cut in half.
+    //
+    // Single-fact only: with several asked facts the selection has to carry one
+    // complete sentence per fact, and trimming measured q=0.576 -> 0.405
+    // (multifact8k) and q_min 0.087 -> 0.000 (hard). Multi-fact prompts
+    // therefore keep whole blocks; the anchor budget (FR-1) is what saves them.
+    if (opts.span_admission > 0 && sub_idf.empty() && !out->token_indices.empty() &&
+        out->per_pos_scores.size() == n_tokens) {
+        const uint32_t span_min = std::max<uint32_t>(
+            block_size / 4, std::min<uint32_t>(opts.span_min_tokens, block_size));
+        // Sentence boundaries: a span centred on the evidence peak must still
+        // contain the *answer*, which usually follows the matched key in the
+        // same sentence ("...passcode for vault 1 is MAGENTA-FALCON-7000.").
+        // A blind +-12-token window measured q=0.625 on len4k: the window
+        // covered "vault 1" and dropped the code. So grow the span to the
+        // enclosing sentence first, then to span_min if it is still shorter.
+        auto ends_sentence = [&](uint32_t i) {
+            const std::string& piece = token_pieces[i];
+            if (piece.empty()) return false;
+            for (char c : piece) {
+                if (c == '.' || c == '!' || c == '?' || c == '\n' || c == ';') return true;
+            }
+            return false;
+        };
+        std::vector<char> keep(n_tokens, 0);
+        for (uint32_t b : out->block_indices) {
+            const uint32_t begin = b * block_size;
+            const uint32_t end = std::min(n_tokens, begin + block_size);
+            const bool whole = structure_blocks.count(b) != 0;
+            uint32_t peak = begin;
+            double peak_score = 0.0;
+            for (uint32_t i = begin; i < end; ++i) {
+                if (out->per_pos_scores[i] > peak_score) {
+                    peak_score = out->per_pos_scores[i];
+                    peak = i;
+                }
+            }
+            if (whole || peak_score <= 0.0) {
+                for (uint32_t i = begin; i < end; ++i) keep[i] = 1;
+                continue;
+            }
+            uint32_t lo = begin;
+            for (uint32_t i = peak; i > begin; --i) {
+                if (ends_sentence(i - 1)) {
+                    lo = i;
+                    break;
+                }
+            }
+            uint32_t hi = end;
+            for (uint32_t i = peak; i < end; ++i) {
+                if (ends_sentence(i)) {
+                    hi = i + 1;
+                    break;
+                }
+            }
+            // Pad a short sentence to span_min, symmetric around the peak.
+            while (hi - lo < span_min) {
+                bool grew = false;
+                if (hi < end) {
+                    ++hi;
+                    grew = true;
+                }
+                if (hi - lo < span_min && lo > begin) {
+                    --lo;
+                    grew = true;
+                }
+                if (!grew) break;
+            }
+            // Extend across a neighbouring selected block so a sentence that
+            // straddles the block boundary is not cut in half.
+            while (lo > 0 && keep[lo - 1]) --lo;
+            while (hi < n_tokens && keep[hi]) ++hi;
+            for (uint32_t i = lo; i < hi; ++i) keep[i] = 1;
+        }
+        std::vector<uint32_t> trimmed;
+        trimmed.reserve(out->token_indices.size());
+        for (uint32_t i : out->token_indices) {
+            if (keep[i]) trimmed.push_back(i);
+        }
+        out->span_tokens = static_cast<uint32_t>(out->token_indices.size() - trimmed.size());
+        if (!trimmed.empty()) {
+            out->token_indices = std::move(trimmed);
+        }
     }
 
     if (out->token_indices.size() > limit) {

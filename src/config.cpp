@@ -315,6 +315,27 @@ Status parse_config_file(const std::string& path, Config* out) {
                 return Status::error(ErrorCode::InvalidArgument, "fill_priors must be in [0,1]");
             }
             out->fill_priors = d;
+        } else if (key == "structure_budget") {
+            if (!parse_i64(value, &i) || i < 0) goto bad_value;
+            out->structure_budget = static_cast<uint32_t>(i);
+        } else if (key == "anchor_span_radius") {
+            if (!parse_i64(value, &i) || i < 0 || i > 2) goto bad_value;
+            out->anchor_span_radius = static_cast<uint32_t>(i);
+        } else if (key == "coverage_reserve") {
+            if (!parse_double(value, &d) || !(d >= 0.0 && d <= 1.0)) {
+                return Status::error(ErrorCode::InvalidArgument,
+                                     "coverage_reserve must be in [0,1]");
+            }
+            out->coverage_reserve = d > 0.5 ? 1 : 0;
+        } else if (key == "span_admission") {
+            if (!parse_double(value, &d) || !(d >= 0.0 && d <= 1.0)) {
+                return Status::error(ErrorCode::InvalidArgument,
+                                     "span_admission must be in [0,1]");
+            }
+            out->span_admission = d > 0.5 ? 1 : 0;
+        } else if (key == "span_min_tokens") {
+            if (!parse_i64(value, &i) || i < 1) goto bad_value;
+            out->span_min_tokens = static_cast<uint32_t>(i);
         } else if (key == "portfolio" || key == "portfolio_table") {
             out->portfolio_table = value;
         } else if (key == "budget_curve") {

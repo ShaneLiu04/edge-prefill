@@ -691,3 +691,167 @@ TEST_CASE(selector_prior_gate_keeps_evidence_admitted) {
     CHECK(gated_has);
     CHECK(plain_has);
 }
+
+// AR011 FR-1: the structure budget must bound the structural anchors (sink +
+// recent) absolutely, and the anchor cap must then be able to trim the anchors
+// that used to be untouchable (best-lexical window, phrase pins). Measured
+// before the change: a 4K prompt at b=0.08 admitted 310 tokens of which 9/10
+// blocks were mandatory, so the "budget" was a quota for structure.
+TEST_CASE(selector_structure_budget_bounds_anchors) {
+    constexpr uint32_t n = 4096;
+    std::vector<llama_token> tokens(n);
+    std::vector<std::string> pieces(n, "filler");
+    for (uint32_t i = 0; i < n; ++i) tokens[i] = static_cast<llama_token>(i % 1000);
+    pieces[40 * 32 + 4] = "needle";
+    pieces[41 * 32 + 4] = "needle";
+    pieces[60 * 32 + 1] = "needle";
+
+    auto opts = options(0.08);
+    opts.fill_priors = 0.0;
+    Selection legacy;
+    BlockSelector selector;
+    CHECK_OK(selector.select(tokens, "needle", pieces, opts, nullptr, &legacy));
+
+    auto bounded = opts;
+    bounded.structure_budget = 64;
+    Selection sel;
+    CHECK_OK(selector.select(tokens, "needle", pieces, bounded, nullptr, &sel));
+    CHECK(sel.structure_tokens <= 64u);
+    CHECK(sel.evidence_tokens + sel.structure_tokens == sel.selected_tokens);
+    CHECK(sel.selected_tokens <= legacy.selected_tokens);
+    CHECK(sel.anchor_blocks <= legacy.anchor_blocks);
+    // The structural sink and the final block are never dropped: the first
+    // token logits and the attention sink depend on them.
+    CHECK(std::find(sel.mandatory_blocks.begin(), sel.mandatory_blocks.end(), 0) !=
+          sel.mandatory_blocks.end());
+    CHECK(std::find(sel.mandatory_blocks.begin(), sel.mandatory_blocks.end(), n / 32 - 1) !=
+          sel.mandatory_blocks.end());
+    // The evidence that was actually asked for must still be admitted.
+    CHECK(std::find(sel.block_indices.begin(), sel.block_indices.end(), 40u) !=
+          sel.block_indices.end());
+}
+
+// AR011 FR-1: at a length where the anchors do not dominate the budget the
+// accounting must be a no-op (measured 16K: 280 tokens either way; forcing the
+// cap there admitted *more* evidence, 320 tokens, for no quality gain).
+TEST_CASE(selector_structure_budget_is_inert_when_anchors_do_not_dominate) {
+    constexpr uint32_t n = 15744;
+    std::vector<llama_token> tokens(n);
+    std::vector<std::string> pieces(n, "filler");
+    for (uint32_t i = 0; i < n; ++i) tokens[i] = static_cast<llama_token>(i % 1000);
+    pieces[100 * 32 + 4] = "needle";
+
+    auto opts = options(0.05);
+    opts.fill_priors = 0.0;
+    Selection legacy;
+    BlockSelector selector;
+    CHECK_OK(selector.select(tokens, "needle", pieces, opts, nullptr, &legacy));
+    auto bounded = opts;
+    bounded.structure_budget = 64;
+    Selection sel;
+    CHECK_OK(selector.select(tokens, "needle", pieces, bounded, nullptr, &sel));
+    CHECK_EQ(sel.selected_tokens, legacy.selected_tokens);
+    CHECK_EQ(sel.block_indices.size(), legacy.block_indices.size());
+}
+
+// AR011 FR-3: span admission decouples the admission granularity from the
+// 32-token execution block. The span must be centred on the evidence peak, keep
+// the sentence it belongs to, and never drop the last prompt token.
+TEST_CASE(selector_span_admission_trims_and_keeps_last_token) {
+    constexpr uint32_t n = 8192;
+    std::vector<llama_token> tokens(n);
+    std::vector<std::string> pieces(n, "filler");
+    for (uint32_t i = 0; i < n; ++i) tokens[i] = static_cast<llama_token>(i % 1000);
+    // A sentence inside one evidence block: the key and the answer after it.
+    pieces[50 * 32 + 10] = "needle";
+    pieces[50 * 32 + 12] = "answer";
+    pieces[50 * 32 + 16] = ".";
+
+    auto opts = options(0.08);
+    opts.fill_priors = 0.0;
+    opts.structure_budget = 64;
+    Selection whole;
+    BlockSelector selector;
+    CHECK_OK(selector.select(tokens, "needle", pieces, opts, nullptr, &whole));
+    auto span_opts = opts;
+    span_opts.span_admission = 1;
+    span_opts.span_min_tokens = 24;
+    Selection span;
+    CHECK_OK(selector.select(tokens, "needle", pieces, span_opts, nullptr, &span));
+    CHECK(span.span_tokens > 0u);
+    CHECK(span.selected_tokens < whole.selected_tokens);
+    CHECK_EQ(span.selected_tokens + span.span_tokens, whole.selected_tokens);
+    CHECK_EQ(span.token_indices.back(), n - 1);
+    for (size_t i = 1; i < span.token_indices.size(); ++i) {
+        CHECK(span.token_indices[i] > span.token_indices[i - 1]);
+    }
+    // The key and the answer sentence survive the trim.
+    const auto has = [&](uint32_t pos) {
+        return std::find(span.token_indices.begin(), span.token_indices.end(), pos) !=
+               span.token_indices.end();
+    };
+    CHECK(has(50 * 32 + 10));
+    CHECK(has(50 * 32 + 12));
+}
+
+// AR011 FR-3: with several asked facts the span pass must stay out of the way.
+// Trimming a multi-fact selection measured q 0.836 -> 0.800 (easy) and
+// 0.669 -> 0.444 with q_min 0.174 -> 0.000 (hard): each fact needs its whole
+// sentence, so the selector keeps whole blocks whenever coverage is active.
+TEST_CASE(selector_span_admission_is_inert_for_multi_fact) {
+    constexpr uint32_t n = 8192;
+    std::vector<llama_token> tokens(n);
+    std::vector<std::string> pieces(n, "filler");
+    for (uint32_t i = 0; i < n; ++i) tokens[i] = static_cast<llama_token>(i % 1000);
+    // Three sibling facts, each keyed by its own rare term.
+    pieces[20 * 32 + 3] = "alpha";
+    pieces[20 * 32 + 5] = "value";
+    pieces[60 * 32 + 3] = "beta";
+    pieces[60 * 32 + 5] = "value";
+    pieces[100 * 32 + 3] = "gamma";
+    pieces[100 * 32 + 5] = "value";
+
+    auto opts = options(0.10);
+    opts.fill_priors = 0.0;
+    opts.coverage_weight = 3.0;
+    Selection whole;
+    BlockSelector selector;
+    CHECK_OK(selector.select(tokens, "alpha beta gamma value", pieces, opts, nullptr,
+                             &whole));
+    CHECK(whole.coverage_queries >= 2u);
+    auto span_opts = opts;
+    span_opts.span_admission = 1;
+    Selection span;
+    CHECK_OK(selector.select(tokens, "alpha beta gamma value", pieces, span_opts, nullptr,
+                             &span));
+    CHECK_EQ(span.span_tokens, 0u);
+    CHECK_EQ(span.selected_tokens, whole.selected_tokens);
+}
+
+// AR011: coverage reservation is an explicit opt-in and must report the
+// shortfall honestly instead of silently leaving a requested fact without
+// evidence. (Measured: no reliable gain over the AR009 facility-location fill
+// at the tested budgets, so it stays off by default and off in the portfolio.)
+TEST_CASE(selector_coverage_reserve_reports_shortfall) {
+    constexpr uint32_t n = 8192;
+    std::vector<llama_token> tokens(n);
+    std::vector<std::string> pieces(n, "filler");
+    for (uint32_t i = 0; i < n; ++i) tokens[i] = static_cast<llama_token>(i % 1000);
+    pieces[10 * 32 + 3] = "alpha";
+    pieces[80 * 32 + 3] = "beta";
+    pieces[150 * 32 + 3] = "gamma";
+
+    auto opts = options(0.02);  // 163 tokens: one block after the structure
+    opts.fill_priors = 0.0;
+    opts.coverage_weight = 3.0;
+    Selection plain;
+    BlockSelector selector;
+    CHECK_OK(selector.select(tokens, "alpha beta gamma", pieces, opts, nullptr, &plain));
+    auto reserve = opts;
+    reserve.coverage_reserve = 1;
+    Selection sel;
+    CHECK_OK(selector.select(tokens, "alpha beta gamma", pieces, reserve, nullptr, &sel));
+    CHECK(sel.uncovered_facts > 0u);
+    CHECK(sel.uncovered_facts <= sel.coverage_queries + sel.uncovered_facts);
+    CHECK(sel.selected_tokens <= plain.selected_tokens + 32u);
+}

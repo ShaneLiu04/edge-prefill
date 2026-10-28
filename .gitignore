@@ -27,3 +27,4 @@ benchmarks/results/exp-dump*/
 # Local verification trees (AR009)
 build-asan/
 build-clean/
+models

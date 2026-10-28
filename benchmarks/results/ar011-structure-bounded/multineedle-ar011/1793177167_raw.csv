@@ -1,0 +1,7 @@
+task,case,ttft_ms,e2e_ms,prefill_tps,kv_bytes,quality,dense,prompt_tokens,selected_tokens,mode,budget,attn_top_k,repeats,ppl_dense,ppl_sparse,query_gating,qg_groups,score_source,semantic_score_ms,draft_score_ms,qg_source,budget_source,anchor_blocks,mmr_penalized,phrase_blocks,specific_terms,coverage_queries,evidence_blocks,stop_reason,portfolio_choice,portfolio_reason,structure_tokens,evidence_tokens,span_tokens,uncovered_facts
+niah,mn-01-n1@7803,1359.113349,1819.095757,211.2257274,8233012,1,0,7847,287,balanced,0.05,0,1,0,0,0,0,lexical,0,0,,model,6,0,5,4,0,6,evidence-exhausted,selection,disabled,39,288,40,0
+niah,mn-01-n2@7803,1197.856723,1666.256756,212.901319,7315124,1,0,7847,255,balanced,0.05,0,1,0,0,0,0,lexical,0,0,,model,6,0,5,4,0,6,evidence-exhausted,selection,disabled,39,256,40,0
+niah,mn-01-n3@7803,1379.111848,1818.040072,184.916338,7315124,1,0,7847,255,balanced,0.05,0,1,0,0,0,0,lexical,0,0,,model,6,0,5,4,0,6,evidence-exhausted,selection,disabled,39,256,40,0
+niah,mn-02-n4@7823,1131.572162,1647.090051,221.836684,7200388,1,0,7867,251,balanced,0.05,0,1,0,0,0,0,lexical,0,0,,model,5,0,4,4,0,6,evidence-exhausted,selection,disabled,59,224,32,0
+niah,mn-02-n5@7823,922.409138,1292.976534,237.4519133,6282500,1,0,7867,219,balanced,0.05,0,1,0,0,0,0,lexical,0,0,,model,5,0,5,4,0,6,evidence-exhausted,selection,disabled,59,192,32,0
+niah,mn-02-n6@7823,965.160361,1318.101495,226.9324228,6282500,1,0,7867,219,balanced,0.05,0,1,0,0,0,0,lexical,0,0,,model,5,0,4,4,0,6,evidence-exhausted,selection,disabled,59,192,32,0

@@ -1,0 +1,5 @@
+task,case,ttft_ms,e2e_ms,prefill_tps,kv_bytes,quality,dense,prompt_tokens,selected_tokens,mode,budget,attn_top_k,repeats,ppl_dense,ppl_sparse,query_gating,qg_groups,score_source,semantic_score_ms,draft_score_ms,qg_source,budget_source,anchor_blocks,mmr_penalized,phrase_blocks,specific_terms,coverage_queries,evidence_blocks,stop_reason,portfolio_choice,portfolio_reason,structure_tokens,evidence_tokens,span_tokens,uncovered_facts
+niah,niah-01@3918,890.297206,1414.059375,137.085737,3500152,1,0,3962,122,balanced,0.08,0,1,0,0,0,0,lexical,0,0,,model,4,0,2,4,0,3,evidence-exhausted,selection,disabled,58,64,0,0
+niah,niah-02@3885,588.587041,996.553263,205.6120186,3471468,1,0,3929,121,balanced,0.08,0,1,0,0,0,0,lexical,0,0,,model,4,0,2,4,0,3,evidence-exhausted,selection,disabled,57,64,0,0
+niah,niah-03@3902,849.366957,1219.20525,200.1754479,4876984,1,0,3946,170,balanced,0.08,0,1,0,0,0,0,lexical,0,0,,model,5,0,2,4,0,4,evidence-exhausted,selection,disabled,42,128,0,0
+niah,niah-04@3904,813.338161,1207.426485,211.5033213,4934352,1,0,3948,172,balanced,0.08,0,1,0,0,0,0,lexical,0,0,,model,5,0,2,4,0,4,evidence-exhausted,selection,disabled,44,128,0,0

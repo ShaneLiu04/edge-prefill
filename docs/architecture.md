@@ -182,6 +182,34 @@ min quality reach the floor, else the best quality", and
 the best fixed combo, so a new arm that does not improve the combination is
 rejected rather than shipped.
 
+## Structure-bounded admission (AR011)
+
+TTFT is proportional to the admitted token count, so the remaining lever after
+AR010 is the count itself. A 4K audit showed 9 of 10 selected blocks were
+mandatory: nchor_ratio capped a fraction of a budget the untrimmable anchors
+(best-lexical +-2, phrase pins) had already spent.
+
+Structure (sink + recent) now gets an absolute allowance and nchor_ratio
+governs only the remaining evidence budget:
+
+`	ext
+structure       = sink_blocks + last block          (never trimmed)
+evidence_budget = target - structure_tokens
+anchor_cap      = structure_budget + ceil(evidence_budget * anchor_ratio)
+`
+
+The accounting only engages when the anchors actually dominate the budget
+(nchor_tokens > target/2): at 16K/32K they are 20-37% of it, and forcing the
+cap there admits *more* evidence (280 -> 320 tokens) for no quality gain.
+
+Span admission (span_admission) decouples the admission unit from the
+execution unit: the attention pool still addresses 32-token blocks, but the
+admitted tokens are trimmed to the sentence around the evidence peak. It is
+skipped whenever several facts are asked - a multi-fact answer needs one whole
+sentence per fact (trimming measured 0.836 -> 0.800 and q_min 0.174 -> 0.000).
+Audit columns: structure_tokens, evidence_tokens, span_tokens,
+uncovered_facts.
+
 ## Edge accounting and the dense invariant
 
 `budget=1.0`, `qg_bound=false`, `query_gating=false`, `attn_top_k=0` and
