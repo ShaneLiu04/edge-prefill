@@ -1,0 +1,9 @@
+dataset,arm,cases,q_mean,q_min,ttft_median,selected,span_trimmed,sentences,extended
+deep/multifact8k,ar011,16,0.836,0.4286,2306.5467,431,0,0.0,0.0
+deep/multifact8k,ar012,16,0.8869,0.4286,2843.2317,509,0,10.9375,2.6875
+deep/multifact8k,ar012-trim,16,0.8148,0.4,2065.0711,371,61,10.9375,2.6875
+deep/multifact8k,gate-p16,16,0.836,0.4286,2338.5284,431,0,0.0,0.0
+deep/multifact8k-hard,ar011,16,0.7086,0.5714,2297.4703,445,0,0.0,0.0
+deep/multifact8k-hard,ar012,16,0.7393,0.6207,2633.3065,513,0,10.75,2.625
+deep/multifact8k-hard,ar012-trim,16,0.6887,0.3529,2104.5626,372,72,10.75,2.625
+deep/multifact8k-hard,gate-p16,16,0.6672,0.087,2334.4135,445,0,0.0,0.0

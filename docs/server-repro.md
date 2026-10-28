@@ -371,7 +371,55 @@ python3 benchmarks/scripts/ar011_report.py benchmarks/results/ar011-structure-bo
 | GPU 一致性 | q/sel 逐例一致 | 准入在 host 侧；本机 4K 122/121/170/172 逐例相同，45.2 ms vs 1091.5 ms |
 | 开关全关 | 与 AR010 逐 token 一致 | 三个新开关默认 0，`selector_structure_budget_is_inert_*` 用例守护 |
 
-## 12. 报告模板
+## 12. AR012：句子完整准入
+
+### 12.1 一条命令
+
+```bash
+./repro.sh ar012     # 4 臂矩阵（含逐 case 准入文本）+ 路由表 + 闸门 + 注入自测 + 事实完整率
+```
+
+### 12.2 手动跑（大机器可只跑多事实两档）
+
+```bash
+python3 benchmarks/scripts/ar012_matrix.py \
+  --bin build/edge-prefill --model models/qwen2.5-1.5b-instruct-q4_k_m.gguf \
+  --datasets deep/multifact8k,deep/multifact8k-hard --dump \
+  --out benchmarks/results/ar012-sentence-complete --force
+
+python3 benchmarks/scripts/ar012_report.py benchmarks/results/ar012-sentence-complete
+python3 benchmarks/scripts/ar012_report.py benchmarks/results/ar012-sentence-complete --gate
+python3 benchmarks/scripts/ar012_report.py benchmarks/results/ar012-sentence-complete \
+  --gate --inject deep/multifact8k:ar012-trim          # 必须 FAIL
+
+# 确定性审计：被问事实的答案是否完整出现在准入上下文里（不经过模型打分）
+python3 benchmarks/scripts/check_facts_admission.py \
+  benchmarks/results/ar012-sentence-complete \
+  --dataset deep/multifact8k-hard --floor 0.95
+```
+
+### 12.3 配置项（AR012）
+
+| conf 键 | CLI | 默认 | 作用 |
+|---|---|---|---|
+| `sentence_completion` | `--sentence-completion 0\|1` | 0 | 证据 token 拉入整句（可跨块补闭包）；仅多事实生效 |
+| `sentence_trim` | `--sentence-trim 0\|1` | 0 | 补齐后再裁掉句子外 token（实测伤质量，不参与路由） |
+| `span_max_tokens` | `--span-max-tokens N` | 128 | 单句上限，防无标点文档 |
+| `dump_selection_dir` | — | 空 | bench 每 case 写 `_selected.txt` / `_selection.json` |
+
+### 12.4 判读标准
+
+| 指标 | 通过线 | 说明 |
+|---|---|---|
+| 多事实 hard 事实完整率 | ≥0.95 | AR011 为 0.760，AR012 为 0.990 |
+| 多事实 easy/hard q | ≥0.836 / ≥0.709 | 实到 0.887 / 0.739（`q_min` 0.571 → 0.621） |
+| 其余 5 个数据集 | 逐 token 不变 | 146/188/280/525/247 |
+| token 成本 | 无收益则不得增长；有收益最多 1.25× | 闸门规则 |
+| 注入劣化 | 必须 FAIL | `--inject deep/multifact8k:ar012-trim` |
+| GPU 一致性 | sel 逐例一致 | 实测 16/16 完全相同 |
+| 开关全关 | 与 AR011 逐 token 一致 | `selector_sentence_completion_off_matches_ar011` |
+
+## 13. 报告模板
 
 ```
 机器: <CPU/GPU, 核心数, 内存>, 会话: <日期>

@@ -1,257 +1,89 @@
-<p align="center">
-  <img src="docs/assets/cover.png" alt="EdgePrefill AR011 cover" width="100%">
-</p>
+# EdgePrefill
 
-<p align="center">
-  <img alt="C++17" src="https://img.shields.io/badge/C%2B%2B-17-0F766E?style=flat-square">
-  <img alt="CMake 3.20+" src="https://img.shields.io/badge/CMake-3.20%2B-0F766E?style=flat-square">
-  <img alt="llama.cpp pinned commit" src="https://img.shields.io/badge/llama.cpp-3bb63cbc-334155?style=flat-square">
-  <img alt="CPU + CUDA" src="https://img.shields.io/badge/platform-CPU%20%2B%20CUDA-334155?style=flat-square">
-  <img alt="AR011 ST" src="https://img.shields.io/badge/status-AR011%20ST-B45309?style=flat-square">
-  <img alt="Tests" src="https://img.shields.io/badge/tests-163%20PASS-0F766E?style=flat-square">
-</p>
+Real-GGUF, prefill-stage acceleration for edge-class CPUs/GPUs, built directly
+on a pinned [llama.cpp](https://github.com/ggml-org/llama.cpp) commit. No
+mocks, no synthetic timings: every number in `benchmarks/results/` comes from
+a real model run with the exact command recorded alongside it.
 
-<h1 align="center">EdgePrefill</h1>
+## What it does
 
-<p align="center">
-  面向端侧长上下文大模型的分层稀疏 Prefill 引擎<br>
-  <sub>Evidence-first / structure-bounded admission / 40-192x CPU prefill on llama.cpp</sub>
-</p>
+Long-prompt prefill dominates time-to-first-token (TTFT) for local LLM
+serving. EdgePrefill plans and executes a sparse prefill:
 
-<p align="center">
-  <a href="https://gitee.com/liu-xingyan04/edge-prefill">Gitee</a> /
-  <a href="https://github.com/ShaneLiu04/edge-prefill">GitHub</a> /
-  <a href="#头条结果">头条结果</a> /
-  <a href="#架构">架构</a> /
-  <a href="#快速开始">快速开始</a> /
-  <a href="#复现-ar011">复现 AR011</a> /
-  <a href="#实现状态">实现状态</a>
-</p>
+1. **Block selection (AR001)** — lexical/signal block ranking picks which
+   prompt blocks enter the KV cache at all (selection-level sparsity).
+2. **FFN skip (AR002)** — transformer FFNs are skipped for non-selected
+   tokens during prefill (masked, deterministic, reported with quality).
+3. **Attention top-k (AR002/AR003)** — attention layers gather only the
+   highest-ranked KV rows; per-head adaptive matrices come from an offline
+   head-classification probe (`classify-heads`).
+4. **Branch-gated sparse prefill (AR004)** — NSA/MoBA-style
+   compressed branches (representative-token injection + pooled V-rows),
+   per-head query gating, large-chunk scheduling, and head pattern routing
+   (MInference-style) / pyramid layer prior (PyramidKV-style).
+5. **In-graph query-aware page gating (AR006)** — the gate moves *inside*
+   the prefill graph: per ubatch, per layer, K pages are reduced to means,
+   scored against the current query (MoBA-style), and the top-k pages plus
+   a local window are gathered once. No embedding model, no host-side
+   selection, `semantic_score_ms = 0` on the gated path. Page scoring by
+   Quest-style exact bounds was implemented, measured and rejected (biased
+   toward large-norm keys); see `docs/research.md` §8.
 
----
+6. **Length-adaptive admission budget (AR007)** — the admission budget is a
+   measured function of prompt length, not a constant: `sweep_budget.py`
+   produces a budget-vs-quality curve bound to the model's SHA256, and the
+   planner reads it when the conf points at it (`budget_curve`), recording
+   `budget_source = model|override|default|clamp` per sample. The same change
+   adds structural anchors (sink / last block / query-word anchors / strided
+   coverage), span growing (adjacent blocks get +0.5, so an answer that
+   straddles a block boundary stays contiguous) and incremental MMR against
+   near-duplicate text. Measured: quality is **not monotone** in the budget
+   (16K: b=0.05 q=1.00 vs b=0.25 q=0.36), which is why the curve is measured
+   per length instead of scaled.
 
-**EdgePrefill** 是一个以 llama.cpp/GGUF 为唯一推理后端的 C++17 研究工程，目标是在端侧单请求、4K-32K 长上下文、CPU 与轻量 GPU 的约束下降低首字延迟（TTFT）。从 AR001 到 AR011，它从块级稀疏、attention/head gather、压缩分支和图内页门控，逐步收敛到 **evidence-first + structure-bounded admission**：先证明哪些 token 有证据，再决定花多少结构预算，最后用实测路由选择执行臂。
+7. **Phrase-aware admission + combination portfolio (AR008)** — the selector
+   now admits *positional phrases* (adjacent query word pairs such as
+   `vault 5`, `chapter 7`, `case 42`) as first-class terms, keeps
+   single-character discriminators that the old filter dropped, and matches
+   phrases across block boundaries. This fixed the multi-needle family
+   (quality 0.33 → 1.00 at 5% budget) where a lone digit was the only thing
+   separating sibling facts. On top of that, a measured `portfolio` table
+   routes each prompt to the execution combination whose measurement reaches
+   the quality floor (`selection` / `gate-p16` / `gate-p24-local32` / `dense`),
+   and `check_portfolio.py` refuses any combination that is Pareto-worse than
+   the best fixed one.
 
-> EdgePrefill is a C++17 research framework for long-context prefill acceleration on edge devices. It combines evidence-first admission, structure-bounded token budgets, phrase-aware and multi-fact coverage signals, compressed KV branches, and in-graph page gating on a pinned llama.cpp backend. Every number in `benchmarks/results/` comes from real GGUF inference with the command and environment recorded. No mock model, fake timing, or hard-coded quality score is used.
+8. **Multi-fact coverage admission (AR009)** - a question can ask for several
+   facts at once ("list the passcodes for the vaults one, three and five").
+   AR008's admission is single-fact optimal: it spends the whole budget on the
+   single strongest match, so on a new multi-fact family (6 or 12 planted
+   facts, 3 or 6 asked per row) it recovered only 0.49 / 0.26 of the facts.
+   The selector now extracts the *rare* query terms as sub-queries, gives each
+   one an anchor, and adds a submodular facility-location gain
+   (`Σ max(0, idf_p - covered_p)`) to the fill score, so every requested fact
+   has to be paid for. Quality 0.488 -> **0.878** and 0.261 -> **0.652** at the
+   same budget; single-fact families keep a bit-for-bit identical selection.
+   `--coverage-weight 0` restores AR008 exactly.
 
-**当前状态：** 源码基线为 Gitee `cfb3415`（AR011），tags `ar004-v1.0` 到 `ar011-v1.0`（2026-10-28）。GitHub 仓库同步该快照。
+9. **Evidence-first admission (AR010)** - a budget audit at 32K showed 62% of
+   the selected tokens going to blocks with **zero** lexical/phrase overlap,
+   because the position/diversity priors could create admission on their own.
+   The root cause was a `minmax()` aliasing bug (`*lo` was an iterator into the
+   vector being overwritten, so `diversity` was normalised to [0, 3.2] instead
+   of [0, 1]). With the normalisation fixed, admission is split into
+   `evidence` (lexical + phrase + draft) and `prior` (position + diversity),
+   and priors only order blocks that already carry evidence
+   (`fused = e + sat(e)*p`). The fill also gained an explicit stop reason, so
+   the budget can be content-sized (`fill_priors=0`) instead of a quota:
+   32K reaches **q=1.000 at 525 tokens / 2.26 s (198x vs dense)** where AR009
+   needed the in-graph gate (5443 ms) for the same quality, and 4K/8K/16K cost
+   1.4-3.0x fewer selected tokens at unchanged quality.
 
-## 头条结果
+Sparse paths are lossy by construction. Every benchmark report pairs latency
+with a quality metric (needle accuracy, QA overlap, or PPL retention), and
+`budget=1.0` / all switches off remain numerically equivalent to dense.
 
-> **AR011 structure-bounded admission / Qwen2.5-1.5B-Instruct Q4_K_M / CPU 16 threads**
->
-> 4K：146 tokens，755 ms，**40.4x**，q = 1.00
->
-> 8K：188 tokens，1.03 s，**67.8x**，q = 1.00
->
-> 16K：280 tokens，1.39 s，**124.5x**，q = 1.00
->
-> 32K：525 tokens，2.33 s，**~192x**，q = 1.00
->
-> Multi-needle 8K：247 tokens，1.17 s，**59.4x**，q = 1.00
->
-> **GPU**：AR011 8K 选择逐例一致，45.2 ms vs CPU 1091.5 ms（**24x**）
-
-AR011 的 32K 不再需要 in-graph gate：selection 以 525 tokens / 2.33 s 达到 q=1.00，而 AR011 矩阵中的 gate-p16 在同一质量下是 1,165 tokens / 5.95 s。AR010 先把 32K 从 gate 路径拉到 selection（198x / 2.26 s），AR011 再把 4K/8K/多针的 token 数分别削减 35% / 18% / 23%，并把 multi-fact hard 的 `q_min` 从 0.087 拉到 **0.571**。
-
-**这不是“所有数据集都无懈可击”的结论。** Multi-fact easy 档是 0.836，hard 档 0.709，仍低于 0.85 目标；`q_min 0.571` 说明至少有一行仍明显失分。16K/32K 在 AR011 中没有进一步 token 收益（已到证据驱动下限），32K 的 dense 参照是 2-case 子集，GPU dense 未测。AR009 的旧 0.878 / 0.652 部分由 prior 归一化 bug 抬高，AR010 修正后为 0.836 / 0.667；完整说明见 [AR010 REPORT](benchmarks/results/ar010-evidence-first/REPORT.md) 与 [AR011 REPORT](benchmarks/results/ar011-structure-bounded/REPORT.md)。
-
-## AR011 矩阵
-
-同一 session、同一模型、同一 dense 参照；跨 session 的绝对毫秒不可比。
-
-| 数据集 | Dense | AR010 | AR011 | gate-p16 |
-| --- | ---: | --- | --- | --- |
-| 4K | 30.5 s | 29.2x / 226 tok / 1046 ms | **40.4x / 146 tok / 755 ms** | 18.7x / 354 / 1631 ms |
-| 8K | 69.7 s | 63.9x / 228 / 1091 ms | **67.8x / 188 / 1028 ms** | 23.0x / 628 / 3036 ms |
-| 16K | 172.6 s | 119.5x / 280 / 1444 ms | **124.5x / 280 / 1387 ms** | 31.5x / 1128 / 5480 ms |
-| 32K | 447 s* | ~188x / 525 / 2371 ms | **~192x / 525 / 2329 ms** | ~75x / 1165 / 5953 ms |
-| Multi-needle 8K | 69.1 s | 38.6x / 321 / 1790 ms | **59.4x / 247 / 1165 ms** | 21.2x / 673 / 3266 ms |
-
-\* 32K dense 是 2-case 子集（`max_new_tokens=8`），TTFT 是 prefill-only，不影响比值；AR010 自己 session 的 32K 为 2.26 s / 198x。
-
-**路由：** 7/7 数据集都选择 `ar011`；AR008 的 gate 路径在 32K 上已被 AR010/AR011 的 selection 支配。`ar011_report.py --gate` 以 AR010 为基线，同时检查 quality、tokens 与 TTFT（5% 容差）；`--inject explen/len8k:ar010` 会正确 FAIL。
-
-### Multi-fact 质量
-
-| 数据集 | AR010 | AR011 |
-| --- | --- | --- |
-| multi-fact easy（6 facts / ask 3） | 0.836 / q_min 0.429 | 0.836 / q_min 0.429 |
-| multi-fact hard（12 facts / ask 6） | 0.667 / q_min 0.087 | **0.709 / q_min 0.571** |
-
-AR011 没有增加 hard 档的 token（445），而是把预算重新分给被漏掉的事实；`q_min` 从 0.087 到 0.571 是这次最明确的质量收益。Easy 档 0.836 持平；两档都仍低于 0.85 目标。
-
-## AR011：结构锚点预算与证据预算分离
-
-AR011 由两次审计触发：
-
-1. **TTFT 已近似线性于准入 token 数。** 在这台 CPU 上约为 `selected / 155 token·s⁻¹`；剩余杠杆是“准入多少 token”，不是再换一个稀疏信号。
-2. **结构锚点吃掉了预算。** 4K NIAH b=0.08 的预算是 314 token，实际准入 310 token / 10 块，其中 9 块是 mandatory（sink、recent、best-lexical ±2 窗口与 phrase pin）；`anchor_ratio=0.35` 约束的是一个已经被不可裁剪锚点花掉的预算。
-
-AR011 的改法：
-
-- **structure budget**：sink + recent 改成一个绝对 token allowance；`anchor_ratio` 只约束剩余 evidence 预算，而且只在锚点确实主导预算（`anchor_tokens > target/2`）时介入；16K/32K 不主导，因此不变。
-- **span admission**：证据块裁剪到“证据峰所在的句子” token 段（按句边界扩展，至少 24 token；跨块答案不被切断）；`block_indices` 不变，只有 `token_indices` 变窄，准入口径与执行口径解耦。
-- **multi-fact 硬门控**：多事实场景自动禁用 span 裁剪；实测 easy 0.836 -> 0.800、hard 0.669 -> 0.444、`q_min` -> 0，因为每个事实需要完整句子。
-- **审计列**：`structure_tokens`、`evidence_tokens`、`span_tokens`、`uncovered_facts`，以及 `prior_gate` / `fill_priors` / `stop_reason` 等。
-
-负面结果（均写入报告，默认关闭）：
-
-- embedding（AR005）语义准入在 5 个数据集上质量零收益，扫描 +1.0-2.2 s；
-- `coverage_reserve=1` 在 b=0.03 仅 +0.019，b=0.02 -0.007，b=0.04 0，默认关闭；
-- `anchor_span_radius=1` 让 32K 从 461 token（-12%）换来 multi-fact easy -0.036 / hard -0.040，默认保持 ±2；
-- span 用于多事实时 `q_min` 归零，硬门控禁用。
-
-## AR010：evidence-first admission
-
-AR010 的关键不是加信号，而是修一个预算审计暴露的 bug：
-
-- `minmax()` 把 `*lo` 当成值用，但它其实是指向正在被覆盖的 vector 的迭代器；`diversity` 被归一化到 [0, 3.2]，`position` 到 [0, 1.157]，prior 可以单独产生准入。
-- 32K b=0.05 的 1,553 个 token 中，62% 落在词法/短语零重叠的块上；选择器在“填满预算”，而不是“选择证据”。
-
-修复后：
-
-- `evidence = lexical + phrase + draft`，`prior = position + diversity`；
-- `fused = evidence + sat(evidence) * prior`，`prior_gate=1` 时 prior 只能排序已有证据，不能创造准入；
-- `fill_priors=0` 时证据耗尽即停止，预算按内容定大小，而不是固定配额；
-- 审计 `evidence_blocks` / `stop_reason`（`budget` / `evidence-exhausted` / `no-signal` / `dense`）。
-
-结果：
-
-| 数据集 | 配额（AR009） | 内容定大小（AR010） |
-| --- | --- | --- |
-| 32K | 1,565 tok / q=0.611 / 7.28 s | **525 tok / q=1.000 / 2.26 s** |
-| 16K | 792 / 3.68 s | **280 / 1.25 s** |
-| 8K | 388 / 1.70 s | **228 / 1.04 s** |
-| 4K | 322 / 1.49 s | **226 / 1.05 s** |
-| Multi-needle | 321 / q=1.000 | 321 / q=1.000 |
-
-32K 的 gate 路径（5.44 s / 1,165 tok）从“质量兜底”变成 Pareto 被支配；AR010 的 selection 以 2.26 s 达到 q=1.00。库默认仍保留 `fill_priors=1`（历史配额契约），内容定大小通过 portfolio/矩阵显式 opt-in。
-
-## 怎么走到 AR011
-
-| AR | 贡献 | 当前状态 |
-| --- | --- | --- |
-| AR001 | 块级选择、位置保持、分块 prefill、FFN skip、KV 精度 | 基础 |
-| AR003/AR004 | head 自适应、压缩分支、GPU 12.78x | head 在 NIAH q=0；压缩分支仍是可选路径 |
-| AR006 | 图内页门控、单次 gather | 32K 已被 AR010/AR011 selection 支配 |
-| AR007 | 长度自适应预算曲线、结构锚点/MMR/span growing | 预算曲线仍在使用 |
-| AR008 | 短语感知准入、组合路由 | 短语信号仍在使用；路由现在 7/7 选 ar011 |
-| AR009 | 多事实覆盖 | AR010 修正 prior bug 后，easy/hard 为 0.836/0.667；AR011 hard 0.709 |
-| AR010 | evidence/prior 分离、content-sized stop | 32K 不再需要 gate |
-| AR011 | structure budget、span admission、hard q_min | 7/7 路由；4K/8K/MN token 下降 |
-
-## GPU
-
-AR011 的 8K 配置在 CPU 与 CUDA 上跑同一组选择：
-
-```text
-CPU  q=1.000 qmin=1.000 sel=[122,121,170,172] ttft=1091.5 ms
-GPU  q=1.000 qmin=1.000 sel=[122,121,170,172] ttft=  45.2 ms   (24x)
-```
-
-准入在 host 侧，`selected_tokens` / `block_indices` 天然设备无关；GPU 只加速被准入 token 的 prefill。dense GPU 路径会被切成数百个 graph split，未纳入结论。AR004 的 GPU 16K 12.78x / q=1.00 仍是历史 GPU 头条；AR010/AR011 的 CPU 结果不外推到 GPU。
-
-## 设计原则
-
-| 原则 | 含义 |
-| --- | --- |
-| 端侧优先 | 单请求、4K-32K、CPU 内存带宽受限；GPU 结果单独标注 |
-| 证据优先 | 先证明 token 有词法/短语/draft 证据，再让 prior 排序；prior 不能单独创造准入 |
-| 结构有界 | sink/recent 用绝对 token allowance；`anchor_ratio` 只约束剩余证据预算 |
-| 内容定大小 | 证据耗尽即停，不为了填满配额引入零证据块 |
-| 质量地板 | 路由只选 mean+min quality 达标的组合；否则取最高质量 |
-| 最小侵入 | 固定 llama.cpp commit，只维护 FFN skip 与 attention/gate gather 两个 patch |
-| 证据可审计 | 每个数字都有 raw CSV、report、env JSON 与命令；跨 run 不混用分母 |
-| 真实推理 | 禁止 mock 模型、伪造计时、硬编码质量分数；缺模型时测试显式 SKIP |
-
-## 架构
-
-```mermaid
-flowchart LR
-    P["Prompt<br/>4K-32K"] --> PR["Prompt profiler<br/>length / terms / phrases"]
-    PR --> EV["Evidence admission<br/>lexical + phrase + draft"]
-    PR --> BC["Budget curve<br/>AR007"]
-    EV --> COV["Coverage<br/>AR009"]
-    COV --> SB["Structure budget + span<br/>AR011"]
-    BC --> SB
-    SB --> R["Portfolio router<br/>AR008 table"]
-    R --> S["Selection arm<br/>AR011"]
-    R --> G["Gate / compressed / head<br/>available, not routed"]
-    S --> E["SparsePrefiller"]
-    G --> E
-    E --> L["llama.cpp patch<br/>3bb63cbc"]
-    L --> K["KV cache<br/>f16 / q8_0 / q4_0"]
-    L --> O["First-token logits<br/>TTFT"]
-
-    classDef edge fill:#0F766E,stroke:#2DD4BF,color:#F8FAFC;
-    classDef io fill:#1E293B,stroke:#475569,color:#E2E8F0;
-    class EV,COV,SB,R,S,G,E,L edge;
-    class P,PR,BC,K,O io;
-```
-
-### 三层决策
-
-1. **证据层**：词法、短语、draft 组成 evidence；prior 只在 evidence 非零时起排序作用。`prior_gate=1`、`fill_priors=0` 是 AR010/AR011 主线；`fill_priors=1` 保留历史配额行为。
-2. **结构层**：AR009 的 coverage 为每个请求事实保留锚点；AR011 的 structure budget 给 sink/recent 绝对 token allowance，span admission 把证据块裁到句子级 token 段（多事实场景自动禁用）。
-3. **路由层**：portfolio 按质量地板选执行臂；当前 7/7 数据集选 ar011。AR008 的 gate/compressed/head 仍保留，但在 32K 上已被 selection 支配，作为可选路径存在。
-
-## 关键机制
-
-| 机制 | 实现要点 | 代码 |
-| --- | --- | --- |
-| Evidence/prior 分离（AR010） | `evidence=lexical+phrase+draft`；`fused=e+sat(e)*p`；`prior_gate=1` 时 prior 不能创造准入 | [src/selector.cpp](src/selector.cpp) |
-| 内容定大小（AR010） | `fill_priors=0` 证据耗尽即停；`stop_reason` / `evidence_blocks` 审计 | [src/selector.cpp](src/selector.cpp) |
-| 结构锚点预算（AR011） | sink/recent 绝对 token allowance；`anchor_ratio` 只约束剩余证据；`structure_tokens` 审计 | [src/selector.cpp](src/selector.cpp) |
-| Span admission（AR011） | 证据峰所在句子的 token 段；跨块合并、24-token 下限；多事实自动禁用 | [src/selector.cpp](src/selector.cpp) |
-| 多事实覆盖（AR009） | 稀有 sub-queries、每事实锚点、facility-location 增益、回声排除 | [src/selector.cpp](src/selector.cpp) |
-| 短语感知准入（AR008） | 查询 bigram、单字符判别符保留、最高 IDF 锚点、跨块 bigram | [src/selector.cpp](src/selector.cpp) |
-| 长度自适应预算（AR007） | `budget_curve.txt` 模型指纹；`budget_source=model/override/default/clamp` | [src/budget_curve.cpp](src/budget_curve.cpp) |
-| 组合路由（AR008） | 质量地板、mean+min 双门槛、Pareto 门禁；当前路由全选 ar011 | [src/portfolio.cpp](src/portfolio.cpp) |
-| 图内页门控（AR006） | K page 均值 + local window + 单次 gather；32K 已被 selection 支配 | [src/attention_sparsity.cpp](src/attention_sparsity.cpp) |
-| 压缩分支 / head 矩阵 | 被丢块池化为 1 行 KV；per-head gather；可选路径 | [patches/llama-prefill-attn-top-k.patch](patches/llama-prefill-attn-top-k.patch) |
-| 分块 / FFN / KV / 基准 | chunk_size=0 自动对齐；prefill-only FFN skip；raw CSV + env JSON | [src/chunk_scheduler.cpp](src/chunk_scheduler.cpp) |
-
-## 研究映射
-
-| 方向 | 核心思想 | 本仓库落地 | 实测证据 / 限制 |
-| --- | --- | --- | --- |
-| BM25 / 短语检索 | 词法证据与位置短语 | AR008 查询 bigram + IDF 锚点 + 跨块配对 | multi-needle q 0.333 -> 1.000；纯语义查询不适用 |
-| Evidence-first admission | 先证据后先验 | AR010 evidence/prior 分离、content-sized stop | 32K q=1.000 / 525 tok；prior 不再创造准入 |
-| Structure-bounded admission | 结构锚点必须有界 | AR011 absolute structure allowance + span trim | 4K -35% / 8K -18% / MN -23% tokens；hard q_min 0.087 -> 0.571 |
-| Submodular facility location | 每个请求事实的覆盖增益 | AR009 sub-query anchors + facility-location gain | corrected easy 0.836 / hard 0.667; AR011 hard 0.709 |
-| LongLLMLingua / MMR | 分段预算、结构锚点、近重复惩罚 | AR007 anchors / span growing / MMR | 4K/8K/16K q=1.00；32K 曲线 q=0.893 |
-| RouteLLM / FrugalGPT | 按输入特征路由到成本/质量路径 | AR008 measured portfolio + Pareto gate | 7/7 route ar011; gate dominated at 32K |
-| Quest / MoBA / NSA | 页级选择、分片门控、压缩上下文 | AR006/AR007 gate + AR004 compressed branch | 8K gate 9.4x；32K 已被 selection 支配 |
-| MInference / SnapKV / PyramidKV | head 模式路由、按头预算、层先验 | AR003/AR004 head matrix | NIAH q=0；负结果已记录 |
-| vLLM / Sarathi | 分块 prefill | `chunk_size=0` 对齐 `n_ubatch` | 128/512/auto ±5% |
-
-更完整的三段式分析见 [docs/research.md](docs/research.md)（AR006 §8、AR007 §9、AR008 §10、AR009 §11、AR010 §12、AR011 §13）。
-
-## 快速开始
-
-### 环境要求
-
-- Linux x86_64 或 WSL2（推荐 Ubuntu 22.04+）
-- CMake 3.20+
-- 支持 C++17 的编译器（归档环境：GCC 12.4 / 13.3）
-- `bash`、`patch`、`git`、`curl` 或 `wget`
-- 一块可用的 GGUF 模型；16K/32K 实验建议至少 16 GB 内存
-- CUDA 构建需要 NVIDIA 驱动与 CUDA toolkit；归档 GPU 为 Quadro RTX 5000（Turing sm_75）
-
-原生 Windows 不支持：CLI 使用 POSIX 头文件，构建流程依赖 `bash` 与 `patch`。请在 WSL2 中运行。
-
-### 一键验证与复现
-
-```bash
-./repro.sh smoke    # 构建 + 下载/校验模型 + 单测 + AR005 smoke
-./repro.sh ar010    # evidence-first 矩阵 + 路由 + Pareto 门禁
-./repro.sh ar011    # 7 数据集 x 3 臂矩阵 + 不劣于 AR010 的门禁
-```
-
-`repro.sh` 支持 `smoke / matrix / full / budget / ar007 / ar008 / ar009 / ar010 / ar011`；每一步都会打印实际命令。已有模型时可加 `--skip-download`。AR011 的 dense 参照较慢（32K 为 2-case 子集），跑之前请留出时间。
-
-### CPU 构建
+## Quick start (Linux/WSL2)
 
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
@@ -259,268 +91,301 @@ cmake --build build -j
 ctest --test-dir build --output-on-failure
 ```
 
-首次 configure 会下载固定 commit 的 llama.cpp，并应用：
+llama.cpp is fetched automatically at the pinned commit
+(`3bb63cbcbfb62056c84fe9e521b0f3d756d29c32`) and patched with
+`patches/*.patch`. To use a local tree:
+`-DEDGE_PREFILL_LLAMA_DIR=/path/to/llama.cpp`.
 
-- `patches/llama-prefill-ffn-skip.patch`
-- `patches/llama-prefill-attn-top-k.patch`
-
-如果网络受限，可准备同 commit 的 llama.cpp 源码树后本地构建：
-
-```bash
-git clone https://github.com/ggml-org/llama.cpp.git /path/to/llama.cpp
-cd /path/to/llama.cpp
-git checkout 3bb63cbcbfb62056c84fe9e521b0f3d756d29c32
-bash /path/to/edge-prefill/scripts/apply_llama_patch.sh
-
-cd /path/to/edge-prefill
-cmake -S . -B build \
-  -DCMAKE_BUILD_TYPE=Release \
-  -DEDGE_PREFILL_LLAMA_DIR=/path/to/llama.cpp
-cmake --build build -j
-```
-
-### CUDA 构建
+Real-model tests are enabled by pointing at a GGUF file:
 
 ```bash
-cmake -S . -B build-cuda \
-  -DCMAKE_BUILD_TYPE=Release \
-  -DEDGE_PREFILL_WITH_CUDA=ON \
-  -DGGML_CUDA=ON \
-  -DCMAKE_CUDA_ARCHITECTURES=75
-cmake --build build-cuda -j
+EDGE_PREFILL_TEST_MODEL=/path/to/model.gguf ./build/edge_prefill_tests
+# without the variable, real-model cases SKIP; nothing is faked
 ```
 
-`75` 对应归档的 RTX 5000；请按实际 GPU 调整。AR011 的 GPU 一致性只在 8K 验证；dense GPU 路径因 graph split 未纳入结论。CUDA 结果请以 AR004 与 AR011 8K 归档为准。
-
-### 模型与数据
+## Running
 
 ```bash
-bash scripts/download_model.sh --all
-# models/qwen2.5-1.5b-instruct-q4_k_m.gguf     (main, AR011 主线)
-# models/qwen2.5-0.5b-instruct-q4_k_m.gguf     (draft, optional AR005)
-# models/bge-small-en-v1.5-q8_0.gguf           (embedding, optional AR005)
+# plan only (no model)
+./build/edge-prefill plan --tokens 16384 --budget 0.25 --json
+
+# single prompt, real model
+./build/edge-prefill run --model M --prompt-file F --budget 0.25 \
+    --attn-top-k 24 --head-adaptive on --head-profile P --head-top-k 96 \
+    --max-new-tokens 32 --threads 16
+
+# offline head classification (produces the profile for --head-profile)
+./build/edge-prefill classify-heads --model M --output profile.json
+
+# benchmark suite (see benchmarks/configs/)
+./build/edge-prefill bench --config benchmarks/configs/exp-balanced.conf --model M
 ```
 
-主模型 SHA256：`6a1a2eb6d15622bf3c96857206351ba97e1af16c30d7a74ee38970e434e9407e`。脚本会校验 SHA256，不匹配即拒绝。数据集随仓库分发：`benchmarks/data/explen/{len4k,len8k,len16k}`、`benchmarks/data/deep/{len32k,multineedle,multifact8k,multifact8k-hard}`；`repro.sh` 会检查 `index.tsv` 与 `manifest.json`。
+## Configuration
 
-## 复现 AR011
-
-### 完整矩阵
-
-```bash
-./repro.sh ar011
-```
-
-它会跑 7 个数据集 x 3 个臂（AR010 / AR011 / gate-p16），生成 `matrix.csv/md`、`portfolio.json/txt`，并执行 `ar011_report.py --gate`：要求 routed 组合在 quality、tokens、TTFT 上不劣于 AR010（5% 容差），注入 `--inject explen/len8k:ar010` 必须 FAIL。完整结果见 [REPORT.md](benchmarks/results/ar011-structure-bounded/REPORT.md)。
-
-### 单条 prompt
-
-```bash
-$BIN run \
-  --model models/qwen2.5-1.5b-instruct-q4_k_m.gguf \
-  --prompt-file benchmarks/data/smoke8k.txt \
-  --budget-curve benchmarks/results/ar007-sweep/budget_curve.txt \
-  --phrase-weight 0.5 \
-  --coverage-weight 3 \
-  --prior-gate 1 \
-  --fill-priors 0 \
-  --structure-budget 64 \
-  --span-admission 1 \
-  --max-new-tokens 32 \
-  --threads 16
-```
-
-说明：
-
-- `--prior-gate 1 --fill-priors 0` 是 AR010 的 evidence-first / content-sized 主线；
-- `--structure-budget 64 --span-admission 1` 是 AR011 的 routed arm；多事实场景会自动禁用 span；
-- `--coverage-weight 0` / `--phrase-weight 0` / `structure_budget=0` / `span_admission=0` 分别回到上一版行为；
-- `--chunk-size` 不是当前 CLI 参数，分块大小写配置文件的 `chunk_size`；
-- `bench` 的 gate/组合参数建议以配置文件为准；`run` 支持 CLI 覆盖。
-
-## CLI 与配置
-
-核心参数：
-
-| 参数 | 含义 | 默认值 |
+| Flag | Meaning | Default |
 | --- | --- | --- |
-| `--config` | `bench/eval` 配置文件 | 空 |
-| `--model` | 主模型 GGUF | 空 |
-| `--prompt` / `--prompt-file` | 单条 prompt / prompt 文件 | 空 |
-| `--data-dir` / `--out` | 基准数据目录 / 输出目录 | 配置值 |
-| `--mode` | `latency / balanced / quality / reuse / dense` | `balanced` |
-| `--budget` | 进入 KV 的块比例（显式覆盖曲线） | 模式决定 |
-| `--budget-curve` | AR007 长度-预算表；opt-in | 空 |
-| `--anchor-ratio` | 证据预算的锚点比例 | 0.35 |
-| `--anchor-stride-scale` | strided coverage 倍率 | 1.0 |
-| `--mmr-lambda` / `--mmr-threshold` | MMR 惩罚 / 触发阈值 | 0.5 / 0.6 |
-| `--phrase-weight` | AR008 短语权重；0 = AR007 | 0.5 |
-| `--coverage-weight` | AR009 多事实覆盖权重；0 = AR008 | 3.0 |
-| `--prior-gate` | 1 = prior 不能创造准入；0 = 旧加法融合 | 1.0 |
-| `--fill-priors` | 0 = 证据耗尽即停；1 = 填满预算 | 1.0（路由用 0） |
-| `--structure-budget` | sink/recent 绝对 token allowance；0 = AR010 | 0 |
-| `--anchor-span-radius` | best-lexical 窗口半径；0 = 默认 ±2 | 0 |
-| `--coverage-reserve` | 每事实保底；实测无稳定收益 | 0 |
-| `--span-admission` | 1 = 句子级 span 准入；多事实自动禁用 | 0 |
-| `--span-min-tokens` | span 最小 token 数 | 24 |
-| `--portfolio` | AR008 执行组合表 | 空 |
-| `--qg-bound` | `on/off`，AR006 图内页门控 | off |
-| `--qg-sel-pages` | 每个 ubatch 的 top-k page 数 | 8 |
-| `--qg-local-rows` | local window 行数；0 = ubatch 跨度 | 0 |
-| `--attn-top-k` | attention gather 的 top-k block 数 | 0 |
-| `--pool-branches` | `on/off`，压缩分支 | off |
-| `--embedding-model` | 可选 bge-small，AR005 语义选择 | 空 |
-| `--draft-model` | 可选 draft GGUF | 空 |
-| `--head-adaptive` / `--head-profile` | head 自适应矩阵 / profile | off / 空 |
-| `--kv-type` | `f16 / q8_0 / q4_0` | `f16` |
-| `--skip-ffn` | prefill-only FFN 跳过 | 空 |
-| `--threads` | CPU 线程数 | 物理核数 |
-| `--ngl` / `--n-gpu-layers` | GPU offload 层数 | 0 |
-| `--n-ctx` / `--n-ubatch` | 上下文长度 / 物理微批 | 自动 / 512 |
-| `--max-new-tokens` | 贪心 decode 步数 | 32 |
-| `--repeats` | 基准重复次数；未给时用配置值 | 配置值 |
-| `--bench-skip-dense` | bench 只跑稀疏模式 | 关闭 |
-| `--dump-plan` / `--dump-selection` | 输出审计 JSON | 空 |
+| `--mode latency\|balanced\|quality\|reuse\|dense` | planning profile | balanced |
+| `--budget <0..1>` | fraction of prompt tokens allowed into the KV cache | 0.5 |
+| `--attn-top-k N` | KV blocks whose rows attention gathers (0 = off) | 0 |
+| `--attn-top-k-layers 4,8,16` | per-layer top-k override | — |
+| `--head-adaptive on\|off` | per-head gather matrix from a profile | off |
+| `--head-profile P` | profile produced by `classify-heads` | — |
+| `--head-top-k N` | rows each non-retrieval head gathers | 0 |
+| `--head-retrieval-threshold F` | probe score above which a head stays dense | 0.10 |
+| `--head-pattern-routing on\|off` | MInference-style per-class budgets (AR004) | off |
+| `--pyramid-prior on\|off` | PyramidKV-style layer prior without a profile (AR004) | off |
+| `--pyramid-k-min/--pyramid-k-max N` | pyramid budget range | 48/128 |
+| `--kv-type f16\|q8_0\|q4_0` | KV cache precision | f16 |
+| `--skip-ffn <spec>` | FFN layer skip mask for prefill | — |
+| `--chunk-size N` | 0 = auto-align to n_ubatch (AR004) | 0 |
+| `--budget-curve P` | length -> admission-budget table (AR007) | — |
+| `--anchor-ratio F` | anchor budget as a fraction of the block target (AR007) | 0.35 |
+| `--anchor-stride-scale F` | strided-coverage anchor multiplier (AR007) | 1.0 |
+| `--mmr-lambda F` | MMR penalty weight on near-duplicate blocks (AR007) | 0.5 |
+| `--mmr-threshold F` | Jaccard similarity above which MMR applies (AR007) | 0.6 |
+| `--phrase-weight F` | positional phrase admission weight, 0 = AR007 behavior (AR008) | 0.5 |
+| `--coverage-weight F` | multi-fact coverage weight, 0 = AR008 selection exactly (AR009) | 3.0 |
+| `--prior-gate F` | 1 = priors cannot create admission, 0 = legacy additive fusion (AR010) | 1.0 |
+| `--fill-priors F` | 0 = content-sized context (stop when evidence ends), 1 = fill the budget (AR010) | 1.0 |
+| `--portfolio P` | measured execution-combination table (AR008) | — |
+| `--qg-bound on\|off` | in-graph query-aware page gating (AR006) | off |
+| `--qg-sel-pages N` | pages kept per ubatch by the gate (quality knob) | 16 |
+| `--qg-local-rows N` | local window rows around the ubatch (0 = ubatch span) | 0 |
+| `--qg-pool-pages N` | pool pages folded into the gated branch | 0 |
+| `--threads N` | CPU threads | physical cores |
+| `--n-gpu-layers N` | GPU offload (99 = full) | 0 |
 
-配置文件常用键：
+## Expected results
 
-| 键 | 含义 | 默认值 |
-| --- | --- | --- |
-| `block_size` / `chunk_size` | 选择块 / 分块大小（0 = 自动） | 32 / 0 |
-| `budget_curve` / `portfolio` | AR007 曲线 / AR008 组合表 | 空 |
-| `phrase_weight` / `coverage_weight` | AR008 / AR009 权重 | 0.5 / 3.0 |
-| `prior_gate` / `fill_priors` | AR010 evidence / content-sized | 1 / 1 |
-| `structure_budget` / `span_admission` | AR011 结构预算 / span | 0 / 0 |
-| `anchor_span_radius` / `coverage_reserve` | AR011 锚点半径 / 保底 | 0 / 0 |
-| `qg_bound` / `qg_sel_pages` / `qg_local_rows` | AR006 gate 参数 | off / 8 / 0 |
-| `prefix_cache` / `prefix_cache_bytes` | dense KV 快照缓存 | on / 256 MiB |
+Real runs only: Qwen2.5-1.5B-Instruct Q4_K_M, 16 threads, Xeon Gold 6234,
+one interleaved session per dataset (dense measured right before its sparse
+siblings). Raw CSV + env JSON + the exact config live in
+`benchmarks/results/ar006-campaign/`; the full write-up with the honest
+acceptance status is `benchmarks/results/ar006-campaign/REPORT.md`.
 
-## 基准与证据
+| Setup | Prompt | TTFT | vs dense | Quality (needle) |
+| --- | ---: | ---: | ---: | --- |
+| dense | 8K | 118.9 s | 1.0x | 1.00 |
+| in-graph gate p16 (AR006) | 8K | 11.6 s | **9.4x** | 1.00 |
+| dense | 16K | 161.8 s | 1.0x | 1.00 |
+| in-graph gate p16 (AR006) | 16K | 23.7 s | **6.8x** | 1.00 |
+| AR005 qg-2d + embedding | 16K | 25.1 s | 6.4x | 1.00 |
+| in-graph gate p24 + local32 | 32K | 67.9 s | **5.7x** | 1.00 |
+| in-graph gate p16 | multi-needle | 17.1 s | 3.8x | 0.83 (scalar: 2.8x / 0.67) |
 
-每次 `bench`/`eval` 运行会写出：
+### AR007: budget curve vs fixed budget (same session, one dense reference per dataset)
 
-- `*_raw.csv`：逐样本指标，含 `ttft_ms / e2e_ms / prefill_tps / kv_bytes / quality / dense / selected_tokens / attn_top_k / repeats / score_source / semantic_score_ms / qg_source / budget_source / anchor_blocks / mmr_penalized / phrase_blocks / specific_terms / coverage_queries / evidence_blocks / stop_reason / structure_tokens / evidence_tokens / span_tokens / uncovered_facts / portfolio_choice / portfolio_reason`；
-- `*_report.md`：人读汇总表；
-- `*_env.json`：模型 SHA256、数据 SHA256、llama.cpp commit、CPU、线程、KV 类型、命令与时间戳。
+| Setup | Prompt | TTFT | vs dense | Quality (needle) |
+| --- | ---: | ---: | ---: | --- |
+| dense | 8K | 48.8 s | 1.0x | 1.00 |
+| curve, b=0.05 | 8K | **1.7 s** | **29.1x** | 1.00 |
+| AR006 gate p16, b=0.25 | 8K | 9.1 s | 5.4x | 0.88 |
+| dense | 16K | 199.5 s | 1.0x | 1.00 |
+| curve, b=0.05 | 16K | **5.2 s** | **38.5x** | 1.00 |
+| AR006 fixed b=0.25 | 16K | 19.9 s | 10.0x | 0.36 |
+| dense | 32K | 384.1 s | 1.0x | 1.00 |
+| curve, b=0.05 | 32K | **7.0 s** | **55.2x** | 0.89 |
+| in-graph gate p24 + local32 (AR007 page score) | 32K | 31.4 s | 12.2x | 1.00 |
+| curve, b=0.05 | multi-needle | 1.8 s | 30.5x | **0.33** |
+| in-graph gate p16 + local32 | multi-needle | 9.7 s | 5.5x | 0.83 |
 
-主证据：
+Raw CSV, env JSON and the conf of every combination cell are in
+`benchmarks/results/ar008-portfolio/` (see its `REPORT.md` for the honest
+write-up, including the discriminator bug the matrix exposed); AR007 assets are
+still in
+`benchmarks/results/ar007-campaign/`; the honest write-up (including the
+non-monotone budget and the multi-needle weakness) is
+`benchmarks/results/ar007-campaign/REPORT.md`, and the curve itself is
+`benchmarks/results/ar007-sweep/{budget_curve.txt,curve.json,summary.md}`.
+`budget_curve` is **opt-in** (no conf, no curve): on multi-needle documents the
+selection-level path loses facts that the in-graph gate keeps, so use
+`qg_bound=on` there. `benchmarks/scripts/check_expected_ar007.py` re-checks the
+quality/audit columns on another machine without depending on absolute TTFT.
 
-- [AR011 REPORT](benchmarks/results/ar011-structure-bounded/REPORT.md) 与 [matrix.md](benchmarks/results/ar011-structure-bounded/matrix.md) / [matrix.csv](benchmarks/results/ar011-structure-bounded/matrix.csv)：7 数据集 × 3 臂、路由表、注入自测；GPU 8K 24x；
-- [AR010 REPORT](benchmarks/results/ar010-evidence-first/REPORT.md) 与 [matrix.md](benchmarks/results/ar010-evidence-first/matrix.md)：evidence/prior 修复、32K 198x、AR009 数字修正、GPU 4K/8K 一致性；
-- [AR009 REPORT](benchmarks/results/ar009-multifact/REPORT.md)：多事实覆盖；旧 0.878/0.652 需与 AR010 修正节一起读；
-- [AR008 portfolio](benchmarks/results/ar008-portfolio/REPORT.md) / [AR007 campaign](benchmarks/results/ar007-campaign/REPORT.md) / [AR006 campaign](benchmarks/results/ar006-campaign/REPORT.md) / [AR004 矩阵](benchmarks/results/ar004-t015-matrix/matrix.md)：历史路径与负结果；
-- `ar011_report.py` / `ar010_report.py` / `check_expected_ar009.py` / `check_portfolio.py`：质量、token、TTFT 门禁；AR011 正常 7/7 PASS，注入 `len8k:ar010` 必须 FAIL；
-- [docs/server-repro.md](docs/server-repro.md)：服务器复现与 GPU 说明。
+### AR008: phrase admission and combination routing
 
-质量约束：
+| Setup | Prompt | TTFT | Quality |
+| --- | ---: | ---: | --- |
+| selection, `phrase_weight=0` (AR007) | multi-needle, b=0.05 | 5.7 s | **0.33** |
+| selection, `phrase_weight=0.5` | multi-needle, b=0.05 | 6.2 s | **1.00** |
+| selection (routed) | 8K | 5.7 s (24.9x vs dense) | 1.00 |
+| selection (routed) | 16K | 15.9 s (19.1x) | 1.00 |
+| selection | 32K | 23.1 s (36.8x) | **0.88** |
+| gate-p24-local32 (routed at 32K) | 32K | 66.8 s (12.8x) | **1.00** |
+| selection (routed) | multi-needle | 8.2 s (11.2x) | 1.00 |
 
-- `budget=1.0`、`prior_gate=1`、`fill_priors=1`、`qg_bound=false`、`attn_top_k=0`、`skip_ffn=0` 时与 dense 数值等价（logits max abs diff < 1e-5）。
-- AR006 arming 会清理其他稀疏路径，关闭后恢复 dense；`bound_gating_execution_and_restore` 验证逐位等价。
-- 每个损失性配置都必须同时报告质量；没有质量数字的加速不进入推荐配置。
-- 不允许 mock 模型、伪造计时或硬编码结果。
+Routing rule: fastest combination whose mean *and* min quality reach 0.95,
+else the highest quality - so everything stays on selection except 32K, where
+the in-graph gate buys the floor back for 2.9x TTFT. `check_portfolio.py`
+verifies that the routed combination is Pareto-no-worse than the best fixed
+one (and fails on an injected slower arm).
 
-## 测试
+The multi-needle row is the honest before/after: the same budget, the same
+machine, only the admission signal changed. Full matrix (5 datasets × 4
+combinations, dense reference per dataset) and the routed table live in
+`benchmarks/results/ar008-portfolio/`; `./repro.sh ar008` regenerates them and
+runs the Pareto gate.
 
-无模型环境：
+### AR009: multi-fact coverage admission
 
-```bash
-ctest --test-dir build --output-on-failure
-# 真实模型用例显式 SKIP，不会伪造通过
+AR008's multi-needle set asks one fact per row, so a top-1 selector looks
+perfect. The new `gen_multifact.py` family plants 6 or 12 facts and asks 3 or 6
+of them per row, scoring partial credit:
+
+| Setup | Prompt | TTFT | Quality | facts covered |
+| --- | ---: | ---: | --- | ---: |
+| selection, `coverage_weight=0` (AR008) | 6 facts, ask 3, b=0.05 | 2.77 s | **0.488** | 0/3 |
+| selection, `coverage_weight=3` | 6 facts, ask 3, b=0.05 | 2.93 s | **0.878** | 3.25/3 |
+| selection, `coverage_weight=0` (AR008) | 12 facts, ask 6, b=0.05 | 2.64 s | **0.261** | 0/6 |
+| selection, `coverage_weight=3` | 12 facts, ask 6, b=0.05 | 3.22 s | **0.652** | 6.50/6 |
+| selection, `coverage_weight=3` | 4K / 16K / multi-needle | unchanged | 1.000 | n/a (single fact) |
+| dense (2-context subset) | 6 facts, ask 3 | 8.5K full prompt | 0.975 | reference |
+
+`facts covered` is the `coverage_queries` audit column. On single-fact families
+fewer than two rare terms exist, so no coverage structure is built and the
+selection is bit-for-bit the AR008 one (4K/16K/multi-needle verified). The hard
+tier is honest about its ceiling: 0.652 is below the 0.85 target because six
+answer sentences do not fit comfortably in 445 tokens, not because facts are
+missing from the context.
+
+`./repro.sh ar009` regenerates both datasets, runs the ablation and gates it
+with `check_expected_ar009.py` (floors, not recorded values; a disabled feature
+fails the gate). Full report: `benchmarks/results/ar009-multifact/REPORT.md`.
+
+### AR010: evidence-first admission, and why 32K no longer needs the gate
+
+A budget audit at 32K found 62% of the selected tokens sitting in blocks with
+zero lexical/phrase overlap. Two defects caused it: `minmax()` normalised with
+an iterator into the vector it was overwriting (`diversity` reached 3.2 instead
+of 1.0, so priors could *create* admission), and "fill the budget" was a side
+effect of those broken priors rather than a policy.
+
+| Setup | Prompt | TTFT | Quality | selected tokens |
+| --- | ---: | ---: | --- | ---: |
+| selection, `fill_priors=1` (AR009 quota) | 32K | 7276 ms | **0.611** | 1565 |
+| gate-p24-local32 (AR008 routing for 32K) | 32K | 5443 ms | 1.000 | 1165 |
+| **selection, `fill_priors=0` (AR010)** | 32K | **2260 ms** | **1.000** | **525** |
+| selection, quota vs content-sized | 16K | 3675 → **1251 ms** | 1.000 | 792 → **280** |
+| selection, quota vs content-sized | 8K | 1698 → **1039 ms** | 1.000 | 388 → **228** |
+| selection, quota vs content-sized | 4K | 1491 → **1050 ms** | 1.000 | 322 → **226** |
+| selection | multi-needle | 2675 ms | 1.000 | 321 |
+
+`./repro.sh ar010` re-measures the five-arm matrix, re-derives the table and
+runs the Pareto gate (plus an injected degraded arm that must fail). GPU
+consistency (CUDA, RTX 5000 16 GB) is documented in
+`benchmarks/results/ar010-evidence-first/REPORT.md` section 4. The gated path
+runs without an embedding model (`semantic_score_ms = 0`).
+
+### AR011: structure-bounded admission
+
+Two audits set up this AR. First, TTFT is now proportional to the admitted
+token count (`selected / 155 token·s⁻¹` on this CPU), so the remaining lever is
+the *count*. Second, the count was not evidence: a 4K prompt at b=0.08 admitted
+310 tokens of which 9 of 10 blocks were mandatory anchors (sink, recent, the
+best-lexical ±2 window and phrase pins), i.e. `anchor_ratio` capped a fraction
+of a budget that the untrimmable anchors had already spent.
+
+| Setup | Prompt | q_mean | q_min | selected | TTFT |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| AR010 | 4K | 1.000 | 1.000 | 226 | 1046 ms |
+| **AR011** | 4K | 1.000 | 1.000 | **146** | **755 ms** |
+| AR010 | 8K | 1.000 | 1.000 | 228 | 1091 ms |
+| **AR011** | 8K | 1.000 | 1.000 | **188** | **1028 ms** |
+| AR010 | 16K / 32K | 1.000 | 1.000 | 280 / 525 | 1444 / 2371 ms |
+| **AR011** | 16K / 32K | 1.000 | 1.000 | 280 / 525 | 1387 / 2329 ms |
+| AR010 | multi-needle | 1.000 | 1.000 | 321 | 1790 ms |
+| **AR011** | multi-needle | 1.000 | 1.000 | **247** | **1165 ms** |
+| AR010 | multi-fact hard | 0.667 | **0.087** | 445 | 1997 ms |
+| **AR011** | multi-fact hard | **0.709** | **0.571** | 445 | 1952 ms |
+
+Structure (sink + recent) now gets an absolute token allowance and
+`anchor_ratio` only governs the remaining evidence budget - and only when the
+anchors actually dominate it (at 16K/32K they do not, so nothing changes).
+Span admission trims evidence blocks to the sentence around the evidence peak,
+decoupling the admission unit from the 32-token attention block; it is
+automatically skipped when several facts are asked, because a multi-fact answer
+needs one whole sentence per fact (measured: trimming there costs
+0.836 → 0.800 and `q_min` 0.174 → 0.000).
+
+`./repro.sh ar011` measures 7 datasets × 3 arms and gates the routed table
+against AR010 on quality, tokens *and* TTFT, with an injected regression that
+must fail. Two negative results are recorded in the AR011 report: the embedding
+(AR005) signal buys exactly zero quality on these families while adding 1-2.2 s
+of encoding scan, and the per-fact reservation fill has no reliable gain
+(+0.019 at b=0.03, -0.007 at b=0.02), so it ships off by default.
+
+### AR012: sentence-complete admission
+
+The weakest cells after AR011 were the multi-fact tiers (0.836 / 0.709). A budget
+sweep disproved the obvious explanation - more budget is *worse* (b=0.16: 0.771),
+because the extra tokens are filler. Dumping the admitted text (new
+`--dump-selected-text` and `dump_selection_dir`) showed the real cause: a fact
+row is split by the 32-token block boundary and all-or-nothing block admission
+ships half an answer (`... for vault six is TEAL-LYNX-8` | `853`).
+
+| Setup | Prompt | q_mean | q_min | selected | facts fully in context |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| AR011 | multi-fact easy | 0.836 | 0.429 | 431 | 0.875 |
+| **AR012** | multi-fact easy | **0.887** | 0.429 | 509 | **1.000** |
+| AR011 | multi-fact hard | 0.709 | 0.571 | 445 | 0.760 |
+| **AR012** | multi-fact hard | **0.739** | **0.621** | 513 | **0.990** |
+| AR011 = AR012 | 4K / 8K / 16K / 32K / multi-needle | 1.000 | 1.000 | unchanged | n/a |
+
+Evidence tokens pull in their whole sentence; a sentence that spills into an
+unselected block pulls that block in, so the answer tail is admitted even when
+its own block had no query hit. Completion engages only when several facts are
+asked (on single-fact prompts it only added 15% tokens at q=1.000), and trimming
+the remaining filler is available but *not routed*: it measured 1.000 -> 0.827 on
+4K/32K because it removes sentences the model still needs.
+
+`facts fully in context` is the deterministic audit added in this AR
+(`check_facts_admission.py`): it counts how many asked answers appear verbatim in
+the admitted context, so admission quality can be measured without model-score
+noise. `./repro.sh ar012` runs the 4-arm matrix with per-case dumps, derives the
+routing table, gates it against AR011 on a "no free cost" rule (quality must not
+drop; tokens may only grow when quality does) and fails on an injected
+degradation.
+
+Absolute TTFT depends on the host (this session ran up to 3x slower than the
+AR004 session on the same CPU); compare ratios measured in one session, and
+use `benchmarks/scripts/check_expected_ar006.py` for the machine-independent
+gate. AR006 does **not** reach 10x at 32K on CPU with the current page-mean
+implementation — the reason and the next increments are in the REPORT.
+
+## Repository layout
+
+```
+src/            planner, selector, backend, benchmark, CLI
+include/        public headers (Status/ErrorCode, no exceptions across API)
+patches/        llama.cpp patches (attn top-k, FFN skip)
+tests/          unit + real-model integration tests (SKIP without model)
+benchmarks/     configs, datasets, raw CSV reports, analysis scripts
+scripts/        experiment orchestration; diagnostics/ = archived probes
+specs/          SRS / design / task tracking per change request
+docs/           architecture.md, experiments.md
 ```
 
-提供真实 GGUF 后：
+## Reproducibility rules
 
-```bash
-EDGE_PREFILL_TEST_MODEL=models/qwen2.5-1.5b-instruct-q4_k_m.gguf \
-  ctest --test-dir build --output-on-failure
-```
-
-AR011 T013/T014 归档：无模型 163 PASS / 0 FAIL；真机 163 PASS / 0 FAIL；`-Wall -Wextra -Werror` 零警告；ASan 选择器用例干净；干净克隆 `ar011-v1.0` 构建 + `ctest` 100% + `ar011_report.py --gate` 7/7 PASS + 注入 `len8k:ar010` 自测 FAIL；无 mock。
-
-## 项目结构
-
-```text
-edge-prefill/
-├── CMakeLists.txt
-├── README.md
-├── repro.sh                     # smoke / matrix / full / budget / ar007..ar011
-├── include/edge_prefill/        # 公共头文件
-├── src/                         # planner / selector / portfolio / backend / benchmark / CLI
-├── tests/                       # 单元 + 真实模型集成测试
-├── patches/                     # 固定 llama.cpp commit 上的最小 patch
-├── benchmarks/
-│   ├── configs/                 # smoke 配置
-│   ├── matrix/                  # budget / bound / multifact / portfolio 配置与 floor
-│   ├── data/                    # 4K/8K/16K/32K/multi-needle/multi-fact 数据
-│   ├── results/                 # raw CSV / report / env JSON / ar010 / ar011 矩阵
-│   └── scripts/                 # 数据生成、矩阵、ar010/ar011 报告与门禁
-├── scripts/                     # 下载/构建/实验编排/诊断归档
-├── specs/archive/               # AR001-AR011 需求/设计/任务/ST 记录
-├── docs/
-│   ├── architecture.md
-│   ├── experiments.md
-│   ├── research.md              # SOTA 映射 + AR006 §8 ... AR011 §13
-│   ├── server-repro.md          # 服务器/7B/14B/GPU 复现
-│   └── assets/                  # 封面
-└── third_party/                 # 构建期拉取，不入库
-```
-
-## 实现状态
-
-| 阶段 | 状态 |
-| --- | --- |
-| AR001 块级稀疏、位置保持、分块 prefill、FFN skip、KV 精度 | 完成 |
-| AR002 attention top-k、draft 语义打分、benchmark repeats/warmup | 完成 |
-| AR003 head profile、`classify-heads`、per-head gather 矩阵 | 实现与测试完成；NIAH 质量 q=0，负结果已记录 |
-| AR004 大 chunk、PPL 保留率、压缩分支、query 门控、head 路由、GPU、主矩阵、ST | 完成（T001-T018 passing）；tag `ar004-v1.0` |
-| AR005 语义 2D 门控、bge-small embedding、server repro | 交付核心能力；tag `ar005-v1.0` |
-| AR006 图内页门控、单次 gather、短提示旁路 | T001-T006 / T008 / T010-T013 passing；T007/T009 pending；tag `ar006-v1.0` |
-| AR007 预算-质量曲线、结构锚点/MMR/span growing、页打分去拷贝 | T001-T008 / T010-T013 passing；T009 GPU 守护 pending；tag `ar007-v1.0` |
-| AR008 短语感知准入、组合路由、Pareto 门禁 | T001-T014 passing；tag `ar008-v1.0` |
-| AR009 多事实覆盖准入、sub-query anchors、facility-location 增益 | T001-T016 passing；tag `ar009-v1.0`；AR010 修正其 prior bug 影响 |
-| AR010 evidence/prior 分离、content-sized stop、32K 去 gate | T001-T015 passing；tag `ar010-v1.0` |
-| AR011 structure budget、span admission、hard q_min | T001-T014 passing；tag `ar011-v1.0` |
-| Radix 跨请求前缀复用、按层 KV、自动调优 Pareto、多请求服务化 | 未实现，后续 AR |
-
-**最新验收：** AR011 在 4K/8K/16K/32K/multi-needle 全部 routed 到 selection，q=1.00；4K/8K/多针 token 分别下降 35%/18%/23%，multi-fact hard `q_min` 0.087 -> 0.571；7/7 门禁 PASS，注入退化 FAIL；GPU 8K 与 CPU 选择逐例一致（24x 预填加速）。AR004 GPU 16K 12.78x / q=1.00 仍是历史 GPU 头条。
-
-## 已知限制
-
-- **Multi-fact 仍未到 0.85。** easy 0.836，hard 0.709 / q_min 0.571；hard 的 445 token 放不下 6 条答案句与格式；hard 档没有 dense 天花板（未测，不做相对 dense 声明）。
-- **16K/32K 在 AR011 没有进一步 token 收益。** 280 / 525 tokens 已是证据驱动下限；32K dense 是 2-case 子集，AR011 的 ~192x 不是完整 dense 矩阵。
-- **Content-sized admission 是 opt-in。** 库默认 `fill_priors=1` 保留历史配额契约；AR010/AR011 的收益通过矩阵/portfolio 显式启用。
-- **Route 表是模型/数据集绑定的实测表。** 当前 7/7 选 ar011；换模型/数据集必须重测。AR006 gate 在 32K 已被 selection 支配，但作为可选路径保留。
-- **负面结果默认关闭：** embedding 准入质量零收益且 +1.0-2.2 s 扫描；`coverage_reserve` 无稳定收益；`anchor_span_radius=1` 损害多事实；span 用于多事实会使 `q_min` 归零。
-- **GPU 只验证了 8K 一致性。** dense GPU 路径 graph split 未纳入；AR004 GPU 12.78x 是非-FA 同图族历史结果，不能与 CPU 的 40-192x 直接横向比较。
-- Head 路由 NIAH q=0；AR004 32K 选择级稀疏 60.96x 但 q=0.25。
-- Attention gather 与 llama.cpp flash attention 不兼容；patch 不可用时回退块级稀疏。
-- Prefix cache 当前用于 dense 路径；Radix 跨请求、按层 KV、自动调优尚未实现。
-- 部分实验编排脚本保留作者绝对路径；`repro.sh` 与 `docs/server-repro.md` 是更可移植的入口。
-- 仓库尚未附带开源许可证；如需复用代码，请先联系作者确认授权。
-
-## 相关研究与致谢
-
-EdgePrefill 借鉴了以下方向的公开思想，但实现保持端侧单请求约束，不直接移植服务端 kernel：
-
-- **llama.cpp / GGUF**：端侧真实推理与模型格式基础。
-- **BM25 / 短语检索**：词法证据、位置短语与 IDF 判别符；AR008 的 multi-needle 修复。
-- **LongLLMLingua / MMR**：分段预算、结构锚点、span growing 与近重复惩罚；AR007 的准入层。
-- **Submodular facility location / coverage maximization**：每个请求事实的覆盖增益；AR009 的 coverage。
-- **RouteLLM / FrugalGPT**：按输入特征在成本/质量路径间路由；AR008 的 measured portfolio。
-- **Quest / MoBA / NSA**：页级选择、分片门控与压缩上下文；AR006/AR007 的 gate 与 local window。
-- **MInference / SnapKV / PyramidKV**：head 模式路由、按头 KV 预算与层先验。
-- **vLLM / Sarathi-Serve**：分块 prefill 与长 prompt 调度。
-
-感谢 llama.cpp、GGUF、Qwen、ModelScope / hf-mirror 与 bge-small 生态提供的开放基础设施。除固定 commit 上的最小 patch 外，本项目未复制第三方实现。
-
-## 联系
-
-- Gitee: [liu-xingyan04](https://gitee.com/liu-xingyan04)
-- GitHub: [ShaneLiu04](https://github.com/ShaneLiu04)
-- 问题与建议：欢迎提交 Issue 或 Pull Request。
-
----
-
-<p align="center">
-  <sub>Built with llama.cpp and GGUF. Speedups are paired with quality; negative results are kept in the repository.</sub>
-</p>
+- Pinned llama.cpp commit: `3bb63cbcbfb62056c84fe9e521b0f3d756d29c32`
+- Benchmark model: Qwen2.5-1.5B-Instruct Q4_K_M GGUF,
+  SHA256 `6a1a2eb6d15622bf3c96857206351ba97e1af16c30d7a74ee38970e434e9407e`
+  (`scripts/download_model.sh` verifies the hash and refuses mismatches).
+- Draft model (optional, AR005): Qwen2.5-0.5B-Instruct Q4_K_M GGUF,
+  SHA256 `74a4da8c9fdbcd15bd1f6d01d621410d31c6fc00986f5eb687824e7b93d7a9db`
+  (`scripts/download_model.sh --draft`). Fallback: `--draft-model` may point
+  at the main model file itself — the vocab matches, so `LlamaDraftScorer`
+  accepts it; only the draft forward gets slower. The explicit draft path
+  failing to load is a hard error, never a silent downgrade.
+- Embedding model (AR005): bge-small-en-v1.5 Q8_0 GGUF,
+  SHA256 `f046db1dc724cf4f6f0a0c5917e922823b73eb1d27b8f9a9c2797f7866974804`
+  (`scripts/download_model.sh --embed`). Activates with `--embedding-model`;
+  a failed load is a hard error, and every request records
+  `score_source` / `semantic_score_ms` / `qg_source` audit columns so
+  speedups stay net of the scoring overhead.
+- No performance number without the raw CSV and the exact command.
+- Prefill-only FFN skip and attention sparsity are lossy; every latency claim
+  carries its quality metric in the same report.
+- `budget=1.0` with all sparsity switches off is numerically equivalent to
+  dense prefill (enforced by tests).

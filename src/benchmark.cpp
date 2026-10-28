@@ -245,6 +245,10 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
     base.coverage_reserve = cfg.coverage_reserve;
     base.span_admission = cfg.span_admission;
     base.span_min_tokens = cfg.span_min_tokens;
+    base.sentence_completion = cfg.sentence_completion;
+    base.span_max_tokens = cfg.span_max_tokens;
+    base.sentence_trim = cfg.sentence_trim;
+    base.dump_selection_dir = cfg.dump_selection_dir;
     base.portfolio_table = cfg.portfolio_table;
     if (!base.budget_curve.empty()) {
         BudgetCurve curve;
@@ -461,6 +465,9 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
                     sopts.coverage_reserve = run_cfg.coverage_reserve;
                     sopts.span_admission = run_cfg.span_admission;
                     sopts.span_min_tokens = run_cfg.span_min_tokens;
+                    sopts.sentence_completion = run_cfg.sentence_completion;
+                    sopts.span_max_tokens = run_cfg.span_max_tokens;
+                    sopts.sentence_trim = run_cfg.sentence_trim;
                     sopts.weights = run_cfg.weights;
                     // AR005: semantic-priority fusion defaults when the
                     // embedding engine is active and the user has not
@@ -482,6 +489,32 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
                                          embed.loaded() ? &embed_adapter : nullptr,
                                          &selection);
                     if (!st.ok()) continue;
+                    if (!run_cfg.dump_selection_dir.empty()) {
+                        const std::string case_tag = c.id;
+                        std::ofstream jout(run_cfg.dump_selection_dir + "/" +
+                                           case_tag + "_selection.json");
+                        if (jout) jout << selection.to_json() << '\n';
+                        std::ofstream tout(run_cfg.dump_selection_dir + "/" +
+                                           case_tag + "_selected.txt");
+                        if (tout) {
+                            tout << "# prompt_tokens=" << tokens.size()
+                                 << " selected_tokens=" << selection.token_indices.size()
+                                 << '\n';
+                            uint32_t prev = 0;
+                            for (size_t k = 0; k < selection.token_indices.size(); ++k) {
+                                const uint32_t pos = selection.token_indices[k];
+                                if (k == 0) {
+                                    tout << "[pos " << pos << "] ";
+                                } else if (pos != prev + 1) {
+                                    tout << "\n[... " << (pos - prev - 1)
+                                         << " dropped tokens]\n[pos " << pos << "] ";
+                                }
+                                tout << pieces[pos];
+                                prev = pos;
+                            }
+                            tout << '\n';
+                        }
+                    }
 
                     // AR008 FR-2: measured combination routing. The selector
                     // run above doubles as the profiler: its phrase hits,
@@ -924,6 +957,8 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
                     sample.structure_tokens = selection.structure_tokens;
                     sample.evidence_tokens = selection.evidence_tokens;
                     sample.span_tokens = selection.span_tokens;
+                    sample.sentences_completed = selection.sentences_completed;
+                    sample.sentences_extended = selection.sentences_extended;
                     sample.uncovered_facts = selection.uncovered_facts;
                     sample.portfolio_choice = portfolio_choice;
                     sample.portfolio_reason = portfolio_reason;

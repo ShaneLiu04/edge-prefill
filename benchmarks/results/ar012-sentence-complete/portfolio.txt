@@ -1,0 +1,8 @@
+default = ar012
+deep/len32k = ar011
+deep/multifact8k = ar012
+deep/multifact8k-hard = ar012
+deep/multineedle = ar011
+explen/len16k = ar011
+explen/len4k = ar011
+explen/len8k = ar011

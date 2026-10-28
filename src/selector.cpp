@@ -168,6 +168,10 @@ std::string Selection::to_json() const {
     json.value(static_cast<uint64_t>(span_tokens));
     json.key("uncovered_facts");
     json.value(static_cast<uint64_t>(uncovered_facts));
+    json.key("sentences_completed");
+    json.value(static_cast<uint64_t>(sentences_completed));
+    json.key("sentences_extended");
+    json.value(static_cast<uint64_t>(sentences_extended));
     json.key("lexical_concentration");
     json.value(lexical_concentration);
     json.key("signals");
@@ -1218,20 +1222,182 @@ Status BlockSelector::select(const std::vector<llama_token>& tokens,
                                              out->structure_tokens
                                    : 0;
 
-    // AR011 FR-3: span admission. The admission unit and the execution unit are
-    // different concerns: the attention pool addresses 32-token blocks, but a
-    // needle sentence is ~20 tokens, so a whole-block admission pays for the
-    // filler around it. Keep a token span centred on the evidence peak inside
-    // each non-structural block. Blocks with no positive evidence score stay
-    // whole (never guess), and neighbours that are already selected extend the
-    // span so a cross-block answer is not cut in half.
+    // Blocks pulled in by sentence completion (function scope: the safety-net
+    // trim at the end must protect them, otherwise a context that overflows by
+    // a few tokens drops exactly the closure block that holds the answer tail -
+    // measured: facts_in_context 0.896 while the same closure with trimming
+    // reached 0.990).
+    std::set<uint32_t> sentence_blocks;
+    std::vector<char> sentence_keep;  // token mask produced by FR-1 (empty when off)
+
+    // AR012 FR-1: sentence-complete admission. The admission atom was the
+    // 32-token block, but sentences do not respect block boundaries: a
+    // multi-fact answer such as "... for vault six is TEAL-LYNX-8" continues
+    // in the next block ("853"), and all-or-nothing block admission then ships
+    // half an answer. Measured: 6 asked facts, 2 truncated -> q 0.709 on the
+    // hard tier, and *raising* the budget makes it worse (b=0.16: 0.771).
     //
-    // Single-fact only: with several asked facts the selection has to carry one
-    // complete sentence per fact, and trimming measured q=0.576 -> 0.405
-    // (multifact8k) and q_min 0.087 -> 0.000 (hard). Multi-fact prompts
-    // therefore keep whole blocks; the anchor budget (FR-1) is what saves them.
-    if (opts.span_admission > 0 && sub_idf.empty() && !out->token_indices.empty() &&
-        out->per_pos_scores.size() == n_tokens) {
+    // The rule: every evidence token pulls in its whole sentence, a sentence
+    // that spills into an unselected block pulls that block into the selection
+    // (closure), and only tokens outside the admitted sentences are trimmed.
+    // Multi-fact only. Completion exists because a fact row (key + code) can
+    // straddle a block boundary; that is what multi-fact answers consist of.
+    // Measured elsewhere it only adds tokens: multi-needle 247 -> 283 tokens at
+    // q=1.000 (the answer was already complete), while multi-fact gains
+    // +0.051 / +0.030 quality and 0.76 -> 0.99 fact completeness.
+    if (opts.sentence_completion > 0 && sub_idf.size() >= 2 &&
+        !out->token_indices.empty() && out->per_pos_scores.size() == n_tokens) {
+        auto ends_sentence = [&](uint32_t i) {
+            const std::string& piece = token_pieces[i];
+            if (piece.empty()) return false;
+            for (char c : piece) {
+                if (c == '.' || c == '!' || c == '?' || c == '\n' || c == ';') return true;
+            }
+            return false;
+        };
+        std::vector<uint32_t> sentence_start(n_tokens, 0);
+        std::vector<uint32_t> sentence_end(n_tokens, n_tokens);
+        for (uint32_t i = 0; i < n_tokens; ++i) {
+            if (i == 0 || ends_sentence(i - 1)) sentence_start[i] = i;
+            else sentence_start[i] = sentence_start[i - 1];
+        }
+        for (uint32_t i = n_tokens; i-- > 0;) {
+            if (ends_sentence(i) || i + 1 == n_tokens) sentence_end[i] = i + 1;
+            else sentence_end[i] = sentence_end[i + 1];
+        }
+        const uint32_t span_max = std::max<uint32_t>(block_size, opts.span_max_tokens);
+        std::set<uint32_t> blocks = selected_blocks;
+        std::set<uint32_t> touched_sentences;
+        std::vector<char> keep(n_tokens, 0);
+        for (uint32_t b : blocks) {
+            if (!structure_blocks.count(b)) continue;
+            const uint32_t begin = b * block_size;
+            const uint32_t end = std::min(n_tokens, begin + block_size);
+            for (uint32_t i = begin; i < end; ++i) keep[i] = 1;
+        }
+        // Two passes: pass 1 marks the sentences of the selected evidence
+        // blocks and records the blocks a sentence spills into; pass 2 handles
+        // those newly selected blocks. Sentences are short, so two passes are
+        // enough in practice; anything left is caught by the whole-block rule
+        // for blocks without evidence.
+        for (int pass = 0; pass < 3; ++pass) {
+            std::vector<uint32_t> added;
+            for (uint32_t b : blocks) {
+                const uint32_t begin = b * block_size;
+                const uint32_t end = std::min(n_tokens, begin + block_size);
+                if (structure_blocks.count(b)) continue;
+                bool has_evidence = false;
+                for (uint32_t i = begin; i < end; ++i) {
+                    if (out->per_pos_scores[i] > 0.0) {
+                        has_evidence = true;
+                        break;
+                    }
+                }
+                if (!has_evidence) {
+                    // Filler / positional anchors carry no evidence: keep them
+                    // whole rather than guessing what to trim.
+                    for (uint32_t i = begin; i < end; ++i) keep[i] = 1;
+                    continue;
+                }
+                for (uint32_t i = begin; i < end; ++i) {
+                    if (out->per_pos_scores[i] <= 0.0) continue;
+                    uint32_t s = sentence_start[i];
+                    uint32_t e = sentence_end[i];
+                    if (e > s + span_max) {
+                        log_warn("sentence longer than span_max_tokens (" +
+                                 std::to_string(e - s) + "); truncating at the block edge");
+                        s = begin;
+                        e = end;
+                    }
+                    for (uint32_t k = s; k < e; ++k) keep[k] = 1;
+                    touched_sentences.insert(s);
+                    if (s < begin) added.push_back(s / block_size);
+                    if (e > end) added.push_back((e - 1) / block_size);
+                }
+            }
+            bool grew = false;
+            for (uint32_t nb : added) {
+                if (nb >= n_blocks || blocks.count(nb)) continue;
+                blocks.insert(nb);
+                grew = true;
+            }
+            if (!grew) break;
+        }
+        out->sentences_completed = static_cast<uint32_t>(touched_sentences.size());
+        out->sentences_extended = static_cast<uint32_t>(blocks.size() > selected_blocks.size()
+                                                                ? blocks.size() - selected_blocks.size()
+                                                                : 0);
+        // Two modes, because they answer different questions:
+        //   sentence_trim=0  union only - keep every selected token and *add*
+        //                    the missing sentence continuations. This isolates
+        //                    "was the answer truncated?" without removing
+        //                    anything (measured: hard 0.709 -> 0.689 with
+        //                    trimming enabled, so trimming was removing
+        //                    context the model still needed).
+        //   sentence_trim=1  also drop tokens outside the admitted sentences.
+        std::vector<uint32_t> kept;
+        kept.reserve(out->token_indices.size() + block_size);
+        std::vector<uint32_t> kept_blocks;
+        if (opts.sentence_trim > 0) {
+            for (uint32_t b : blocks) {
+                const uint32_t begin = b * block_size;
+                const uint32_t end = std::min(n_tokens, begin + block_size);
+                bool any = false;
+                for (uint32_t i = begin; i < end; ++i) {
+                    if (!keep[i]) continue;
+                    kept.push_back(i);
+                    any = true;
+                }
+                if (any) kept_blocks.push_back(b);
+            }
+        } else {
+            // Union: every token the block selection already had ...
+            for (uint32_t i : out->token_indices) {
+                if (keep[i]) continue;
+                keep[i] = 1;
+            }
+            // ... plus the sentence continuations in the closure blocks.
+            for (uint32_t b : blocks) {
+                const uint32_t begin = b * block_size;
+                const uint32_t end = std::min(n_tokens, begin + block_size);
+                bool any = false;
+                for (uint32_t i = begin; i < end; ++i) {
+                    if (!keep[i]) continue;
+                    kept.push_back(i);
+                    any = true;
+                }
+                if (any) kept_blocks.push_back(b);
+            }
+        }
+        sentence_keep = keep;
+        if (!kept.empty()) {
+            out->span_tokens = out->token_indices.size() > kept.size()
+                                       ? static_cast<uint32_t>(out->token_indices.size() -
+                                                               kept.size())
+                                       : 0;
+            out->token_indices = std::move(kept);
+            // A closure block is part of the admitted context even when only
+            // part of it is kept, so the attention pool must know about it.
+            for (uint32_t b : kept_blocks) {
+                if (!selected_blocks.count(b)) {
+                    selected_blocks.insert(b);
+                    sentence_blocks.insert(b);
+                }
+            }
+            out->block_indices.assign(selected_blocks.begin(), selected_blocks.end());
+        }
+    }
+
+    // AR011 FR-3: single-fact prompts still trim to the window around the
+    // evidence peak (the answer sits in the same sentence, so only filler is
+    // removed). The two mechanisms are complementary and mutually exclusive by
+    // prompt type: multi-fact needs whole sentences (AR012), single-fact does
+    // not. Running AR011's trim on a multi-fact prompt measured q_min
+    // 0.174 -> 0.000; running AR012's union on a single-fact prompt only adds
+    // tokens (multi-needle 247 -> 283 at q=1.000).
+    if (opts.sentence_completion <= 0 || sub_idf.size() < 2) {
+    if (opts.span_admission > 0 && sub_idf.empty() &&
+        !out->token_indices.empty() && out->per_pos_scores.size() == n_tokens) {
         const uint32_t span_min = std::max<uint32_t>(
             block_size / 4, std::min<uint32_t>(opts.span_min_tokens, block_size));
         // Sentence boundaries: a span centred on the evidence peak must still
@@ -1308,22 +1474,41 @@ Status BlockSelector::select(const std::vector<llama_token>& tokens,
             out->token_indices = std::move(trimmed);
         }
     }
+    }  // end single-fact span path
 
     if (out->token_indices.size() > limit) {
-        std::set<uint32_t> mandatory_tokens;
-        for (uint32_t b : mandatory) {
-            const uint32_t begin = b * block_size;
-            const uint32_t end = std::min(n_tokens, begin + block_size);
-            for (uint32_t i = begin; i < end; ++i) mandatory_tokens.insert(i);
+        // AR012: this safety net used to keep every mandatory token first, and
+        // the anchor set can be larger than the limit on multi-fact prompts -
+        // so a selection that overflowed by a few tokens (e.g. after sentence
+        // completion added the missing answer tails) lost its *evidence* and
+        // kept the positional filler (measured: hard 0.709 -> 0.299). Protect
+        // evidence instead: keep tokens of blocks that carry evidence first,
+        // then the sink/recent block, then everything else.
+        std::set<uint32_t> protected_blocks;
+        for (uint32_t b = 0; b < n_blocks; ++b) {
+            if (evidence[b] > 0.0) protected_blocks.insert(b);
+        }
+        for (uint32_t b : structure_blocks) protected_blocks.insert(b);
+        for (uint32_t b : sentence_blocks) protected_blocks.insert(b);
+        const bool have_sentences = sentence_keep.size() == n_tokens;
+        std::set<uint32_t> protected_tokens;
+        std::vector<uint32_t> rest;
+        for (uint32_t i : out->token_indices) {
+            const bool in_sentence = have_sentences && sentence_keep[i];
+            if (in_sentence || protected_blocks.count(i / block_size)) {
+                protected_tokens.insert(i);
+            } else {
+                rest.push_back(i);
+            }
         }
         std::vector<uint32_t> trimmed;
         trimmed.reserve(limit);
         for (uint32_t i : out->token_indices) {
-            if (mandatory_tokens.count(i)) trimmed.push_back(i);
+            if (protected_tokens.count(i)) trimmed.push_back(i);
         }
-        for (uint32_t i : out->token_indices) {
+        for (uint32_t i : rest) {
             if (trimmed.size() >= limit) break;
-            if (!mandatory_tokens.count(i)) trimmed.push_back(i);
+            trimmed.push_back(i);
         }
         std::sort(trimmed.begin(), trimmed.end());
         out->token_indices = std::move(trimmed);

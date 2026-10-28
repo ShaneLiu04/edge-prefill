@@ -10,6 +10,7 @@
 #   ./repro.sh ar009    # AR009 multi-fact coverage ablation + expected gate
 #   ./repro.sh ar010    # AR010 evidence-first admission: matrix + table + gate
 #   ./repro.sh ar011    # AR011 structure-bounded admission: 7-set matrix + gate
+#   ./repro.sh ar012    # AR012 sentence-complete admission: matrix + facts + gate
 #
 # Every step is fail-fast (set -euo pipefail) and prints the exact command
 # it runs. Models are downloaded with SHA256 verification into ./models
@@ -257,6 +258,29 @@ case "${SUITE}" in
             && fail "gate did not reject the injected degraded arm"
         OUT="${ROOT}/benchmarks/results/ar011-structure-bounded"
         ;;
+    ar012)
+        # AR012: sentence-complete admission. Measures the 4-arm matrix (with the
+        # admitted text dumped for the deterministic fact audit), derives the
+        # routing table, gates it against AR011 (no free cost) and checks that
+        # every asked fact value is present in the admitted context.
+        python3 benchmarks/scripts/ar012_matrix.py \
+            --bin "${BIN}" --model "${MAIN_MODEL}" --dump \
+            --out "${ROOT}/benchmarks/results/ar012-sentence-complete"
+        python3 benchmarks/scripts/ar012_report.py \
+            "${ROOT}/benchmarks/results/ar012-sentence-complete"
+        python3 benchmarks/scripts/ar012_report.py \
+            "${ROOT}/benchmarks/results/ar012-sentence-complete" --gate \
+            || fail "AR012 routing regresses against AR011"
+        python3 benchmarks/scripts/ar012_report.py \
+            "${ROOT}/benchmarks/results/ar012-sentence-complete" --gate \
+            --inject deep/multifact8k:ar012-trim > /dev/null 2>&1 \
+            && fail "gate did not reject the injected degraded arm"
+        python3 benchmarks/scripts/check_facts_admission.py \
+            "${ROOT}/benchmarks/results/ar012-sentence-complete" \
+            --dataset deep/multifact8k-hard --floor 0.95 --gate-arm ar012 \
+            || fail "asked facts are missing from the admitted context"
+        OUT="${ROOT}/benchmarks/results/ar012-sentence-complete"
+        ;;
     ar009)
         # AR009 FR-3: regenerate the deterministic multi-fact families, run the
         # coverage ablation (AR008 ranking vs coverage-fair fill) and gate the
@@ -290,9 +314,10 @@ if [[ -f "${OUT}/ablation.md" ]]; then
     cat "${OUT}/ablation.md"
 fi
 
+# The AR campaigns carry their own gates (floors + Pareto/no-free-cost), so the
+# generic expected.csv check only applies to the matrix-style suites.
 if [[ "${CHECK_EXPECTED}" == "1" && "${SUITE}" != "smoke" && "${SUITE}" != "budget" \
-      && "${SUITE}" != "ar007" && "${SUITE}" != "ar008" \
-      && "${SUITE}" != "ar009" && "${SUITE}" != "ar010" ]]; then
+      && "${SUITE}" != ar0* ]]; then
     step "expected-results gate"
     python3 benchmarks/scripts/check_expected.py \
         --matrix "${OUT}/matrix.csv" \

@@ -210,6 +210,31 @@ sentence per fact (trimming measured 0.836 -> 0.800 and q_min 0.174 -> 0.000).
 Audit columns: structure_tokens, evidence_tokens, span_tokens,
 uncovered_facts.
 
+## Sentence-complete admission (AR012)
+
+The admission atom was the 32-token block, but fact rows do not respect block
+boundaries: `... the passcode for vault six is TEAL-LYNX-8` continues in the next
+block (`853`), and all-or-nothing block admission then ships half an answer
+(deterministic audit: 76% of asked answers complete on the hard multi-fact tier).
+Raising the budget does not help - b=0.16 measures 0.771 vs 0.836 at b=0.05,
+because the extra tokens are filler.
+
+`sentence_completion` makes the sentence the atom: every evidence token pulls in
+its whole sentence, a sentence that spills into an unselected block pulls that
+block into the selection (closure), and only tokens outside the admitted
+sentences are trimmed. It engages only when several facts are asked; on
+single-fact prompts it measured no quality gain and +15% tokens.
+
+`sentence_trim=1` additionally drops the filler inside evidence blocks. It is
+measured but never routed: it wins tokens (445 -> 372) yet costs quality
+(4K/32K 1.000 -> 0.827, hard 0.739 -> 0.689) because the removed sentences carry
+context the model still uses.
+
+Audit: `sentences_completed`, `sentences_extended`, and the admitted text itself
+(`--dump-selected-text`, `dump_selection_dir` in a bench conf) which
+`benchmarks/scripts/check_facts_admission.py` turns into a model-free quality
+signal.
+
 ## Edge accounting and the dense invariant
 
 `budget=1.0`, `qg_bound=false`, `query_gating=false`, `attn_top_k=0` and

@@ -77,6 +77,10 @@ struct Selection {
     uint32_t evidence_tokens = 0;
     uint32_t span_tokens = 0;
     uint32_t uncovered_facts = 0;
+    // AR012 FR-4 audit: evidence sentences made whole, and blocks pulled in by
+    // a sentence that crossed a block boundary.
+    uint32_t sentences_completed = 0;
+    uint32_t sentences_extended = 0;
     // AR008 FR-2 profile input: top-1 lexical score over the lexical sum.
     // A high value means the evidence is concentrated in one block, which
     // is exactly when selection-level sparsity is safe.
@@ -135,6 +139,14 @@ struct SelectionOptions {
     // used by the attention pool. 0 = whole blocks (AR010).
     int span_admission = 0;
     uint32_t span_min_tokens = 24;
+    // AR012 FR-1: admit whole sentences instead of whole blocks. Evidence
+    // tokens pull in their sentence; a sentence that spills into an unselected
+    // block pulls that block in. 0 = AR011 behaviour (block/span only).
+    int sentence_completion = 0;
+    uint32_t span_max_tokens = 128;
+    // AR012: 1 = also drop tokens outside the admitted sentences; 0 = union
+    // only (add the missing sentence continuations, remove nothing).
+    int sentence_trim = 0;
     SelectorWeights weights;
 };
 

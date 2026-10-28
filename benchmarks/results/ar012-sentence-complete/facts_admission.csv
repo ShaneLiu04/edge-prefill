@@ -1,0 +1,9 @@
+dataset,arm,facts_in_context,all_facts,cases
+deep/multifact8k-hard,ar011,0.7604,2,16
+deep/multifact8k-hard,ar012,0.9896,15,16
+deep/multifact8k-hard,ar012-trim,0.9896,15,16
+deep/multifact8k-hard,gate-p16,0.7708,3,16
+deep/multifact8k,ar011,0.8750,10,16
+deep/multifact8k,ar012,1.0000,16,16
+deep/multifact8k,ar012-trim,1.0000,16,16
+deep/multifact8k,gate-p16,0.8750,10,16

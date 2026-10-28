@@ -71,6 +71,11 @@ struct Config {
     int coverage_reserve = 0;
     int span_admission = 0;
     uint32_t span_min_tokens = 24;
+    // AR012: sentence-complete admission (0 = AR011 behaviour).
+    int sentence_completion = 0;
+    uint32_t span_max_tokens = 128;
+    int sentence_trim = 0;
+    std::string dump_selection_dir;
     // AR008 FR-2: measured execution-combination table. Empty keeps the
     // configured (or default) path — routing is opt-in, exactly like the
     // budget curve.

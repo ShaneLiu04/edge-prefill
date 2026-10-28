@@ -75,6 +75,8 @@ struct Sample {
     uint32_t evidence_tokens = 0;
     uint32_t span_tokens = 0;
     uint32_t uncovered_facts = 0;
+    uint32_t sentences_completed = 0;
+    uint32_t sentences_extended = 0;
     std::string portfolio_choice = "none";
     std::string portfolio_reason;
 };

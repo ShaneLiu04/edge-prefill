@@ -855,3 +855,135 @@ TEST_CASE(selector_coverage_reserve_reports_shortfall) {
     CHECK(sel.uncovered_facts <= sel.coverage_queries + sel.uncovered_facts);
     CHECK(sel.selected_tokens <= plain.selected_tokens + 32u);
 }
+
+// AR012 FR-1: a fact row can straddle a block boundary ("... for vault one is
+// MAGENTA-FALCON-" | "8200."). Whole-block admission then ships half an answer,
+// which is exactly what the multi-fact tiers measured (0.760 fact completeness).
+// Sentence completion must admit the whole sentence, including the part that
+// lives in a block that was not selected.
+TEST_CASE(selector_sentence_completion_keeps_split_answer) {
+    constexpr uint32_t n = 8192;
+    std::vector<llama_token> tokens(n);
+    std::vector<std::string> pieces(n, "filler");
+    for (uint32_t i = 0; i < n; ++i) tokens[i] = static_cast<llama_token>(i % 1000);
+    // Two asked facts so coverage (multi-fact) is active, each keyed by a rare
+    // term, with the value straddling the block boundary at 40*32.
+    // One sentence every 8 tokens so no sentence runs to the end of the doc.
+    for (uint32_t i = 7; i < n; i += 8) pieces[i] = "filler.";
+    pieces[20 * 32 + 3] = "alpha";
+    pieces[20 * 32 + 8] = "value-a";
+    pieces[20 * 32 + 20] = ".";
+    pieces[40 * 32 + 28] = ".";        // ends the filler sentence before beta
+    pieces[40 * 32 + 29] = "beta";     // key near the end of block 40 ...
+    pieces[40 * 32 + 31] = "value-";   // ... value starts in block 40 ...
+    pieces[41 * 32 + 0] = "b";         // ... and ends in block 41
+    pieces[41 * 32 + 1] = ".";
+    pieces[70 * 32 + 3] = "gamma";
+    pieces[70 * 32 + 8] = "value-c";
+    pieces[70 * 32 + 20] = ".";
+
+    auto opts = options(0.02);  // 163 tokens: block 40 can be selected, not 41
+    opts.fill_priors = 0.0;
+    opts.coverage_weight = 3.0;
+    opts.sentence_completion = 1;
+    Selection sel;
+    BlockSelector selector;
+    CHECK_OK(selector.select(tokens, "alpha beta gamma", pieces, opts, nullptr, &sel));
+    const auto has = [&](uint32_t pos) {
+        return std::find(sel.token_indices.begin(), sel.token_indices.end(), pos) !=
+               sel.token_indices.end();
+    };
+    CHECK(sel.sentences_completed >= 1u);
+    CHECK(has(40 * 32 + 29));
+    CHECK(has(40 * 32 + 31));
+    // The continuation token is admitted even though its block was not selected.
+    bool tail_in = has(41 * 32 + 0) || has(41 * 32 + 1);
+    CHECK(tail_in);
+    // Every admitted token belongs to a selected block (invariant I3).
+    for (uint32_t pos : sel.token_indices) {
+        CHECK(std::find(sel.block_indices.begin(), sel.block_indices.end(), pos / 32) !=
+              sel.block_indices.end());
+    }
+}
+
+// AR012: the switch is opt-in and must leave AR011's selection untouched.
+TEST_CASE(selector_sentence_completion_off_matches_ar011) {
+    constexpr uint32_t n = 8192;
+    std::vector<llama_token> tokens(n);
+    std::vector<std::string> pieces(n, "filler");
+    for (uint32_t i = 0; i < n; ++i) tokens[i] = static_cast<llama_token>(i % 1000);
+    pieces[200 * 32 + 4] = "needle";
+
+    auto opts = options(0.05);
+    opts.fill_priors = 0.0;
+    opts.span_admission = 1;
+    Selection ar011;
+    BlockSelector selector;
+    CHECK_OK(selector.select(tokens, "needle", pieces, opts, nullptr, &ar011));
+    auto off = opts;
+    off.sentence_completion = 0;  // the default, pinned explicitly
+    Selection same;
+    CHECK_OK(selector.select(tokens, "needle", pieces, off, nullptr, &same));
+    CHECK_EQ(same.selected_tokens, ar011.selected_tokens);
+    CHECK(same.token_indices == ar011.token_indices);
+    CHECK_EQ(same.sentences_completed, 0u);
+}
+
+// AR012: completion is engaged only when several facts are asked (coverage
+// active). On a single-fact prompt it measured no quality gain and +15% tokens
+// (multi-needle 247 -> 283), so it must stay out of the way.
+TEST_CASE(selector_sentence_completion_is_multi_fact_only) {
+    constexpr uint32_t n = 8192;
+    std::vector<llama_token> tokens(n);
+    std::vector<std::string> pieces(n, "filler");
+    for (uint32_t i = 0; i < n; ++i) tokens[i] = static_cast<llama_token>(i % 1000);
+    for (uint32_t i = 7; i < n; i += 8) pieces[i] = "filler.";
+    pieces[60 * 32 + 29] = "needle";
+    pieces[60 * 32 + 31] = "answer-";
+    pieces[61 * 32 + 0] = "tail";
+    pieces[61 * 32 + 1] = ".";
+
+    auto opts = options(0.05);
+    opts.fill_priors = 0.0;
+    opts.span_admission = 1;
+    opts.sentence_completion = 1;
+    Selection single;
+    BlockSelector selector;
+    CHECK_OK(selector.select(tokens, "needle", pieces, opts, nullptr, &single));
+    CHECK_EQ(single.sentences_completed, 0u);
+}
+
+// AR012 FR-4: the audit counters must describe what happened, and the index
+// invariants must hold after completion (ascending, unique, last token kept).
+TEST_CASE(selector_sentence_completion_audit_and_invariants) {
+    constexpr uint32_t n = 8192;
+    std::vector<llama_token> tokens(n);
+    std::vector<std::string> pieces(n, "filler");
+    for (uint32_t i = 0; i < n; ++i) tokens[i] = static_cast<llama_token>(i % 1000);
+    for (uint32_t i = 7; i < n; i += 8) pieces[i] = "filler.";
+    pieces[15 * 32 + 2] = "alpha";
+    pieces[15 * 32 + 6] = ".";
+    pieces[40 * 32 + 28] = ".";
+    pieces[40 * 32 + 30] = "beta";
+    pieces[40 * 32 + 31] = "value-";
+    pieces[41 * 32 + 1] = ".";
+    pieces[80 * 32 + 5] = "gamma";
+    pieces[80 * 32 + 9] = ".";
+
+    auto opts = options(0.03);
+    opts.fill_priors = 0.0;
+    opts.coverage_weight = 3.0;
+    opts.sentence_completion = 1;
+    Selection sel;
+    BlockSelector selector;
+    CHECK_OK(selector.select(tokens, "alpha beta gamma", pieces, opts, nullptr, &sel));
+    CHECK(sel.sentences_completed >= 1u);
+    CHECK_EQ(sel.token_indices.back(), n - 1);
+    for (size_t i = 1; i < sel.token_indices.size(); ++i) {
+        CHECK(sel.token_indices[i] > sel.token_indices[i - 1]);
+    }
+    // A block pulled in by a crossing sentence is reported in block_indices.
+    if (sel.sentences_extended > 0u) {
+        CHECK(sel.block_indices.size() > 0u);
+    }
+}

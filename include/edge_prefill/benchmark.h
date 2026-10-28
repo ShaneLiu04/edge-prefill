@@ -84,6 +84,13 @@ struct BenchmarkConfig {
     int coverage_reserve = 0;
     int span_admission = 0;
     uint32_t span_min_tokens = 24;
+    int sentence_completion = 0;
+    uint32_t span_max_tokens = 128;
+    int sentence_trim = 0;
+    // AR012 FR-2: when set,每 sample writes <case>_selected.txt (the admitted
+    // prompt as text) and <case>_selection.json next to the raw CSV, so any
+    // measured cell can be inspected without re-running the model.
+    std::string dump_selection_dir;
     std::string portfolio_table;
     // GPU offload: layers above this index move to the GPU backend (99 =
     // full offload). 0 keeps everything on CPU.

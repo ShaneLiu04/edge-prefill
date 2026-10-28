@@ -44,6 +44,7 @@ struct Args {
     std::string out_dir;
     std::string dump_plan;
     std::string dump_selection;
+    std::string dump_selected_text;
     std::string mode;
     std::string kv_type;
     std::string skip_ffn;
@@ -125,6 +126,12 @@ struct Args {
     bool span_admission_set = false;
     int span_min_tokens = -1;
     bool span_min_tokens_set = false;
+    int sentence_completion = -1;
+    bool sentence_completion_set = false;
+    int span_max_tokens = -1;
+    bool span_max_tokens_set = false;
+    int sentence_trim = -1;
+    bool sentence_trim_set = false;
     double anchor_ratio = 0.0;
     bool anchor_ratio_set = false;
     double anchor_stride_scale = 0.0;
@@ -167,6 +174,7 @@ void usage() {
         "  --coverage-weight F                 (AR009 multi-fact coverage, 0 = off)\n"
         "  --structure-budget N  --anchor-span-radius N  (AR011 structure budget)\n"
         "  --coverage-reserve 0|1  --span-admission 0|1  --span-min-tokens N\n"
+        "  --sentence-completion 0|1  --span-max-tokens N  --sentence-trim 0|1\n"
         "  --draft-model M   --attn-top-k N  --attn-top-k-layers 4,8,16\n"
         "  --embedding-model P  (bge-small style GGUF; activates semantic gating)\n"
         "  --selector-w-lexical F  --selector-w-diversity F\n"
@@ -180,6 +188,7 @@ void usage() {
         "  --probe-block-len N  --probe-repeats N  --probe-k N  --output F\n"
         "  --calibration-file F  (probe segment from real-task text)\n"
         "  --threads N       --n-ctx N                 --n-ubatch N\n"
+        "  --dump-selected-text P   (write the admitted prompt text)\n"
         "  --max-new-tokens N  --chat   --dump-plan P  --dump-selection P\n"
         "  --verbose\n";
 }
@@ -232,6 +241,11 @@ Status parse_args(int argc, char** argv, Args* args) {
         } else if (flag == "--dump-plan") {
             auto st = next(&args->dump_plan);
             if (!st.ok()) return st;
+        } else if (flag == "--dump-selected-text") {
+            std::string value;
+            auto st = next(&value);
+            if (!st.ok()) return st;
+            args->dump_selected_text = value;
         } else if (flag == "--dump-selection") {
             auto st = next(&args->dump_selection);
             if (!st.ok()) return st;
@@ -625,6 +639,24 @@ Status parse_args(int argc, char** argv, Args* args) {
             if (!st.ok()) return st;
             args->span_admission = std::stoi(value);
             args->span_admission_set = true;
+        } else if (flag == "--sentence-completion") {
+            std::string value;
+            auto st = next(&value);
+            if (!st.ok()) return st;
+            args->sentence_completion = std::stoi(value);
+            args->sentence_completion_set = true;
+        } else if (flag == "--sentence-trim") {
+            std::string value;
+            auto st = next(&value);
+            if (!st.ok()) return st;
+            args->sentence_trim = std::stoi(value);
+            args->sentence_trim_set = true;
+        } else if (flag == "--span-max-tokens") {
+            std::string value;
+            auto st = next(&value);
+            if (!st.ok()) return st;
+            args->span_max_tokens = std::stoi(value);
+            args->span_max_tokens_set = true;
         } else if (flag == "--span-min-tokens") {
             std::string value;
             auto st = next(&value);
@@ -748,6 +780,12 @@ Status apply_common_config(const Args& args, Config* cfg) {
     if (args.span_admission_set) cfg->span_admission = args.span_admission > 0 ? 1 : 0;
     if (args.span_min_tokens_set) cfg->span_min_tokens = static_cast<uint32_t>(
         std::max(1, args.span_min_tokens));
+    if (args.sentence_completion_set) {
+        cfg->sentence_completion = args.sentence_completion > 0 ? 1 : 0;
+    }
+    if (args.span_max_tokens_set) cfg->span_max_tokens = static_cast<uint32_t>(
+        std::max(1, args.span_max_tokens));
+    if (args.sentence_trim_set) cfg->sentence_trim = args.sentence_trim > 0 ? 1 : 0;
     if (args.anchor_ratio_set) cfg->anchor_ratio = args.anchor_ratio;
     if (args.anchor_stride_scale_set) cfg->anchor_stride_scale = args.anchor_stride_scale;
     if (args.mmr_lambda_set) cfg->mmr_lambda = args.mmr_lambda;
@@ -978,6 +1016,9 @@ Status run_command(const Args& args) {
     sopts.coverage_reserve = run_cfg.coverage_reserve;
     sopts.span_admission = run_cfg.span_admission;
     sopts.span_min_tokens = run_cfg.span_min_tokens;
+    sopts.sentence_completion = run_cfg.sentence_completion;
+    sopts.span_max_tokens = run_cfg.span_max_tokens;
+    sopts.sentence_trim = run_cfg.sentence_trim;
     sopts.weights = run_cfg.weights;
     // AR005: semantic evidence dominates the fusion when the embedding
     // engine is active, unless the user pinned weights or pure latency
@@ -1032,6 +1073,29 @@ Status run_command(const Args& args) {
     if (!args.dump_selection.empty()) {
         std::ofstream out(args.dump_selection);
         out << selection.to_json() << '\n';
+    }
+    // Debug aid: print exactly what the model will see. Admitted tokens are
+    // separated by runs of dropped tokens so a partially admitted sentence is
+    // visible at a glance; the position prefix is the original token index.
+    if (!args.dump_selected_text.empty()) {
+        std::ofstream out(args.dump_selected_text);
+        if (!out) return Status::error(ErrorCode::Io,
+                                       "cannot write " + args.dump_selected_text);
+        out << "# prompt_tokens=" << tokens.size()
+            << " selected_tokens=" << selection.token_indices.size() << '\n';
+        uint32_t prev = 0;
+        for (size_t i = 0; i < selection.token_indices.size(); ++i) {
+            const uint32_t pos = selection.token_indices[i];
+            if (i == 0) {
+                out << "[pos " << pos << "] ";
+            } else if (pos != prev + 1) {
+                out << "\n[... " << (pos - prev - 1) << " dropped tokens]\n[pos " << pos
+                    << "] ";
+            }
+            out << pieces[pos];
+            prev = pos;
+        }
+        out << '\n';
     }
 
     std::unique_ptr<PrefixCache> cache;
@@ -1317,6 +1381,12 @@ Status plan_command(const Args& args) {
     if (args.span_admission_set) cfg.span_admission = args.span_admission > 0 ? 1 : 0;
     if (args.span_min_tokens_set) cfg.span_min_tokens = static_cast<uint32_t>(
         std::max(1, args.span_min_tokens));
+    if (args.sentence_completion_set) {
+        cfg.sentence_completion = args.sentence_completion > 0 ? 1 : 0;
+    }
+    if (args.span_max_tokens_set) cfg.span_max_tokens = static_cast<uint32_t>(
+        std::max(1, args.span_max_tokens));
+    if (args.sentence_trim_set) cfg.sentence_trim = args.sentence_trim > 0 ? 1 : 0;
     if (args.anchor_ratio_set) cfg.anchor_ratio = args.anchor_ratio;
     if (args.anchor_stride_scale_set) cfg.anchor_stride_scale = args.anchor_stride_scale;
     if (args.mmr_lambda_set) cfg.mmr_lambda = args.mmr_lambda;
@@ -1419,6 +1489,10 @@ Status bench_command(const Args& args) {
     bench.coverage_reserve = cfg.coverage_reserve;
     bench.span_admission = cfg.span_admission;
     bench.span_min_tokens = cfg.span_min_tokens;
+    bench.sentence_completion = cfg.sentence_completion;
+    bench.span_max_tokens = cfg.span_max_tokens;
+    bench.sentence_trim = cfg.sentence_trim;
+    bench.dump_selection_dir = cfg.dump_selection_dir;
     bench.portfolio_table = cfg.portfolio_table;
     bench.n_gpu_layers = cfg.n_gpu_layers;
     bench.out_dir = cfg.results_dir;

@@ -1,0 +1,370 @@
+{
+  "table": {
+    "deep/len32k": {
+      "arm": "ar011",
+      "q_mean": 1.0,
+      "q_min": 1.0,
+      "selected": 525,
+      "ttft_median": 2802.8,
+      "vs_base": 0.0
+    },
+    "deep/multifact8k": {
+      "arm": "ar012",
+      "q_mean": 0.8869,
+      "q_min": 0.4286,
+      "selected": 509,
+      "ttft_median": 2776.5,
+      "vs_base": 0.051
+    },
+    "deep/multifact8k-hard": {
+      "arm": "ar012",
+      "q_mean": 0.7393,
+      "q_min": 0.6207,
+      "selected": 513,
+      "ttft_median": 2723.1,
+      "vs_base": 0.0307
+    },
+    "deep/multineedle": {
+      "arm": "ar011",
+      "q_mean": 1.0,
+      "q_min": 1.0,
+      "selected": 247,
+      "ttft_median": 1380.3,
+      "vs_base": 0.0
+    },
+    "explen/len16k": {
+      "arm": "ar011",
+      "q_mean": 1.0,
+      "q_min": 1.0,
+      "selected": 280,
+      "ttft_median": 1591.9,
+      "vs_base": 0.0
+    },
+    "explen/len4k": {
+      "arm": "ar011",
+      "q_mean": 1.0,
+      "q_min": 1.0,
+      "selected": 146,
+      "ttft_median": 985.4,
+      "vs_base": 0.0
+    },
+    "explen/len8k": {
+      "arm": "ar011",
+      "q_mean": 1.0,
+      "q_min": 1.0,
+      "selected": 188,
+      "ttft_median": 1244.2,
+      "vs_base": 0.0
+    }
+  },
+  "cells": [
+    {
+      "dataset": "explen/len16k",
+      "arm": "ar011",
+      "cases": 4,
+      "q_mean": 1.0,
+      "q_min": 1.0,
+      "ttft_median": 1591.8796105,
+      "selected": 280,
+      "sentences": 0.0,
+      "extended": 0.0
+    },
+    {
+      "dataset": "explen/len16k",
+      "arm": "ar012",
+      "cases": 4,
+      "q_mean": 1.0,
+      "q_min": 1.0,
+      "ttft_median": 1529.524349,
+      "selected": 280,
+      "sentences": 2.0,
+      "extended": 0.0
+    },
+    {
+      "dataset": "explen/len16k",
+      "arm": "ar012-trim",
+      "cases": 4,
+      "q_mean": 1.0,
+      "q_min": 1.0,
+      "ttft_median": 1540.2403365,
+      "selected": 251,
+      "sentences": 2.0,
+      "extended": 0.0
+    },
+    {
+      "dataset": "explen/len16k",
+      "arm": "gate-p16",
+      "cases": 4,
+      "q_mean": 1.0,
+      "q_min": 1.0,
+      "ttft_median": 6673.756294500001,
+      "selected": 1128,
+      "sentences": 0.0,
+      "extended": 0.0
+    },
+    {
+      "dataset": "deep/len32k",
+      "arm": "ar011",
+      "cases": 4,
+      "q_mean": 1.0,
+      "q_min": 1.0,
+      "ttft_median": 2802.8272795,
+      "selected": 525,
+      "sentences": 0.0,
+      "extended": 0.0
+    },
+    {
+      "dataset": "deep/len32k",
+      "arm": "ar012",
+      "cases": 4,
+      "q_mean": 1.0,
+      "q_min": 1.0,
+      "ttft_median": 2819.542042,
+      "selected": 525,
+      "sentences": 2.25,
+      "extended": 0.0
+    },
+    {
+      "dataset": "deep/len32k",
+      "arm": "ar012-trim",
+      "cases": 4,
+      "q_mean": 0.826923076925,
+      "q_min": 0.3076923077,
+      "ttft_median": 2554.405212,
+      "selected": 477,
+      "sentences": 2.25,
+      "extended": 0.0
+    },
+    {
+      "dataset": "deep/len32k",
+      "arm": "gate-p16",
+      "cases": 4,
+      "q_mean": 1.0,
+      "q_min": 1.0,
+      "ttft_median": 7177.8619215,
+      "selected": 1165,
+      "sentences": 0.0,
+      "extended": 0.0
+    },
+    {
+      "dataset": "explen/len4k",
+      "arm": "ar011",
+      "cases": 4,
+      "q_mean": 1.0,
+      "q_min": 1.0,
+      "ttft_median": 985.4318049999999,
+      "selected": 146,
+      "sentences": 0.0,
+      "extended": 0.0
+    },
+    {
+      "dataset": "explen/len4k",
+      "arm": "ar012",
+      "cases": 4,
+      "q_mean": 1.0,
+      "q_min": 1.0,
+      "ttft_median": 940.0201159999999,
+      "selected": 146,
+      "sentences": 1.5,
+      "extended": 0.0
+    },
+    {
+      "dataset": "explen/len4k",
+      "arm": "ar012-trim",
+      "cases": 4,
+      "q_mean": 0.826923076925,
+      "q_min": 0.3076923077,
+      "ttft_median": 913.0406365,
+      "selected": 123,
+      "sentences": 1.5,
+      "extended": 0.0
+    },
+    {
+      "dataset": "explen/len4k",
+      "arm": "gate-p16",
+      "cases": 4,
+      "q_mean": 1.0,
+      "q_min": 1.0,
+      "ttft_median": 1937.4368905000001,
+      "selected": 354,
+      "sentences": 0.0,
+      "extended": 0.0
+    },
+    {
+      "dataset": "explen/len8k",
+      "arm": "ar011",
+      "cases": 4,
+      "q_mean": 1.0,
+      "q_min": 1.0,
+      "ttft_median": 1244.1647520000001,
+      "selected": 188,
+      "sentences": 0.0,
+      "extended": 0.0
+    },
+    {
+      "dataset": "explen/len8k",
+      "arm": "ar012",
+      "cases": 4,
+      "q_mean": 1.0,
+      "q_min": 1.0,
+      "ttft_median": 1218.590341,
+      "selected": 188,
+      "sentences": 1.75,
+      "extended": 0.0
+    },
+    {
+      "dataset": "explen/len8k",
+      "arm": "ar012-trim",
+      "cases": 4,
+      "q_mean": 1.0,
+      "q_min": 1.0,
+      "ttft_median": 1000.294997,
+      "selected": 156,
+      "sentences": 1.75,
+      "extended": 0.0
+    },
+    {
+      "dataset": "explen/len8k",
+      "arm": "gate-p16",
+      "cases": 4,
+      "q_mean": 1.0,
+      "q_min": 1.0,
+      "ttft_median": 3852.2548405,
+      "selected": 628,
+      "sentences": 0.0,
+      "extended": 0.0
+    },
+    {
+      "dataset": "deep/multifact8k",
+      "arm": "ar011",
+      "cases": 16,
+      "q_mean": 0.8359618408875,
+      "q_min": 0.4285714286,
+      "ttft_median": 2339.93937,
+      "selected": 431,
+      "sentences": 0.0,
+      "extended": 0.0
+    },
+    {
+      "dataset": "deep/multifact8k",
+      "arm": "ar012",
+      "cases": 16,
+      "q_mean": 0.8869486829875,
+      "q_min": 0.4285714286,
+      "ttft_median": 2776.548659,
+      "selected": 509,
+      "sentences": 10.9375,
+      "extended": 2.6875
+    },
+    {
+      "dataset": "deep/multifact8k",
+      "arm": "ar012-trim",
+      "cases": 16,
+      "q_mean": 0.81475563910625,
+      "q_min": 0.4,
+      "ttft_median": 2036.8393225,
+      "selected": 371,
+      "sentences": 10.9375,
+      "extended": 2.6875
+    },
+    {
+      "dataset": "deep/multifact8k",
+      "arm": "gate-p16",
+      "cases": 16,
+      "q_mean": 0.8359618408875,
+      "q_min": 0.4285714286,
+      "ttft_median": 2376.228795,
+      "selected": 431,
+      "sentences": 0.0,
+      "extended": 0.0
+    },
+    {
+      "dataset": "deep/multifact8k-hard",
+      "arm": "ar011",
+      "cases": 16,
+      "q_mean": 0.70860546108125,
+      "q_min": 0.5714285714,
+      "ttft_median": 2399.2451954999997,
+      "selected": 445,
+      "sentences": 0.0,
+      "extended": 0.0
+    },
+    {
+      "dataset": "deep/multifact8k-hard",
+      "arm": "ar012",
+      "cases": 16,
+      "q_mean": 0.73927975526875,
+      "q_min": 0.6206896552,
+      "ttft_median": 2723.0734899999998,
+      "selected": 513,
+      "sentences": 10.75,
+      "extended": 2.625
+    },
+    {
+      "dataset": "deep/multifact8k-hard",
+      "arm": "ar012-trim",
+      "cases": 16,
+      "q_mean": 0.6887417119125,
+      "q_min": 0.3529411765,
+      "ttft_median": 2139.7199339999997,
+      "selected": 372,
+      "sentences": 10.75,
+      "extended": 2.625
+    },
+    {
+      "dataset": "deep/multifact8k-hard",
+      "arm": "gate-p16",
+      "cases": 16,
+      "q_mean": 0.667182624115,
+      "q_min": 0.08695652174,
+      "ttft_median": 2445.880037,
+      "selected": 445,
+      "sentences": 0.0,
+      "extended": 0.0
+    },
+    {
+      "dataset": "deep/multineedle",
+      "arm": "ar011",
+      "cases": 6,
+      "q_mean": 1.0,
+      "q_min": 1.0,
+      "ttft_median": 1380.3215180000002,
+      "selected": 247,
+      "sentences": 0.0,
+      "extended": 0.0
+    },
+    {
+      "dataset": "deep/multineedle",
+      "arm": "ar012",
+      "cases": 6,
+      "q_mean": 1.0,
+      "q_min": 1.0,
+      "ttft_median": 1400.1879995,
+      "selected": 247,
+      "sentences": 0.0,
+      "extended": 0.0
+    },
+    {
+      "dataset": "deep/multineedle",
+      "arm": "ar012-trim",
+      "cases": 6,
+      "q_mean": 1.0,
+      "q_min": 1.0,
+      "ttft_median": 1358.4503555000001,
+      "selected": 247,
+      "sentences": 0.0,
+      "extended": 0.0
+    },
+    {
+      "dataset": "deep/multineedle",
+      "arm": "gate-p16",
+      "cases": 6,
+      "q_mean": 1.0,
+      "q_min": 1.0,
+      "ttft_median": 3957.2992445,
+      "selected": 673,
+      "sentences": 0.0,
+      "extended": 0.0
+    }
+  ]
+}

@@ -333,6 +333,23 @@ Status parse_config_file(const std::string& path, Config* out) {
                                      "span_admission must be in [0,1]");
             }
             out->span_admission = d > 0.5 ? 1 : 0;
+        } else if (key == "sentence_completion") {
+            if (!parse_double(value, &d) || !(d >= 0.0 && d <= 1.0)) {
+                return Status::error(ErrorCode::InvalidArgument,
+                                     "sentence_completion must be in [0,1]");
+            }
+            out->sentence_completion = d > 0.5 ? 1 : 0;
+        } else if (key == "sentence_trim") {
+            if (!parse_double(value, &d) || !(d >= 0.0 && d <= 1.0)) {
+                return Status::error(ErrorCode::InvalidArgument,
+                                     "sentence_trim must be in [0,1]");
+            }
+            out->sentence_trim = d > 0.5 ? 1 : 0;
+        } else if (key == "dump_selection_dir") {
+            out->dump_selection_dir = value;
+        } else if (key == "span_max_tokens") {
+            if (!parse_i64(value, &i) || i < 1) goto bad_value;
+            out->span_max_tokens = static_cast<uint32_t>(i);
         } else if (key == "span_min_tokens") {
             if (!parse_i64(value, &i) || i < 1) goto bad_value;
             out->span_min_tokens = static_cast<uint32_t>(i);
