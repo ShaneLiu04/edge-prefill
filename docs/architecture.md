@@ -235,6 +235,37 @@ Audit: `sentences_completed`, `sentences_extended`, and the admitted text itself
 `benchmarks/scripts/check_facts_admission.py` turns into a model-free quality
 signal.
 
+## Compact context: KV sized by the admitted span (AR013)
+
+Sparse admission cut the work 27x but left the *memory* untouched: the bench
+created the context with `n_ctx = 0`, so llama.cpp reserved the model's training
+length — 896 MiB of KV cache for a 4K prompt that writes 3.5 MB.
+
+Two independent pieces fix that:
+
+- **Lazy context sizing.** The bench starts at 256 cells and each case calls
+  `LlamaBackend::ensure_context(max_position + max_new + 8)`, which re-creates
+  the context only when it must and refuses anything above `n_ctx_train` with a
+  clear error (an explicit `--n-ctx` that is too small also errors instead of
+  truncating silently). `kv_alloc_bytes` is derived from the model geometry
+  (`n_ctx x (K+V) x n_layer x head_dim x dtype`) and is documented against
+  llama.cpp's own "CPU KV buffer size" line.
+- **Block position compaction** (`position_compaction`). After admission the
+  selector emits a second, parallel position vector: for each kept block the
+  original offsets are kept verbatim and the gaps between blocks are collapsed,
+  so a fact and its value keep the exact RoPE distance they had while the dropped
+  filler stops occupying cells. `token_indices`, `block_indices` and the gather
+  indices stay in *original* prompt coordinates — `sparse_prefill` maps them to
+  decode rows — so nothing downstream (attention pool, chunk scheduler, dumps)
+  had to change.
+
+Measured (same session, real GGUF): KV 112 -> 7 MiB at 4K, 854 -> 21 MiB at 32K,
+and multi-fact quality *rises* (0.887 -> 0.975) even though the deterministic
+`facts_in_context` audit is identical for both arms: with the evidence blocks
+adjacent instead of thousands of filler positions apart, the model can combine
+them. A 64K document becomes runnable on a 32K-training-context model at all
+(1163 positions, 35 MiB, q=1.000).
+
 ## Edge accounting and the dense invariant
 
 `budget=1.0`, `qg_bound=false`, `query_gating=false`, `attn_top_k=0` and

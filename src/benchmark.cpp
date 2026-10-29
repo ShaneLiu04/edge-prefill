@@ -27,6 +27,15 @@
 #include "edge_prefill/sparse_prefill.h"
 
 namespace edge_prefill {
+
+namespace {
+
+// AR013 FR-1: the first context is deliberately small — every case grows it to
+// the position span it actually writes (LlamaBackend::ensure_context). Reserving
+// the model's training context up front cost 896 MiB for a 146-token prompt.
+constexpr uint32_t kSeedContextCells = 256;
+
+} // namespace
 namespace {
 
 struct Case {
@@ -248,6 +257,7 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
     base.sentence_completion = cfg.sentence_completion;
     base.span_max_tokens = cfg.span_max_tokens;
     base.sentence_trim = cfg.sentence_trim;
+    base.position_compaction = cfg.position_compaction;
     base.dump_selection_dir = cfg.dump_selection_dir;
     base.portfolio_table = cfg.portfolio_table;
     if (!base.budget_curve.empty()) {
@@ -275,7 +285,11 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
         return st;
     }
     ContextOptions ctx_opts;
-    ctx_opts.n_ctx = 0;
+    // AR013 FR-1: an explicit n_ctx (CLI/conf) is honoured instead of always
+    // letting llama.cpp pick the training context. 0 keeps the lazy behaviour:
+    // the context starts at the default and grows on demand through
+    // LlamaBackend::ensure_context to the span the case actually writes.
+    ctx_opts.n_ctx = cfg.n_ctx != 0 ? cfg.n_ctx : kSeedContextCells;
     ctx_opts.n_ubatch = 512;
     ctx_opts.n_threads = 0;
     ctx_opts.n_threads_batch = 0;
@@ -362,8 +376,21 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
             std::vector<llama_token> tokens;
             st = backend.tokenize(prompt, &tokens, true, true);
             if (!st.ok()) continue;
-            if (tokens.size() + base.max_new_tokens + 8 > backend.n_ctx()) {
-                if (warnings) warnings->push_back("context-too-long:" + c.id);
+            // AR013: the hard ceiling is the model's training context (or an
+            // explicit n_ctx), not the size of the context we happen to have
+            // allocated — that one is grown on demand to the compacted span.
+            // With compaction on, the raw prompt may exceed the ceiling; the
+            // span check happens after selection (FR-3).
+            const uint32_t hard_limit =
+                    cfg.n_ctx != 0
+                            ? cfg.n_ctx
+                            : static_cast<uint32_t>(std::max(0, backend.n_ctx_train()));
+            if (base.position_compaction == 0 && hard_limit > 0 &&
+                tokens.size() + base.max_new_tokens + 8 > hard_limit) {
+                if (warnings) {
+                    warnings->push_back("context-too-long:" + c.id + "@" +
+                                        std::to_string(length));
+                }
                 continue;
             }
             std::vector<std::string> pieces(tokens.size());
@@ -398,12 +425,23 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
                         ref_opts.enable_prefix_cache = false;
                         ref_opts.enable_ffn_skip = false;
                         PrefillStats ref_stats;
+                        const auto grow = backend.ensure_context(
+                                static_cast<uint32_t>(tokens.size()) +
+                                base.max_new_tokens + 8);
+                        if (!grow.ok()) {
+                            if (warnings) {
+                                warnings->push_back("ppl-dense-ref-context:" + grow.message);
+                            }
+                            ppl_dense_ref[ref_key] = ppl_lp_dense;
+                            continue;
+                        }
                         if (!prefilter.prefill(tokens, dense_sel, ref_opts, &ref_stats).ok()) {
                             if (warnings) warnings->push_back("ppl-dense-ref-failed:" + c.id);
                         } else {
                             const float* ref_logits = llama_get_logits_ith(backend.context(), -1);
                             double lp = 0.0;
-                            if (!score_answer_mean_logprob(backend, ref_logits, tokens.size(),
+                            if (!score_answer_mean_logprob(backend, ref_logits,
+                                                           static_cast<size_t>(ref_stats.kv_pos_max) + 1,
                                                            answer_tokens, &lp)) {
                                 if (warnings) {
                                     warnings->push_back("ppl-dense-ref-failed:" + c.id);
@@ -468,6 +506,7 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
                     sopts.sentence_completion = run_cfg.sentence_completion;
                     sopts.span_max_tokens = run_cfg.span_max_tokens;
                     sopts.sentence_trim = run_cfg.sentence_trim;
+                    sopts.position_compaction = run_cfg.position_compaction;
                     sopts.weights = run_cfg.weights;
                     // AR005: semantic-priority fusion defaults when the
                     // embedding engine is active and the user has not
@@ -835,6 +874,44 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
                                     std::chrono::steady_clock::now() - sel_begin)
                                     .count();
 
+                    // AR013 FR-1/FR-2: size the context to what this case will
+                    // actually write. With compacted positions the span follows
+                    // the admitted tokens, so a 4K/64K document no longer forces
+                    // a full-length KV cache. Growth is monotonic and rare, and
+                    // an explicit n_ctx that is too small is a hard error rather
+                    // than a silent truncation.
+                    const uint32_t last_pos =
+                            selection.positions.empty()
+                                    ? (selection.token_indices.empty()
+                                               ? 0
+                                               : selection.token_indices.back())
+                                    : selection.positions.back();
+                    const uint32_t required_ctx = last_pos + base.max_new_tokens + 8;
+                    if (cfg.n_ctx != 0 && required_ctx > cfg.n_ctx) {
+                        if (warnings) {
+                            warnings->push_back("n-ctx-too-small:" + c.id + "@" +
+                                                std::to_string(length));
+                        }
+                        log_error("n_ctx " + std::to_string(cfg.n_ctx) +
+                                  " is smaller than the required " +
+                                  std::to_string(required_ctx) +
+                                  " for case " + c.id + "@" + std::to_string(length));
+                        continue;
+                    }
+                    {
+                        auto gst = backend.ensure_context(required_ctx);
+                        if (!gst.ok()) {
+                            if (warnings) {
+                                warnings->push_back("context-grow-failed:" + c.id + "@" +
+                                                    std::to_string(length) + ":" +
+                                                    gst.message);
+                            }
+                            log_warn("context grow failed for " + c.id + ": " +
+                                     gst.message);
+                            continue;
+                        }
+                    }
+
                     // Untimed warmup runs stabilize caches and page in model
                     // weights so the timed repeats measure steady state.
                     bool prefill_ok = true;
@@ -872,6 +949,7 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
                     // Median TTFT: robust to scheduler noise on either side.
                     std::sort(ttft_samples.begin(), ttft_samples.end());
                     const double ttft_ms = ttft_samples[ttft_samples.size() / 2];
+                    const double ttft_min_ms = ttft_samples.front();
 
                     const float* first_logits = llama_get_logits_ith(backend.context(), -1);
                     std::string generated;
@@ -889,7 +967,8 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
                         double lp_sparse = 0.0;
                         if (!backend.tokenize(c.answer, &answer_tokens, false, false).ok() ||
                             answer_tokens.empty() ||
-                            !score_answer_mean_logprob(backend, first_logits, tokens.size(),
+                            !score_answer_mean_logprob(backend, first_logits,
+                                                   static_cast<size_t>(stats.kv_pos_max) + 1,
                                                        answer_tokens, &lp_sparse)) {
                             if (warnings) warnings->push_back("ppl-score-failed:" + c.id);
                             continue;
@@ -907,8 +986,11 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
                             generated += piece;
                             if (next == llama_vocab_eos(backend.vocab())) break;
                             std::vector<float> step_logits;
-                            st = backend.decode(next, static_cast<llama_pos>(tokens.size() + i),
-                                                &step_logits);
+                            st = backend.decode(
+                                    next,
+                                    static_cast<llama_pos>(stats.kv_pos_max) + 1 +
+                                            static_cast<llama_pos>(i),
+                                    &step_logits);
                             if (!st.ok()) break;
                             next = greedy(step_logits);
                         }
@@ -924,6 +1006,7 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
                     sample.task = c.task;
                     sample.case_id = c.id + "@" + std::to_string(length);
                     sample.ttft_ms = ttft_ms;
+                    sample.ttft_min_ms = ttft_min_ms;
                     sample.e2e_ms = e2e_ms;
                     sample.prefill_tokens_per_s =
                         stats.total_us > 0
@@ -963,6 +1046,14 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
                     sample.portfolio_choice = portfolio_choice;
                     sample.portfolio_reason = portfolio_reason;
                     sample.mmr_penalized = selection.mmr_penalized;
+                    // AR013 FR-1: per-case resource audit. The allocation is
+                    // read after the prefill so a grown context is reflected.
+                    sample.ctx_cells = backend.n_ctx();
+                    sample.kv_alloc_bytes = backend.kv_alloc_bytes();
+                    sample.kv_used_bytes = sample.kv_bytes;
+                    sample.rss_mb = backend.rss_mb();
+                    sample.position_span = selection.position_span;
+                    sample.compaction_reason = selection.compaction_reason;
                     log_info("case=" + sample.case_id + " mode=" + sample.mode +
                              " quality=" + std::to_string(sample.quality) +
                              " generated=" + generated);

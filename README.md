@@ -149,6 +149,17 @@ EDGE_PREFILL_TEST_MODEL=/path/to/model.gguf ./build/edge_prefill_tests
 | `--prior-gate F` | 1 = priors cannot create admission, 0 = legacy additive fusion (AR010) | 1.0 |
 | `--fill-priors F` | 0 = content-sized context (stop when evidence ends), 1 = fill the budget (AR010) | 1.0 |
 | `--portfolio P` | measured execution-combination table (AR008) | — |
+| `--structure-budget N` | sink+recent tokens reserved before evidence (AR011) | 0 (off) |
+| `--anchor-span-radius N` | widen admitted anchors by N blocks on each side (AR011) | 0 |
+| `--coverage-reserve F` | fraction of the target reserved for uncovered facts (AR011) | 0 |
+| `--span-admission on\|off` | single-fact evidence trimmed to whole sentences within its block (AR011) | off |
+| `--span-min-tokens N` | sentences shorter than this are not used to narrow a span (AR011) | 24 |
+| `--sentence-completion on\|off` | evidence pulls in its whole sentence; multi-fact only (AR012) | off |
+| `--sentence-trim on\|off` | trim remaining filler after completion (measured lossy, not routed) (AR012) | off |
+| `--span-max-tokens N` | cap on one completed span (AR012) | 128 |
+| `--dump-selected-text` | write the admitted text per prompt (AR012) | off |
+| `--position-compaction on\|off` | collapse the gaps between admitted blocks so the KV span tracks the admitted tokens (AR013) | off |
+| `--n-ctx N` | explicit context size; too small is an error, not a truncation (AR013) | grow to the span |
 | `--qg-bound on\|off` | in-graph query-aware page gating (AR006) | off |
 | `--qg-sel-pages N` | pages kept per ubatch by the gate (quality knob) | 16 |
 | `--qg-local-rows N` | local window rows around the ubatch (0 = ubatch span) | 0 |
@@ -347,6 +358,54 @@ routing table, gates it against AR011 on a "no free cost" rule (quality must not
 drop; tokens may only grow when quality does) and fails on an injected
 degradation.
 
+Which ARs are in the shipped combination, which stayed optional and which were
+rejected as negative results is summarised in `docs/portfolio.md`.
+
+### AR013: compact context (KV sized by what is admitted, not by the document)
+
+Admission had driven the token count down 27x (4K: 146 tokens of 3962), but the
+context still reserved the model's full training length: a 4K prompt allocated
+**896 MiB** of KV cache for the 3.5 MB it actually wrote, and a document longer
+than `n_ctx_train` could not run at all. AR013 makes the KV span follow the
+admitted tokens.
+
+| Dataset | AR012 q | AR013 q | KV cache AR012 | KV cache AR013 | TTFT (min of 5) |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 4K | 1.000 | 1.000 | 112 MiB | **7 MiB** | 3311 -> **2163 ms** |
+| 8K | 1.000 | 1.000 | 217 MiB | **7 MiB** | 1131 -> 1100 ms |
+| 16K | 1.000 | 1.000 | 430 MiB | **14 MiB** | 1641 -> 1789 ms |
+| 32K | 1.000 | 1.000 | 854 MiB | **21 MiB** | 2980 -> 3073 ms |
+| multi-needle | 1.000 | 1.000 | 217 MiB | **14 MiB** | 1551 -> 1518 ms |
+| multi-fact | 0.887 | **0.975** | 238 MiB | **21 MiB** | 3131 -> 3156 ms |
+| multi-fact hard | 0.739 | **0.746** | 244 MiB | **21 MiB** | 2482 -> 2603 ms |
+| **64K document** | cannot run | **1.000** | — | 35 MiB | 6436 ms |
+| all, vs the pre-AR013 bench | | | **896 MiB** | **7-21 MiB** | noise-neutral (aggregate 0.96x) |
+
+Two mechanisms, both opt-in so `budget=1.0` stays dense-equivalent:
+
+- **Context sized by the span** (`LlamaBackend::ensure_context`): the bench
+  stops reserving `n_ctx_train`; each case grows the context to the highest
+  position it will write. An explicit `--n-ctx` that is too small is a hard
+  error, never a silent truncation.
+- **Block position compaction** (`--position-compaction`): after admission the
+  gaps between kept blocks are collapsed while every *intra-block* offset is
+  kept verbatim, so a fact and its value keep the exact distance the model was
+  trained on and only the dropped filler stops occupying cells. The gather
+  indices stay in original prompt coordinates and are mapped to decode rows.
+
+The multi-fact gain is not an admission effect: the deterministic audit reports
+the same `facts_in_context` (1.000 easy / 0.990 hard) for both arms, yet the
+model answers better, because the evidence blocks now sit next to each other
+instead of thousands of filler positions apart.
+
+`./repro.sh ar013` runs the 8-dataset matrix, gates it (quality must not drop,
+TTFT must not regress beyond measurement noise, KV must shrink under per-dataset
+ceilings, and the 64K document must run where AR012 provably cannot), and fails
+on two injected degradations. The 64K contexts themselves are not committed
+(1.6 MB of synthetic text that the push host rejects): `repro.sh ar013`
+regenerates them with the pinned seed, and `benchmarks/data/explen/len64k/`
+keeps the index plus the per-file SHA256 in `manifest.json`.
+
 Absolute TTFT depends on the host (this session ran up to 3x slower than the
 AR004 session on the same CPU); compare ratios measured in one session, and
 use `benchmarks/scripts/check_expected_ar006.py` for the machine-independent
@@ -363,7 +422,7 @@ tests/          unit + real-model integration tests (SKIP without model)
 benchmarks/     configs, datasets, raw CSV reports, analysis scripts
 scripts/        experiment orchestration; diagnostics/ = archived probes
 specs/          SRS / design / task tracking per change request
-docs/           architecture.md, experiments.md
+docs/           architecture.md, experiments.md, portfolio.md (AR001–AR012 inventory)
 ```
 
 ## Reproducibility rules

@@ -235,6 +235,7 @@ visible 集合 = local（sink 页 + 尾部窗口，窗口 = `local_pages*32` 或
 
 | 日期 | 变更 | 来源 |
 |------|------|------|
+| 2026-10-29 | 升级为 AR013：**紧凑上下文**。`LlamaBackend::ensure_context` 让 bench 的上下文按每个 case 实际写入的位置跨度增长（起始 256 格，超 `n_ctx_train` 或显式 `--n-ctx` 不足即报错，不静默截断），不再恒定申请模型训练长度（4K 文档 896 MiB → 7 MiB）；**块级位置压缩** `position_compaction`（Selection 新增平行的 `positions`/`position_span`/`compaction_reason`，块内偏移原样保留、块间空隙消除，gather 索引仍用原始坐标并在 `sparse_prefill` 映射到 decode 行号）；新增审计 `ctx_cells`/`kv_alloc_bytes`（按模型几何计算，与 llama.cpp `CPU KV buffer size` 对齐）/`kv_used_bytes`/`rss_mb`/`position_span`/`compaction_reason` 与噪声鲁棒的 `ttft_min_ms`；`ar013_matrix.py`/`ar013_report.py`（质量/延迟/KV 分配/超训练长度能力四项闸门 + 两种注入自测）；解锁 64K 文档在 32K 训练上下文模型上的运行；记录三条实测结论：只调小 n_ctx 无效（跨度仍由文档长度决定）、16 线程比 8 线程慢 12 倍（主机 SMT 争用）、`llama_state_get_size` 只反映已写入状态不能当分配量 | AR013 |
 | 2026-10-20 | 初始组件设计，建立 AR001 架构基线 | AR001 |
 | 2026-10-20 | 升级为 AR002：加入 draft 模型、attention 全局/分层 top-k、Radix 前缀缓存、按层 KV 精度、自动调优与 Pareto 基准 | AR002 |
 | 2026-10-21 | 升级为 AR003：加入 head 级自适应稀疏（ranked 池 + 层×头 top-k 矩阵 patch、消融式 head 分类器）、在线质量风险控制器、TuneSearchSpace 增 head_adaptive 维度、Sample 增 risk_level/head_adaptive/retrieval_heads、classify-heads CLI 契约、sync_gitee.sh 交付 | AR003 |

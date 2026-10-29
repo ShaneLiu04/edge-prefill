@@ -132,6 +132,8 @@ struct Args {
     bool span_max_tokens_set = false;
     int sentence_trim = -1;
     bool sentence_trim_set = false;
+    int position_compaction = -1;
+    bool position_compaction_set = false;
     double anchor_ratio = 0.0;
     bool anchor_ratio_set = false;
     double anchor_stride_scale = 0.0;
@@ -175,6 +177,7 @@ void usage() {
         "  --structure-budget N  --anchor-span-radius N  (AR011 structure budget)\n"
         "  --coverage-reserve 0|1  --span-admission 0|1  --span-min-tokens N\n"
         "  --sentence-completion 0|1  --span-max-tokens N  --sentence-trim 0|1\n"
+        "  --position-compaction 0|1   (AR013: compact KV positions)\n"
         "  --draft-model M   --attn-top-k N  --attn-top-k-layers 4,8,16\n"
         "  --embedding-model P  (bge-small style GGUF; activates semantic gating)\n"
         "  --selector-w-lexical F  --selector-w-diversity F\n"
@@ -645,6 +648,12 @@ Status parse_args(int argc, char** argv, Args* args) {
             if (!st.ok()) return st;
             args->sentence_completion = std::stoi(value);
             args->sentence_completion_set = true;
+        } else if (flag == "--position-compaction") {
+            std::string value;
+            auto st = next(&value);
+            if (!st.ok()) return st;
+            args->position_compaction = std::stoi(value);
+            args->position_compaction_set = true;
         } else if (flag == "--sentence-trim") {
             std::string value;
             auto st = next(&value);
@@ -786,6 +795,9 @@ Status apply_common_config(const Args& args, Config* cfg) {
     if (args.span_max_tokens_set) cfg->span_max_tokens = static_cast<uint32_t>(
         std::max(1, args.span_max_tokens));
     if (args.sentence_trim_set) cfg->sentence_trim = args.sentence_trim > 0 ? 1 : 0;
+    if (args.position_compaction_set) {
+        cfg->position_compaction = args.position_compaction > 0 ? 1 : 0;
+    }
     if (args.anchor_ratio_set) cfg->anchor_ratio = args.anchor_ratio;
     if (args.anchor_stride_scale_set) cfg->anchor_stride_scale = args.anchor_stride_scale;
     if (args.mmr_lambda_set) cfg->mmr_lambda = args.mmr_lambda;
@@ -1019,6 +1031,7 @@ Status run_command(const Args& args) {
     sopts.sentence_completion = run_cfg.sentence_completion;
     sopts.span_max_tokens = run_cfg.span_max_tokens;
     sopts.sentence_trim = run_cfg.sentence_trim;
+    sopts.position_compaction = run_cfg.position_compaction;
     sopts.weights = run_cfg.weights;
     // AR005: semantic evidence dominates the fusion when the embedding
     // engine is active, unless the user pinned weights or pure latency
@@ -1387,6 +1400,9 @@ Status plan_command(const Args& args) {
     if (args.span_max_tokens_set) cfg.span_max_tokens = static_cast<uint32_t>(
         std::max(1, args.span_max_tokens));
     if (args.sentence_trim_set) cfg.sentence_trim = args.sentence_trim > 0 ? 1 : 0;
+    if (args.position_compaction_set) {
+        cfg.position_compaction = args.position_compaction > 0 ? 1 : 0;
+    }
     if (args.anchor_ratio_set) cfg.anchor_ratio = args.anchor_ratio;
     if (args.anchor_stride_scale_set) cfg.anchor_stride_scale = args.anchor_stride_scale;
     if (args.mmr_lambda_set) cfg.mmr_lambda = args.mmr_lambda;
@@ -1492,6 +1508,7 @@ Status bench_command(const Args& args) {
     bench.sentence_completion = cfg.sentence_completion;
     bench.span_max_tokens = cfg.span_max_tokens;
     bench.sentence_trim = cfg.sentence_trim;
+    bench.position_compaction = cfg.position_compaction;
     bench.dump_selection_dir = cfg.dump_selection_dir;
     bench.portfolio_table = cfg.portfolio_table;
     bench.n_gpu_layers = cfg.n_gpu_layers;

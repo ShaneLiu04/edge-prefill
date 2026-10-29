@@ -87,6 +87,12 @@ struct BenchmarkConfig {
     int sentence_completion = 0;
     uint32_t span_max_tokens = 128;
     int sentence_trim = 0;
+    // AR013 FR-2: compact KV positions (0 = AR012 identity positions).
+    int position_compaction = 0;
+    // AR013 FR-1: explicit context size. 0 = grow on demand to the position
+    // span the case writes; a value that is too small fails the case instead of
+    // silently truncating.
+    uint32_t n_ctx = 0;
     // AR012 FR-2: when set,每 sample writes <case>_selected.txt (the admitted
     // prompt as text) and <case>_selection.json next to the raw CSV, so any
     // measured cell can be inspected without re-running the model.

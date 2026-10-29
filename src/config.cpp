@@ -339,6 +339,12 @@ Status parse_config_file(const std::string& path, Config* out) {
                                      "sentence_completion must be in [0,1]");
             }
             out->sentence_completion = d > 0.5 ? 1 : 0;
+        } else if (key == "position_compaction") {
+            if (!parse_double(value, &d) || !(d >= 0.0 && d <= 1.0)) {
+                return Status::error(ErrorCode::InvalidArgument,
+                                     "position_compaction must be in [0,1]");
+            }
+            out->position_compaction = d > 0.5 ? 1 : 0;
         } else if (key == "sentence_trim") {
             if (!parse_double(value, &d) || !(d >= 0.0 && d <= 1.0)) {
                 return Status::error(ErrorCode::InvalidArgument,

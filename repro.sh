@@ -11,6 +11,7 @@
 #   ./repro.sh ar010    # AR010 evidence-first admission: matrix + table + gate
 #   ./repro.sh ar011    # AR011 structure-bounded admission: 7-set matrix + gate
 #   ./repro.sh ar012    # AR012 sentence-complete admission: matrix + facts + gate
+#   ./repro.sh ar013    # AR013 compact context: matrix + KV/latency/capability gate
 #
 # Every step is fail-fast (set -euo pipefail) and prints the exact command
 # it runs. Models are downloaded with SHA256 verification into ./models
@@ -281,6 +282,31 @@ case "${SUITE}" in
             || fail "asked facts are missing from the admitted context"
         OUT="${ROOT}/benchmarks/results/ar012-sentence-complete"
         ;;
+    ar013)
+        # AR013: compact context. Measures the 8-dataset matrix (7 existing plus a
+        # 64K document that the AR012 configuration provably cannot run), gates
+        # quality / latency / KV allocation / long-context capability, and proves
+        # the gate can fail with two injected degradations.
+        python3 benchmarks/scripts/gen_niah.py \
+            --out "${ROOT}/benchmarks/data/explen/len64k" --cases 4 --words 57000
+        python3 benchmarks/scripts/ar013_matrix.py \
+            --bin "${BIN}" --model "${MAIN_MODEL}" --dump \
+            --out "${ROOT}/benchmarks/results/ar013-compact-context"
+        python3 benchmarks/scripts/ar013_report.py \
+            "${ROOT}/benchmarks/results/ar013-compact-context"
+        python3 benchmarks/scripts/ar013_report.py \
+            "${ROOT}/benchmarks/results/ar013-compact-context" --gate \
+            || fail "AR013 regresses on quality, latency, KV or 64K capability"
+        python3 benchmarks/scripts/ar013_report.py \
+            "${ROOT}/benchmarks/results/ar013-compact-context" --gate \
+            --inject explen/len4k:no-compaction > /dev/null 2>&1 \
+            && fail "gate did not reject the injected no-compaction arm"
+        python3 benchmarks/scripts/ar013_report.py \
+            "${ROOT}/benchmarks/results/ar013-compact-context" --gate \
+            --inject explen/len64k:no-capability > /dev/null 2>&1 \
+            && fail "gate did not reject the injected lost-capability arm"
+        OUT="${ROOT}/benchmarks/results/ar013-compact-context"
+        ;;
     ar009)
         # AR009 FR-3: regenerate the deterministic multi-fact families, run the
         # coverage ablation (AR008 ranking vs coverage-fair fill) and gate the
@@ -301,7 +327,7 @@ case "${SUITE}" in
         OUT="${ROOT}/benchmarks/results/ar009-multifact"
         ;;
     *)
-        fail "unknown suite: ${SUITE} (smoke|matrix|full|budget|ar007|ar008|ar009|ar010)"
+        fail "unknown suite: ${SUITE} (smoke|matrix|full|budget|ar007..ar013)"
         ;;
 esac
 

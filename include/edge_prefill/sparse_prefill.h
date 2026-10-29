@@ -67,6 +67,7 @@ public:
 private:
     Status attn_prefill(const std::vector<llama_token>& tokens,
                         const std::vector<llama_pos>& positions,
+                        const std::vector<uint32_t>& origins,
                         const std::vector<int32_t>& attn_indices,
                         const Options& opts,
                         PrefillStats* stats,

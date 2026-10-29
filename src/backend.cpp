@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <sstream>
 #include <thread>
 #include <sys/stat.h>
 
@@ -620,6 +621,77 @@ ModelFingerprint LlamaBackend::fingerprint() const {
 
 uint64_t LlamaBackend::kv_bytes() const {
     return ctx_ ? llama_state_seq_get_size(ctx_, 0) : 0;
+}
+
+uint64_t LlamaBackend::kv_alloc_bytes() const {
+    // AR013 FR-1: llama_state_get_size only reports the *used* state, so the
+    // allocated KV cache is derived from the geometry the context was built
+    // with: n_ctx cells x (K + V) x n_layer x head_dim x dtype size. The
+    // estimate is checked against llama.cpp's own "CPU KV buffer size" log in
+    // ST (see the AR013 report).
+    if (!ctx_ || !model_) return 0;
+    const int32_t n_layer = llama_model_n_layer(model_);
+    const int32_t n_embd = llama_model_n_embd(model_);
+    const int32_t n_head = llama_model_n_head(model_);
+    const int32_t n_head_kv = llama_model_n_head_kv(model_);
+    if (n_layer <= 0 || n_head <= 0 || n_head_kv <= 0) return 0;
+    const double head_dim = static_cast<double>(n_embd) / n_head;
+    double elem = 2.0;
+    switch (context_options_.type_k) {
+        case KvPrecision::F16: elem = 2.0; break;
+        case KvPrecision::Q8_0: elem = 34.0 / 32.0; break;
+        case KvPrecision::Q4_0: elem = 18.0 / 32.0; break;
+    }
+    const double per_token = 2.0 * n_layer * head_dim * n_head_kv * elem;
+    return static_cast<uint64_t>(per_token * llama_n_ctx(ctx_));
+}
+
+uint64_t LlamaBackend::rss_mb() const {
+    // Linux (including WSL) only: an independent cross-check of the allocation
+    // numbers above. Other platforms report 0 rather than a fabricated value.
+    std::ifstream status("/proc/self/status");
+    std::string line;
+    while (std::getline(status, line)) {
+        if (line.rfind("VmRSS:", 0) != 0) continue;
+        std::istringstream in(line.substr(6));
+        uint64_t kb = 0;
+        in >> kb;
+        return kb / 1024;
+    }
+    return 0;
+}
+
+int32_t LlamaBackend::n_ctx_train() const {
+    return model_ ? llama_model_n_ctx_train(model_) : 0;
+}
+
+Status LlamaBackend::ensure_context(uint32_t required) {
+    if (!ctx_) {
+        return Status::error(ErrorCode::ContextInit, "context is not created");
+    }
+    if (required == 0) return Status::success();
+    const uint32_t have = llama_n_ctx(ctx_);
+    if (required <= have) return Status::success();
+
+    // Grow once to the requested size (plus headroom) instead of stepping, so a
+    // run with growing prompt lengths re-creates the context a handful of times
+    // at most. Positions are compacted, so the growth is bounded by the
+    // admitted span, not by the document length.
+    const uint32_t train = static_cast<uint32_t>(std::max(0, n_ctx_train()));
+    if (train > 0 && required > train) {
+        return Status::error(
+                ErrorCode::InvalidArgument,
+                "n_ctx required " + std::to_string(required) +
+                        " exceeds the model training context " + std::to_string(train) +
+                        "; enable position compaction or shorten the prompt");
+    }
+    ContextOptions opts = context_options_;
+    opts.n_ctx = required;
+    auto st = create_context(opts);
+    if (!st.ok()) return st;
+    ++context_creations_;
+    log_info("context grown to n_ctx=" + std::to_string(llama_n_ctx(ctx_)));
+    return Status::success();
 }
 
 } // namespace edge_prefill

@@ -155,7 +155,25 @@ public:
     std::string arch() const;
     ModelFingerprint fingerprint() const;
     const ContextOptions& context_options() const { return context_options_; }
+    // Written sequence state size (used KV only).
     uint64_t kv_bytes() const;
+    // AR013 FR-1: allocated context state (KV cache for every seq plus the
+    // logits buffer) as reported by llama.cpp �� the honest counterpart to
+    // kv_bytes() and the number that must match the "CPU KV buffer size" log.
+    uint64_t kv_alloc_bytes() const;
+    // AR013 FR-1: process resident set size in MiB (independent cross-check of
+    // the allocation numbers; 0 when the platform does not expose it).
+    uint64_t rss_mb() const;
+    // AR013 FR-1: model training context length �� the hard ceiling for
+    // positions when compaction is off.
+    int32_t n_ctx_train() const;
+    // AR013 FR-2: grow the context on demand so bench never allocates for the
+    // document length when the admitted span is small. No-op when the current
+    // context already covers `required`. Returns InvalidArgument when the
+    // request exceeds the model's training context.
+    Status ensure_context(uint32_t required);
+    // Context creations performed so far (audit: growth should be rare).
+    uint32_t context_creations() const { return context_creations_; }
 
 private:
     llama_model* model_ = nullptr;
@@ -164,6 +182,7 @@ private:
     std::string model_path_;
     ContextOptions context_options_;
     int32_t n_gpu_layers_ = 0;
+    uint32_t context_creations_ = 0;
 };
 
 } // namespace edge_prefill

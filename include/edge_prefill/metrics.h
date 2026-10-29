@@ -22,6 +22,10 @@ struct Sample {
     std::string task;
     std::string case_id;
     double ttft_ms = 0.0;
+    // AR013: fastest timed repeat. Under external host load the median swings
+    // by 5x between sessions; the minimum is the least contaminated estimator
+    // of what the device can do, and is what the latency gate uses.
+    double ttft_min_ms = 0.0;
     double e2e_ms = 0.0;
     double prefill_tokens_per_s = 0.0;
     uint64_t kv_bytes = 0;
@@ -77,6 +81,16 @@ struct Sample {
     uint32_t uncovered_facts = 0;
     uint32_t sentences_completed = 0;
     uint32_t sentences_extended = 0;
+    // AR013 FR-1 audit: context cells requested, the allocated context state
+    // (llama.cpp KV buffer + logits), the written sequence state, the process
+    // RSS, and the compacted position span. These make the memory claim
+    // verifiable per case instead of being a property of the whole run.
+    uint32_t ctx_cells = 0;
+    uint64_t kv_alloc_bytes = 0;
+    uint64_t kv_used_bytes = 0;
+    uint64_t rss_mb = 0;
+    uint32_t position_span = 0;
+    std::string compaction_reason;
     std::string portfolio_choice = "none";
     std::string portfolio_reason;
 };

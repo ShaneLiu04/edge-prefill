@@ -213,20 +213,31 @@ Status SparsePrefiller::prefill(const std::vector<llama_token>& tokens,
 
     std::vector<llama_token> active_tokens;
     std::vector<llama_pos> active_positions;
+    // AR013: the gather indices are original prompt positions while the batch
+    // carries compacted ones, so the row mapping needs the original index of
+    // every active token (rows follow decode order, not absolute position).
+    std::vector<uint32_t> active_origins;
+    const bool compacted = selection.positions.size() == selection.token_indices.size() &&
+                           !selection.positions.empty();
     active_tokens.reserve(selection.token_indices.size());
     active_positions.reserve(selection.token_indices.size());
-    for (uint32_t idx : selection.token_indices) {
+    active_origins.reserve(selection.token_indices.size());
+    for (size_t k = 0; k < selection.token_indices.size(); ++k) {
+        const uint32_t idx = selection.token_indices[k];
         if (idx < prefix_len) continue;
         active_tokens.push_back(tokens[idx]);
-        active_positions.push_back(static_cast<llama_pos>(idx));
+        active_positions.push_back(static_cast<llama_pos>(compacted ? selection.positions[k]
+                                                                  : idx));
+        active_origins.push_back(idx);
     }
 
     if (!active_tokens.empty()) {
         PrefillModeGuard guard(backend_);
         Status st = Status::success();
         if (attn_active) {
-            st = attn_prefill(active_tokens, active_positions, selection.attention_indices,
-                              opts, stats, qg_active, bound_active);
+            st = attn_prefill(active_tokens, active_positions, active_origins,
+                              selection.attention_indices, opts, stats, qg_active,
+                              bound_active);
         } else {
             // enable_chunking=false passes the whole active span: the
             // scheduler emits one range and llama_decode splits internally
@@ -263,7 +274,11 @@ Status SparsePrefiller::prefill(const std::vector<llama_token>& tokens,
     stats->total_us = elapsed + (prefix_len > 0 ? 0 : 0);
     stats->ttft_us = stats->total_us;
     stats->kv_pos_min = 0;
-    stats->kv_pos_max = static_cast<int32_t>(tokens.size()) - 1;
+    // AR013: with compacted positions the written span is the compacted max,
+    // not the prompt length; report what the KV cache actually holds.
+    stats->kv_pos_max = active_positions.empty()
+                                ? static_cast<int32_t>(tokens.size()) - 1
+                                : static_cast<int32_t>(active_positions.back());
     stats->kv_bytes = backend_->kv_bytes();
 
     if (cache_ && opts.enable_prefix_cache && selection.dense) {
@@ -280,6 +295,7 @@ Status SparsePrefiller::prefill(const std::vector<llama_token>& tokens,
 
 Status SparsePrefiller::attn_prefill(const std::vector<llama_token>& tokens,
                                      const std::vector<llama_pos>& positions,
+                                     const std::vector<uint32_t>& origins,
                                      const std::vector<int32_t>& attn_indices,
                                      const Options& opts,
                                      PrefillStats* stats,
@@ -289,15 +305,21 @@ Status SparsePrefiller::attn_prefill(const std::vector<llama_token>& tokens,
     // absolute position: with sparse selection the r-th cell holds the r-th
     // selected token, so position != row. Map every gather position to its
     // row up front; rows inherit the ascending order of the positions.
+    //
+    // AR013: gather indices are *original* prompt positions (the attention pool
+    // and the admission speak original coordinates) while `positions` may be
+    // compacted, so the mapping runs over `origins` — the original index of
+    // each active token, which is what the row order follows.
     std::vector<int32_t> index_rows;
     index_rows.reserve(attn_indices.size());
     for (int32_t pos : attn_indices) {
-        auto it = std::lower_bound(positions.begin(), positions.end(), pos);
-        if (it == positions.end() || *it != pos) {
+        auto it = std::lower_bound(origins.begin(), origins.end(),
+                                   static_cast<uint32_t>(pos));
+        if (it == origins.end() || *it != static_cast<uint32_t>(pos)) {
             return Status::error(ErrorCode::InvalidArgument,
                                  "attention index has no selected position");
         }
-        index_rows.push_back(static_cast<int32_t>(it - positions.begin()));
+        index_rows.push_back(static_cast<int32_t>(it - origins.begin()));
     }
 
     // Chunked prefill writes KV cells progressively: when a chunk covering

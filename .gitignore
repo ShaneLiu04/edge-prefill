@@ -28,3 +28,10 @@ benchmarks/results/exp-dump*/
 build-asan/
 build-clean/
 models
+
+# AR013: the 64K NIAH contexts are 1.6 MB of synthetic text that Gitee's WAF
+# rejects on push. They are generated deterministically by
+# `gen_niah.py --cases 4 --words 57000` (pinned seed), which `repro.sh ar013`
+# runs before the matrix; index.tsv and manifest.json (with the per-file
+# SHA256) stay in the repository so the expected content is verifiable.
+benchmarks/data/explen/len64k/contexts/

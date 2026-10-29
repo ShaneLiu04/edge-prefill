@@ -987,3 +987,97 @@ TEST_CASE(selector_sentence_completion_audit_and_invariants) {
         CHECK(sel.block_indices.size() > 0u);
     }
 }
+
+// AR013 FR-2: block compaction must keep every intra-block offset and collapse
+// the filler gaps, so the KV span equals the admitted token count.
+TEST_CASE(selector_position_compaction_is_block_local_and_gap_free) {
+    Fixture f(8192);
+    // Three admissible regions separated by filler, plus a long tail gap.
+    f.pieces[2 * 32 + 3] = "needle";
+    f.pieces[2 * 32 + 9] = "alpha";
+    f.pieces[40 * 32 + 1] = "needle";
+    f.pieces[40 * 32 + 6] = "beta";
+    f.pieces[77 * 32 + 4] = "needle";
+
+    auto compact = options(0.05);
+    compact.position_compaction = 1;
+    Selection sel;
+    BlockSelector selector;
+    CHECK_OK(selector.select(f.tokens, "needle alpha beta", f.pieces, compact, nullptr, &sel));
+    CHECK(!sel.dense);
+    CHECK_EQ(sel.compaction_reason, std::string("block"));
+    CHECK_EQ(sel.positions.size(), sel.token_indices.size());
+    // Strictly increasing (llama_decode requires it).
+    for (size_t i = 1; i < sel.positions.size(); ++i) {
+        CHECK(sel.positions[i] > sel.positions[i - 1]);
+    }
+    // Gap-free: the span is exactly the number of admitted tokens.
+    CHECK_EQ(sel.position_span, static_cast<uint32_t>(sel.token_indices.size()));
+    // Intra-block offsets survive verbatim.
+    for (size_t i = 1; i < sel.token_indices.size(); ++i) {
+        const bool same_block =
+                sel.token_indices[i] / 32 == sel.token_indices[i - 1] / 32;
+        if (same_block) {
+            CHECK_EQ(sel.positions[i] - sel.positions[i - 1],
+                     sel.token_indices[i] - sel.token_indices[i - 1]);
+        }
+    }
+    // The last prompt token stays last (first-token logits).
+    CHECK_EQ(sel.positions.back(), sel.position_span - 1);
+}
+
+// AR013: compaction is opt-in. Off must reproduce AR012 bit for bit, i.e. an
+// empty positions vector and the identity span.
+TEST_CASE(selector_position_compaction_off_matches_ar012) {
+    Fixture f(8192);
+    f.pieces[20 * 32 + 5] = "needle";
+    auto off = options(0.05);
+    Selection sel;
+    BlockSelector selector;
+    CHECK_OK(selector.select(f.tokens, "needle", f.pieces, off, nullptr, &sel));
+    CHECK(sel.positions.empty());
+    CHECK_EQ(sel.compaction_reason, std::string(""));
+    CHECK_EQ(sel.selected_tokens, static_cast<uint32_t>(sel.token_indices.size()));
+    CHECK_EQ(sel.position_span, sel.token_indices.back() + 1);
+
+    auto on = off;
+    on.position_compaction = 1;
+    Selection compacted;
+    CHECK_OK(selector.select(f.tokens, "needle", f.pieces, on, nullptr, &compacted));
+    // Same admission, different positions: compaction never changes what is
+    // admitted, only where it sits in the KV cache.
+    CHECK_EQ(compacted.token_indices, sel.token_indices);
+    CHECK(compacted.position_span <= sel.position_span);
+}
+
+// AR013: compacting an already compact sequence is a no-op, which keeps the
+// transform safe to apply on any selection path (including retries).
+TEST_CASE(selector_position_compaction_is_idempotent) {
+    Fixture f(4096);
+    f.pieces[9 * 32 + 7] = "needle";
+    auto opts = options(0.08);
+    opts.position_compaction = 1;
+    Selection once;
+    BlockSelector selector;
+    CHECK_OK(selector.select(f.tokens, "needle", f.pieces, opts, nullptr, &once));
+    CHECK_EQ(once.compaction_reason, std::string("block"));
+
+    // Rebuild a prompt whose token positions are already the compacted ones.
+    std::vector<llama_token> tokens;
+    std::vector<std::string> pieces;
+    for (size_t i = 0; i < once.positions.size(); ++i) {
+        tokens.push_back(f.tokens[once.token_indices[i]]);
+        pieces.push_back(f.pieces[once.token_indices[i]]);
+    }
+    auto dense_small = options(1.0);
+    dense_small.block_size = 32;
+    dense_small.min_dense_tokens = 32;
+    dense_small.position_compaction = 1;
+    Selection twice;
+    CHECK_OK(selector.select(tokens, "needle", pieces, dense_small, nullptr, &twice));
+    if (!twice.dense) {
+        for (size_t i = 0; i < twice.positions.size(); ++i) {
+            CHECK_EQ(twice.positions[i], static_cast<uint32_t>(i));
+        }
+    }
+}

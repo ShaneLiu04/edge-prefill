@@ -81,6 +81,15 @@ struct Selection {
     // a sentence that crossed a block boundary.
     uint32_t sentences_completed = 0;
     uint32_t sentences_extended = 0;
+    // AR013: positions actually fed to llama_decode, parallel to token_indices.
+    // Empty means identity (token_indices), i.e. AR012 behaviour. With block
+    // compaction the gaps between admitted blocks are collapsed so the KV span
+    // tracks the admitted tokens instead of the document length.
+    std::vector<uint32_t> positions;
+    // AR013 audit: max(positions) + 1 (token_indices.back() + 1 when identity).
+    uint32_t position_span = 0;
+    // AR013 audit: "" (off/identity) | "block" | "prefix-cache" | "fallback".
+    std::string compaction_reason;
     // AR008 FR-2 profile input: top-1 lexical score over the lexical sum.
     // A high value means the evidence is concentrated in one block, which
     // is exactly when selection-level sparsity is safe.
@@ -147,6 +156,10 @@ struct SelectionOptions {
     // AR012: 1 = also drop tokens outside the admitted sentences; 0 = union
     // only (add the missing sentence continuations, remove nothing).
     int sentence_trim = 0;
+    // AR013 FR-2: 0 = identity positions (AR012 behaviour), 1 = collapse the
+    // gaps between admitted blocks (intra-block offsets preserved). The KV span
+    // then depends on the admitted token count, not on the prompt length.
+    int position_compaction = 0;
     SelectorWeights weights;
 };
 

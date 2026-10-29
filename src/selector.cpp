@@ -5,6 +5,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <map>
 #include <numeric>
 #include <set>
@@ -22,7 +23,7 @@ std::string normalize_piece(const std::string& piece) {
     std::string out;
     out.reserve(piece.size());
     for (unsigned char c : piece) {
-        if (c == 0xE2) continue; // UTF-8 leading byte of ‚ñÅ (we handle bytes below)
+        if (c == 0xE2) continue; // UTF-8 leading byte of ‚ñ?(we handle bytes below)
         if (c == 0x96 || c == 0x81) continue;
         if (c == 0xC4 || c == 0xA0) continue; // ƒ†
         if (std::isalnum(c)) {
@@ -118,6 +119,36 @@ std::string reason_for(bool dense, double budget) {
     return "selected";
 }
 
+// AR013 FR-2: collapse the gaps between admitted blocks. Within one block the
+// original offsets are kept verbatim, so the relative distance between any two
+// tokens of the same block (a sentence, a fact, a value) is unchanged; only the
+// dropped filler between blocks stops occupying KV cells. That keeps the RoPE
+// geometry the model was trained on for the evidence itself and is the whole
+// reason the KV span can shrink to the admitted token count.
+std::vector<uint32_t> compact_positions_block(const std::vector<uint32_t>& token_indices,
+                                              uint32_t block_size) {
+    std::vector<uint32_t> positions;
+    positions.reserve(token_indices.size());
+    if (block_size == 0) return positions;
+    uint32_t base = 0;
+    uint32_t current_block = std::numeric_limits<uint32_t>::max();
+    uint32_t block_start = 0;
+    uint32_t block_span = 0;
+    for (uint32_t idx : token_indices) {
+        const uint32_t block = idx / block_size;
+        if (block != current_block) {
+            base += block_span;
+            current_block = block;
+            block_start = block * block_size;
+            block_span = 0;
+        }
+        const uint32_t offset = idx - block_start;
+        positions.push_back(base + offset);
+        block_span = offset + 1;
+    }
+    return positions;
+}
+
 } // namespace
 
 std::string Selection::to_json() const {
@@ -145,6 +176,14 @@ std::string Selection::to_json() const {
     json.key("mandatory_blocks");
     json.begin_array();
     for (auto b : mandatory_blocks) json.value(static_cast<uint64_t>(b));
+    json.end_array();
+    json.key("position_span");
+    json.value(static_cast<uint64_t>(position_span));
+    json.key("compaction_reason");
+    json.value(compaction_reason);
+    json.key("positions");
+    json.begin_array();
+    for (auto p : positions) json.value(static_cast<uint64_t>(p));
     json.end_array();
     json.key("phrase_blocks");
     json.value(static_cast<uint64_t>(phrase_blocks));
@@ -1130,7 +1169,7 @@ Status BlockSelector::select(const std::vector<llama_token>& tokens,
     // needle sentence starts mid-block), so a selected block makes its
     // immediate neighbours more attractive. Without this bias the fill
     // scatters isolated blocks across the prompt and the answer span gets
-    // split away ‚Äî measured as a quality drop when the budget grows.
+    // split away ‚Ä?measured as a quality drop when the budget grows.
     constexpr double kSpanGrowWeight = 0.5;
     std::vector<char> adjacent(n_blocks, 0);
     auto mark_adjacent = [&](uint32_t b) {
@@ -1524,6 +1563,30 @@ Status BlockSelector::select(const std::vector<llama_token>& tokens,
             out->token_indices.end());
     }
     out->selected_tokens = static_cast<uint32_t>(out->token_indices.size());
+    out->positions.clear();
+    out->compaction_reason.clear();
+    out->position_span = out->token_indices.empty()
+                                 ? 0
+                                 : out->token_indices.back() + 1;
+    if (opts.position_compaction != 0 && !out->dense && !out->token_indices.empty()) {
+        std::vector<uint32_t> compacted =
+                compact_positions_block(out->token_indices, block_size);
+        bool strictly_increasing = compacted.size() == out->token_indices.size();
+        for (size_t i = 1; strictly_increasing && i < compacted.size(); ++i) {
+            strictly_increasing = compacted[i] > compacted[i - 1];
+        }
+        if (strictly_increasing) {
+            out->position_span = compacted.back() + 1;
+            out->positions = std::move(compacted);
+            out->compaction_reason = "block";
+        } else {
+            // Never ship a non-monotonic position set: llama_decode requires it
+            // and a silent fallback to identity positions is still correct.
+            out->compaction_reason = "fallback";
+            log_warn("position compaction produced non-increasing positions; "
+                     "falling back to identity positions");
+        }
+    }
     return Status::success();
 }
 

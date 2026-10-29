@@ -75,6 +75,9 @@ struct Config {
     int sentence_completion = 0;
     uint32_t span_max_tokens = 128;
     int sentence_trim = 0;
+    // AR013 FR-2: 0 = identity positions (AR012), 1 = collapse the gaps between
+    // admitted blocks so the KV span tracks the admitted tokens.
+    int position_compaction = 0;
     std::string dump_selection_dir;
     // AR008 FR-2: measured execution-combination table. Empty keeps the
     // configured (or default) path — routing is opt-in, exactly like the
