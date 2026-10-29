@@ -266,6 +266,47 @@ adjacent instead of thousands of filler positions apart, the model can combine
 them. A 64K document becomes runnable on a 32K-training-context model at all
 (1163 positions, 35 MiB, q=1.000).
 
+## Sessions: reuse the KV prefix across turns (AR014)
+
+A conversation over one document re-sends mostly the same tokens every turn. If
+the KV of the prefix is kept, a turn only pays for its own new evidence.
+
+The design makes "reuse does not change the answer" a *testable* invariant: the
+session owns an append-only token `log`, and both arms - reuse and full
+recompute - are fed exactly that log at exactly those positions. The bench
+writes `session_log_hash` per turn (tokens + positions), so equality of inputs
+is a checked fact, not an assumption.
+
+- **`SessionStore`/`SessionState`** (`session.h`, `session.cpp`): `log`,
+  `admitted` (original document indices already inside the log, ascending),
+  `next_pos`, `pending_tail`, `turns`, `resets`, `reset_reason`. A turn whose
+  `context_path` differs from the session's is an error - reusing KV across
+  documents would silently corrupt answers. `SessionStore::reset` keeps the id
+  and bumps a counter (used when a turn fails or must rebuild).
+- **Incremental admission**: the turn's delta is the newly admitted evidence (in
+  document order) plus the question, assembled with the model's chat template.
+  The first turn uses the ordinary `build_prompt`; later turns append
+  `build_chat_turn`, which is what keeps the two arms' logs identical.
+- **`Options.append`** (`sparse_prefill`): skip `reset_sequence()`, decode the
+  delta at the caller's explicit positions, and continue writing. Everything
+  else (chunk scheduler, gather, compaction) is bypassed on this path: the log
+  is dense by construction.
+- **One-shot context sizing**: re-creating a context wipes its KV, so the first
+  turn sizes the conversation (`turns x per-turn delta x 1.5`, capped by
+  `session_ctx_max`, default 4096 cells). A later turn that outgrows the cap
+  rebuilds the log for that turn and records `session_reset_reason`.
+
+Audit columns: `session_id`, `reused_tokens`, `appended_tokens`,
+`session_log_tokens`, `session_log_hash`, `session_reset_reason`.
+
+Measured on `deep/multiturn` (8 sessions x 5 turns): TTFT falls to 0.27x/0.26x/
+0.20x/0.13x of the recompute arm on turns 2..5 (turn 1 has nothing to reuse and
+is 0.91x); the up-front allocation is 112 MiB for the whole conversation. 39 of 40 turns are bit-identical; one flips in the reuse arm's favour
+although its log hash is identical, because a chunked full prefill and an
+incremental decode reach the same K/V through different ggml tilings. The gate
+therefore checks the provable invariant (logs) plus bounded statistics (mean must
+not drop, at most 5% of turns may flip), not bit-identical f1.
+
 ## Edge accounting and the dense invariant
 
 `budget=1.0`, `qg_bound=false`, `query_gating=false`, `attn_top_k=0` and

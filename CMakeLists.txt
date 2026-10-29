@@ -47,6 +47,7 @@ add_library(edge_prefill
         src/semantic_gate.cpp
     src/attention_sparsity.cpp
     src/prefix_cache.cpp
+    src/session.cpp
     src/chunk_scheduler.cpp
     src/ffn_skip.cpp
     src/precision.cpp
@@ -98,6 +99,7 @@ if(EDGE_PREFILL_BUILD_TESTS)
         tests/test_integration.cpp
         tests/test_sparse_attn_exec.cpp
         tests/test_embedding_scorer.cpp
+        tests/test_session.cpp
     )
     target_link_libraries(edge_prefill_tests PRIVATE edge_prefill)
     target_include_directories(edge_prefill_tests PRIVATE ${llama_SOURCE_DIR}/include ${llama_SOURCE_DIR}/ggml/include)

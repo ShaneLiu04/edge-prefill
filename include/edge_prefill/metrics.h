@@ -91,6 +91,18 @@ struct Sample {
     uint64_t rss_mb = 0;
     uint32_t position_span = 0;
     std::string compaction_reason;
+    // AR014 FR-1 audit: which KV session a turn ran on, how many tokens it
+    // reused from earlier turns and how many it actually decoded. A session arm
+    // turn with reused_tokens == 0 is the first turn of that conversation.
+    std::string session_id;
+    uint32_t reused_tokens = 0;
+    uint32_t appended_tokens = 0;
+    std::string session_reset_reason;
+    // AR014 FR-2 audit: length and FNV-1a hash of the conversation log this turn
+    // ended on. Both arms must report the same values; a mismatch means the
+    // assembly (not the KV reuse) diverged.
+    uint32_t session_log_tokens = 0;
+    uint64_t session_log_hash = 0;
     std::string portfolio_choice = "none";
     std::string portfolio_reason;
 };

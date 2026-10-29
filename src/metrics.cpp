@@ -43,7 +43,8 @@ Status Reporter::write_raw_csv(const std::string& path) {
            "portfolio_choice,portfolio_reason,structure_tokens,evidence_tokens,"
            "span_tokens,uncovered_facts,sentences_completed,sentences_extended,"
            "ctx_cells,kv_alloc_bytes,kv_used_bytes,rss_mb,position_span,"
-           "compaction_reason,ttft_min_ms\n";
+           "compaction_reason,ttft_min_ms,session_id,reused_tokens,appended_tokens,"
+           "session_reset_reason,session_log_tokens,session_log_hash\n";
     out << std::setprecision(10);
     for (const auto& s : samples_) {
         out << s.task << ',' << s.case_id << ',' << s.ttft_ms << ',' << s.e2e_ms << ','
@@ -64,8 +65,10 @@ Status Reporter::write_raw_csv(const std::string& path) {
             << s.span_tokens << ',' << s.uncovered_facts << ','
             << s.sentences_completed << ',' << s.sentences_extended << ','
             << s.ctx_cells << ',' << s.kv_alloc_bytes << ',' << s.kv_used_bytes << ','
-            << s.rss_mb << ',' << s.position_span << ',' << s.compaction_reason << ',' << s.ttft_min_ms
-            << '\n';
+            << s.rss_mb << ',' << s.position_span << ',' << s.compaction_reason << ',' << s.ttft_min_ms << ','
+            << s.session_id << ',' << s.reused_tokens << ',' << s.appended_tokens << ','
+            << s.session_reset_reason << ',' << s.session_log_tokens << ','
+            << s.session_log_hash << '\n';
     }
     return Status::success();
 }

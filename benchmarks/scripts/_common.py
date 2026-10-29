@@ -69,9 +69,16 @@ def write_case(root: Path, case_id: str, task: str, context: str, question: str,
 
 def finish(root: Path, rows: list[dict]) -> None:
     root.mkdir(parents=True, exist_ok=True)
-    lines = ["id\ttask\tcontext_path\tquestion\tanswer"]
+    # AR014: a sixth column names the KV session a row belongs to; it is only
+    # emitted when at least one row carries one, so every existing dataset keeps
+    # its exact byte layout.
+    with_session = any("session" in row for row in rows)
+    lines = ["id\ttask\tcontext_path\tquestion\tanswer"
+             + ("\tsession" if with_session else "")]
     for row in rows:
         fields = [row["id"], row["task"], row["context_path"], row["question"], row["answer"]]
+        if with_session:
+            fields.append(row.get("session", ""))
         for field in fields:
             if "\t" in field or "\n" in field:
                 raise ValueError("index fields must be single-line and tab-free")

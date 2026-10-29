@@ -12,6 +12,7 @@
 #   ./repro.sh ar011    # AR011 structure-bounded admission: 7-set matrix + gate
 #   ./repro.sh ar012    # AR012 sentence-complete admission: matrix + facts + gate
 #   ./repro.sh ar013    # AR013 compact context: matrix + KV/latency/capability gate
+#   ./repro.sh ar014    # AR014 session KV reuse: multiturn two arms + gate + injections
 #
 # Every step is fail-fast (set -euo pipefail) and prints the exact command
 # it runs. Models are downloaded with SHA256 verification into ./models
@@ -307,6 +308,26 @@ case "${SUITE}" in
             && fail "gate did not reject the injected lost-capability arm"
         OUT="${ROOT}/benchmarks/results/ar013-compact-context"
         ;;
+    ar014)
+        # AR014: session KV reuse. Regenerates the multi-turn corpus, runs the two
+        # arms (recompute the whole log vs reuse the prefix KV) plus single-turn
+        # spot checks, gates quality equivalence / per-turn latency / audit, and
+        # proves the gate can fail with two injected degradations.
+        python3 benchmarks/scripts/gen_multiturn.py \
+            --out "${ROOT}/benchmarks/data/deep/multiturn"
+        python3 benchmarks/scripts/ar014_matrix.py \
+            --bin "${BIN}" --model "${MAIN_MODEL}" \
+            --datasets deep/multiturn,explen/len4k,deep/multifact8k --force
+        python3 benchmarks/scripts/ar014_report.py --gate \
+            || fail "AR014 regresses on quality equivalence or per-turn latency"
+        python3 benchmarks/scripts/ar014_report.py --gate \
+            --inject deep/multiturn:no-reuse > /dev/null 2>&1 \
+            && fail "gate did not reject the injected no-reuse arm"
+        python3 benchmarks/scripts/ar014_report.py --gate \
+            --inject deep/multiturn:quality-drift > /dev/null 2>&1 \
+            && fail "gate did not reject the injected answer drift"
+        OUT="${ROOT}/benchmarks/results/ar014-session-kv-reuse"
+        ;;
     ar009)
         # AR009 FR-3: regenerate the deterministic multi-fact families, run the
         # coverage ablation (AR008 ranking vs coverage-fair fill) and gate the
@@ -327,7 +348,7 @@ case "${SUITE}" in
         OUT="${ROOT}/benchmarks/results/ar009-multifact"
         ;;
     *)
-        fail "unknown suite: ${SUITE} (smoke|matrix|full|budget|ar007..ar013)"
+        fail "unknown suite: ${SUITE} (smoke|matrix|full|budget|ar007..ar014)"
         ;;
 esac
 

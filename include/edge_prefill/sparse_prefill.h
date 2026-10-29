@@ -18,6 +18,12 @@ public:
         bool enable_prefix_cache = true;
         bool enable_chunking = true;
         bool enable_ffn_skip = true;
+        // AR014: keep the sequence and continue writing at the caller's
+        // positions instead of resetting it. The caller passes only the delta
+        // (new evidence + this turn's question) and positions that follow the
+        // previous turn, so the KV prefix built by earlier turns is reused
+        // verbatim. Off = the AR013 behaviour (every prefill starts at 0).
+        bool append = false;
         uint64_t ffn_skip_mask = 0;
         bool collect_chunk_stats = true;
         // Honor selection.attention_indices with per-chunk gather

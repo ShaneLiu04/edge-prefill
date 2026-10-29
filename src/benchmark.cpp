@@ -23,6 +23,7 @@
 #include "edge_prefill/log.h"
 #include "edge_prefill/planner.h"
 #include "edge_prefill/selector.h"
+#include "edge_prefill/session.h"
 #include "edge_prefill/semantic_gate.h"
 #include "edge_prefill/sparse_prefill.h"
 
@@ -44,6 +45,9 @@ struct Case {
     std::string context_path;
     std::string question;
     std::string answer;
+    // AR014: rows sharing a non-empty session run on one KV sequence, in file
+    // order. An empty value keeps the row independent (AR013 behaviour).
+    std::string session;
 };
 
 std::vector<std::string> split_tsv(const std::string& line) {
@@ -138,6 +142,27 @@ std::string build_prompt(const llama_model* model, bool chat, const std::string&
     return "Context:\n" + context + "\n\nQuestion: " + question + "\nAnswer:";
 }
 
+// AR014: one user turn rendered with the model's chat template, so a session
+// turn is primed exactly like the single-turn benchmark prompt (assistant
+// opener included) instead of ending on a bare "Answer:".
+std::string build_chat_turn(const llama_model* model, const std::string& evidence,
+                            const std::string& question) {
+    const char* tmpl = llama_model_chat_template(model, nullptr);
+    const std::string user = "Context excerpt:\n" + evidence + "\n\nQuestion: " + question +
+                             "\nAnswer with the shortest exact span.";
+    if (!tmpl) return "Context excerpt:\n" + evidence + "\n\nQuestion: " + question + "\nAnswer:";
+    llama_chat_message message;
+    message.role = "user";
+    message.content = user.c_str();
+    std::vector<char> buf(user.size() + 256);
+    const int32_t len = llama_chat_apply_template(tmpl, &message, 1, true, buf.data(),
+                                                  static_cast<int32_t>(buf.size()));
+    if (len > 0 && static_cast<size_t>(len) <= buf.size()) {
+        return std::string(buf.data(), static_cast<size_t>(len));
+    }
+    return "Context excerpt:\n" + evidence + "\n\nQuestion: " + question + "\nAnswer:";
+}
+
 std::string truncate_context(const std::vector<llama_token>& tokens,
                              const std::vector<std::string>& pieces, uint32_t max_tokens) {
     if (tokens.size() <= max_tokens) {
@@ -164,6 +189,38 @@ double log_softmax_at(const std::vector<float>& logits, llama_token token) {
     const int32_t idx = static_cast<int32_t>(token);
     if (idx < 0 || static_cast<size_t>(idx) >= logits.size()) return 0.0;
     return static_cast<double>(logits[static_cast<size_t>(idx)]) - log_z;
+}
+
+// AR014: the session path needs the same admission options as the regular
+// path. Keeping one builder means a future option added to the selector cannot
+// silently apply to only half of the benchmark.
+SelectionOptions selection_options_for(const Config& run_cfg, const Plan& plan) {
+    SelectionOptions sopts;
+    sopts.block_size = run_cfg.block_size;
+    sopts.budget = plan.dense_fallback ? 1.0 : plan.budget;
+    sopts.min_dense_tokens = run_cfg.min_dense_tokens;
+    sopts.sink_blocks = run_cfg.sink_blocks;
+    sopts.recent_blocks = run_cfg.recent_blocks;
+    sopts.coverage_stride = run_cfg.coverage_stride;
+    sopts.anchor_ratio = run_cfg.anchor_ratio;
+    sopts.anchor_stride_scale = run_cfg.anchor_stride_scale;
+    sopts.mmr_threshold = run_cfg.mmr_threshold;
+    sopts.mmr_lambda = run_cfg.mmr_lambda;
+    sopts.phrase_weight = run_cfg.phrase_weight;
+    sopts.coverage_weight = run_cfg.coverage_weight;
+    sopts.prior_gate = run_cfg.prior_gate;
+    sopts.fill_priors = run_cfg.fill_priors;
+    sopts.structure_budget = run_cfg.structure_budget;
+    sopts.anchor_span_radius = run_cfg.anchor_span_radius;
+    sopts.coverage_reserve = run_cfg.coverage_reserve;
+    sopts.span_admission = run_cfg.span_admission;
+    sopts.span_min_tokens = run_cfg.span_min_tokens;
+    sopts.sentence_completion = run_cfg.sentence_completion;
+    sopts.span_max_tokens = run_cfg.span_max_tokens;
+    sopts.sentence_trim = run_cfg.sentence_trim;
+    sopts.position_compaction = run_cfg.position_compaction;
+    sopts.weights = run_cfg.weights;
+    return sopts;
 }
 
 // AR004 FR-5: mean answer log-probability after a prefill. The caller
@@ -219,7 +276,9 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
         const auto fields = split_tsv(line);
         if (fields.size() < 5) continue;
         if (fields[0] == "id" && fields[1] == "task") continue;
-        cases.push_back(Case{fields[0], fields[1], fields[2], fields[3], fields[4]});
+        Case row{fields[0], fields[1], fields[2], fields[3], fields[4], ""};
+        if (fields.size() >= 6) row.session = fields[5];
+        cases.push_back(std::move(row));
     }
     if (cases.empty()) {
         return Status::error(ErrorCode::Io, "dataset index has no cases: " + index_path);
@@ -258,6 +317,8 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
     base.span_max_tokens = cfg.span_max_tokens;
     base.sentence_trim = cfg.sentence_trim;
     base.position_compaction = cfg.position_compaction;
+    base.session_reuse = cfg.session_reuse;
+    base.session_ctx_max = cfg.session_ctx_max;
     base.dump_selection_dir = cfg.dump_selection_dir;
     base.portfolio_table = cfg.portfolio_table;
     if (!base.budget_curve.empty()) {
@@ -334,6 +395,8 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
         PrefixCache::create(base.prefix_cache_bytes, backend.fingerprint().to_key(), &cache);
     }
     SparsePrefiller prefilter(&backend, cache.get());
+    // AR014: one KV sequence per conversation.
+    SessionStore sessions;
 
     // AR005: explicit embedding configuration never degrades — a failed
     // load fails the whole run so the semantic signal is either real or
@@ -371,6 +434,287 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
         for (uint32_t length : cfg.lengths) {
             if (length == 0) length = static_cast<uint32_t>(ctx_tokens.size());
             context = truncate_context(ctx_tokens, ctx_pieces, length);
+            if (!c.session.empty()) {
+                // AR014: a conversation turn. Both arms walk the same log; the
+                // only difference is whether the prefix already in the KV cache
+                // is recomputed (`session_reuse=0`) or reused (`=1`).
+                SessionState* session = nullptr;
+                auto bst = sessions.begin(c.session, c.context_path, &session);
+                if (!bst.ok()) {
+                    if (warnings) warnings->push_back("session-mismatch:" + c.id);
+                    continue;
+                }
+                std::vector<llama_token> doc_tokens;
+                if (!backend.tokenize(context, &doc_tokens, false, false).ok() ||
+                    doc_tokens.empty()) {
+                    if (warnings) warnings->push_back("session-doc-tokenize:" + c.id);
+                    continue;
+                }
+                std::vector<std::string> doc_pieces(doc_tokens.size());
+                for (size_t i = 0; i < doc_tokens.size(); ++i) {
+                    backend.token_to_piece(doc_tokens[i], &doc_pieces[i]);
+                }
+
+                for (Mode mode : cfg.modes) {
+                    for (double budget : cfg.budgets) {
+                        if (mode == Mode::Dense) continue;
+                        if (budget >= 0.95) continue;
+                        Config run_cfg = base;
+                        run_cfg.mode = mode;
+                        if (budget > 0.0) run_cfg.budget = budget;
+                        run_cfg.budget_overridden = budget > 0.0;
+                        PlannerInput pin;
+                        pin.n_tokens = static_cast<uint32_t>(doc_tokens.size());
+                        pin.mode = mode;
+                        pin.arch_supports_ffn_skip = true;
+                        pin.n_layer = backend.n_layer();
+                        pin.n_ubatch = backend.context_options().n_ubatch;
+                        Plan plan;
+                        if (!Planner::make_plan(pin, run_cfg, &plan).ok()) continue;
+
+                        SelectionOptions sopts = selection_options_for(run_cfg, plan);
+                        Selection selection;
+                        BlockSelector selector;
+                        auto sst = selector.select(doc_tokens, c.question, doc_pieces,
+                                                   sopts, nullptr, &selection);
+                        if (!sst.ok()) continue;
+
+                        // delta = this turn's admitted evidence that is not in
+                        // the log yet, in document order.
+                        std::vector<uint32_t> new_admitted;
+                        std::vector<llama_token> delta;
+                        size_t cursor = 0;
+                        for (uint32_t idx : selection.token_indices) {
+                            while (cursor < session->admitted.size() &&
+                                   session->admitted[cursor] < idx) {
+                                ++cursor;
+                            }
+                            if (cursor < session->admitted.size() &&
+                                session->admitted[cursor] == idx) {
+                                continue;
+                            }
+                            new_admitted.push_back(idx);
+                            delta.push_back(doc_tokens[idx]);
+                        }
+                        // A turn is a normal chat turn: the first one carries the
+                        // system prompt and the whole admitted evidence (exactly the
+                        // AR013 prompt), later ones append the previous assistant
+                        // tail plus this turn's new excerpt and question.
+                        std::string evidence_text;
+                        for (uint32_t idx : new_admitted) evidence_text += doc_pieces[idx];
+                        std::string turn_text;
+                        bool add_special = false;
+                        if (session->turns == 0) {
+                            std::string all_evidence;
+                            for (uint32_t idx : selection.token_indices) {
+                                all_evidence += doc_pieces[idx];
+                            }
+                            turn_text = build_prompt(backend.model(), base.use_chat_template,
+                                                     all_evidence, c.question);
+                            add_special = true;
+                        } else {
+                            turn_text = session->pending_tail +
+                                        build_chat_turn(backend.model(), evidence_text,
+                                                        c.question);
+                        }
+                        std::vector<llama_token> turn_tokens;
+                        if (!backend.tokenize(turn_text, &turn_tokens, add_special, true).ok() ||
+                            turn_tokens.empty()) {
+                            if (warnings) warnings->push_back("session-turn-tokenize:" + c.id);
+                            continue;
+                        }
+                        delta.insert(delta.end(), turn_tokens.begin(), turn_tokens.end());
+
+                        const uint32_t reused = static_cast<uint32_t>(session->log.size());
+                        std::vector<llama_token> log_after = session->log;
+                        log_after.insert(log_after.end(), delta.begin(), delta.end());
+
+                        // Re-creating the context wipes the KV cache, so a
+                        // session must not grow mid-conversation. Size it once,
+                        // for the whole conversation, from the admission bound
+                        // (turns x per-turn bound); if that bound is ever
+                        // exceeded the turn rebuilds the log instead of
+                        // decoding a delta into an empty cache.
+                        const uint32_t need = static_cast<uint32_t>(log_after.size()) +
+                                              base.max_new_tokens + 8;
+                        uint32_t wanted = need;
+                        if (session->turns == 0) {
+                            uint32_t session_turns = 0;
+                            for (const auto& other : cases) {
+                                if (other.session == c.session) ++session_turns;
+                            }
+                            // Estimate the whole conversation from this turn's
+                            // delta (its admitted evidence + question) with 50%
+                            // slack. Overshooting wastes KV, undershooting only
+                            // costs one rebuild, so cap it.
+                            const uint32_t per_turn =
+                                    static_cast<uint32_t>(delta.size() * 3 / 2) +
+                                    base.max_new_tokens + 32;
+                            wanted = std::max(wanted, session_turns * per_turn + 256);
+                        }
+                        if (base.session_ctx_max) {
+                            wanted = std::min(wanted, std::max(base.session_ctx_max, need));
+                        }
+                        const uint32_t creations_before = backend.context_creations();
+                        const auto grow = backend.ensure_context(wanted);
+                        if (!grow.ok()) {
+                            if (warnings) warnings->push_back("session-grow:" + c.id);
+                            continue;
+                        }
+                        bool reuse = run_cfg.session_reuse != 0 &&
+                                     session->next_pos > 0 && !delta.empty();
+                        if (reuse && backend.context_creations() != creations_before) {
+                            reuse = false;
+                            log_warn("session " + c.session +
+                                     ": context re-created, rebuilding the log");
+                        }
+
+                        std::vector<llama_token> batch_tokens = reuse ? delta : log_after;
+                        Selection dense;
+                        dense.dense = true;
+                        dense.total_tokens = static_cast<uint32_t>(batch_tokens.size());
+                        dense.token_indices.resize(batch_tokens.size());
+                        std::iota(dense.token_indices.begin(), dense.token_indices.end(), 0u);
+                        if (reuse) {
+                            dense.positions.resize(delta.size());
+                            for (size_t i = 0; i < delta.size(); ++i) {
+                                dense.positions[i] = session->next_pos +
+                                                     static_cast<uint32_t>(i);
+                            }
+                            dense.position_span = session->next_pos +
+                                                  static_cast<uint32_t>(delta.size());
+                        } else {
+                            dense.position_span = static_cast<uint32_t>(log_after.size());
+                        }
+
+                        SparsePrefiller::Options popts;
+                        popts.chunk_size = plan.chunk_size;
+                        popts.enable_prefix_cache = false;
+                        popts.enable_chunking = true;
+                        popts.enable_ffn_skip = false;
+                        popts.enable_attn_sparse = false;
+                        popts.append = reuse;
+
+                        PrefillStats stats;
+                        const auto turn_begin = std::chrono::steady_clock::now();
+                        const auto pst = prefilter.prefill(batch_tokens, dense, popts, &stats);
+                        const auto turn_first = std::chrono::steady_clock::now();
+                        if (!pst.ok()) {
+                            SessionStore::reset(session, pst.message);
+                            if (warnings) warnings->push_back("session-prefill:" + c.id);
+                            continue;
+                        }
+                        const double ttft_ms = std::chrono::duration<double, std::milli>(
+                                turn_first - turn_begin).count();
+
+                        const float* logits = llama_get_logits_ith(backend.context(), -1);
+                        std::string generated;
+                        // AR014: every id we actually decode becomes part of the
+                        // conversation KV, so the log must contain it — otherwise
+                        // the next turn would append at positions that still hold
+                        // the generated tokens and the two arms would silently
+                        // diverge (measured: same log hash, different answers).
+                        std::vector<llama_token> decoded_ids;
+                        if (logits) {
+                            std::vector<float> head(logits, logits + backend.n_vocab());
+                            llama_token next = greedy(head);
+                            for (uint32_t i = 0; i < base.max_new_tokens; ++i) {
+                                std::string piece;
+                                backend.token_to_piece(next, &piece);
+                                generated += piece;
+                                if (next == llama_vocab_eos(backend.vocab())) break;
+                                std::vector<float> step;
+                                if (!backend.decode(
+                                            next,
+                                            static_cast<llama_pos>(stats.kv_pos_max) + 1 +
+                                                    static_cast<llama_pos>(i),
+                                            &step)
+                                             .ok()) {
+                                    break;
+                                }
+                                decoded_ids.push_back(next);
+                                next = greedy(step);
+                            }
+                        }
+                        const auto turn_end = std::chrono::steady_clock::now();
+                        const double e2e_ms = std::chrono::duration<double, std::milli>(
+                                turn_end - turn_begin).count();
+
+                        Sample sample;
+                        sample.task = c.task;
+                        sample.case_id = c.id + "@" + std::to_string(length);
+                        sample.ttft_ms = ttft_ms;
+                        sample.ttft_min_ms = ttft_ms;
+                        sample.e2e_ms = e2e_ms;
+                        sample.prefill_tokens_per_s =
+                                stats.total_us > 0
+                                        ? static_cast<double>(stats.selected_tokens) * 1e6 /
+                                                  stats.total_us
+                                        : 0.0;
+                        sample.kv_bytes = stats.kv_bytes;
+                        sample.quality = f1_score(generated, c.answer);
+                        sample.dense = false;
+                        sample.prompt_tokens = stats.prompt_tokens;
+                        sample.selected_tokens = stats.selected_tokens;
+                        sample.mode = mode_name(mode);
+                        sample.budget = sopts.budget;
+                        sample.attn_top_k = 0;
+                        sample.repeats = 1;
+                        sample.score_source = selection.score_source;
+                        sample.budget_source = plan.budget_source;
+                        sample.anchor_blocks = selection.anchor_blocks;
+                        sample.phrase_blocks = selection.phrase_blocks;
+                        sample.specific_terms = selection.specific_terms;
+                        sample.coverage_queries = selection.coverage_queries;
+                        sample.evidence_blocks = selection.evidence_blocks;
+                        sample.stop_reason = selection.stop_reason;
+                        sample.structure_tokens = selection.structure_tokens;
+                        sample.evidence_tokens = selection.evidence_tokens;
+                        sample.span_tokens = selection.span_tokens;
+                        sample.sentences_completed = selection.sentences_completed;
+                        sample.sentences_extended = selection.sentences_extended;
+                        sample.uncovered_facts = selection.uncovered_facts;
+                        sample.ctx_cells = backend.n_ctx();
+                        sample.kv_alloc_bytes = backend.kv_alloc_bytes();
+                        sample.kv_used_bytes = sample.kv_bytes;
+                        sample.rss_mb = backend.rss_mb();
+                        sample.position_span = dense.position_span;
+                        sample.compaction_reason.clear();
+                        sample.session_id = c.session;
+                        sample.reused_tokens = reuse ? reused : 0;
+                        sample.appended_tokens = static_cast<uint32_t>(batch_tokens.size());
+                        sample.session_reset_reason = session->reset_reason;
+                        uint64_t log_hash = 1469598103934665603ull;
+                        std::vector<llama_token> log_full = session->log;
+                        for (llama_token tok : log_full) {
+                            log_hash ^= static_cast<uint64_t>(static_cast<uint32_t>(tok));
+                            log_hash *= 1099511628211ull;
+                        }
+                        sample.session_log_tokens = session->next_pos;
+                        sample.session_log_hash = log_hash;
+                        log_info("turn=" + sample.case_id + " session=" + c.session +
+                                 " reused=" + std::to_string(sample.reused_tokens) +
+                                 " appended=" + std::to_string(sample.appended_tokens) +
+                                 " quality=" + std::to_string(sample.quality) +
+                                 " generated=" + generated);
+                        out->push_back(sample);
+
+                        // Commit only after the turn succeeded, so a failure
+                        // never leaves a half-written log behind.
+                        log_after.insert(log_after.end(), decoded_ids.begin(),
+                                         decoded_ids.end());
+                        session->log = std::move(log_after);
+                        session->admitted.insert(session->admitted.end(),
+                                                 new_admitted.begin(),
+                                                 new_admitted.end());
+                        std::sort(session->admitted.begin(), session->admitted.end());
+                        session->next_pos = static_cast<uint32_t>(session->log.size());
+                        session->pending_tail = "<|im_end|>\n";
+                        ++session->turns;
+                    }
+                }
+                continue;
+            }
             const std::string prompt = build_prompt(backend.model(), base.use_chat_template,
                                                     context, c.question);
             std::vector<llama_token> tokens;

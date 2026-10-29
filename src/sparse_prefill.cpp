@@ -91,7 +91,7 @@ Status SparsePrefiller::prefill(const std::vector<llama_token>& tokens,
         }
     }
 
-    if (prefix_len == 0) {
+    if (prefix_len == 0 && !opts.append) {
         auto st = backend_->reset_sequence();
         if (!st.ok()) return st;
     }

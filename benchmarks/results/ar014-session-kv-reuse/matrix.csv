@@ -1,0 +1,7 @@
+dataset,arm,turns,q_mean,ttft_median,ttft_min,reused,appended,log_tokens
+deep/multifact8k,restart,16,0.975,2439.4086,2212.5419,0,0,0
+deep/multifact8k,reuse,16,0.975,2403.6844,2225.4265,0,0,0
+deep/multiturn,restart,40,0.6777,7731.2598,7731.2598,0,1579,1153
+deep/multiturn,reuse,40,0.6927,1730.9259,1730.9259,1153,425,1153
+explen/len4k,restart,4,1.0,852.6529,782.2586,0,0,0
+explen/len4k,reuse,4,1.0,839.8378,740.4606,0,0,0

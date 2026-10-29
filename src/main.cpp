@@ -134,6 +134,10 @@ struct Args {
     bool sentence_trim_set = false;
     int position_compaction = -1;
     bool position_compaction_set = false;
+    int session_reuse = -1;
+    bool session_reuse_set = false;
+    double session_ctx_max = 4096.0;
+    bool session_ctx_max_set = false;
     double anchor_ratio = 0.0;
     bool anchor_ratio_set = false;
     double anchor_stride_scale = 0.0;
@@ -178,6 +182,8 @@ void usage() {
         "  --coverage-reserve 0|1  --span-admission 0|1  --span-min-tokens N\n"
         "  --sentence-completion 0|1  --span-max-tokens N  --sentence-trim 0|1\n"
         "  --position-compaction 0|1   (AR013: compact KV positions)\n"
+        "  --session-reuse 0|1        (AR014: reuse the KV prefix across turns)\n"
+        "  --session-ctx-max N        (AR014: cap on the conversation's KV, 0 = none)\n"
         "  --draft-model M   --attn-top-k N  --attn-top-k-layers 4,8,16\n"
         "  --embedding-model P  (bge-small style GGUF; activates semantic gating)\n"
         "  --selector-w-lexical F  --selector-w-diversity F\n"
@@ -648,6 +654,18 @@ Status parse_args(int argc, char** argv, Args* args) {
             if (!st.ok()) return st;
             args->sentence_completion = std::stoi(value);
             args->sentence_completion_set = true;
+        } else if (flag == "--session-reuse") {
+            std::string value;
+            auto st = next(&value);
+            if (!st.ok()) return st;
+            args->session_reuse = std::stoi(value);
+            args->session_reuse_set = true;
+        } else if (flag == "--session-ctx-max") {
+            std::string value;
+            auto st = next(&value);
+            if (!st.ok()) return st;
+            args->session_ctx_max = std::stod(value);
+            args->session_ctx_max_set = true;
         } else if (flag == "--position-compaction") {
             std::string value;
             auto st = next(&value);
@@ -797,6 +815,10 @@ Status apply_common_config(const Args& args, Config* cfg) {
     if (args.sentence_trim_set) cfg->sentence_trim = args.sentence_trim > 0 ? 1 : 0;
     if (args.position_compaction_set) {
         cfg->position_compaction = args.position_compaction > 0 ? 1 : 0;
+    }
+    if (args.session_reuse_set) cfg->session_reuse = args.session_reuse > 0 ? 1 : 0;
+    if (args.session_ctx_max_set) {
+        cfg->session_ctx_max = static_cast<uint32_t>(std::max(0.0, args.session_ctx_max));
     }
     if (args.anchor_ratio_set) cfg->anchor_ratio = args.anchor_ratio;
     if (args.anchor_stride_scale_set) cfg->anchor_stride_scale = args.anchor_stride_scale;
@@ -1403,6 +1425,7 @@ Status plan_command(const Args& args) {
     if (args.position_compaction_set) {
         cfg.position_compaction = args.position_compaction > 0 ? 1 : 0;
     }
+    if (args.session_reuse_set) cfg.session_reuse = args.session_reuse > 0 ? 1 : 0;
     if (args.anchor_ratio_set) cfg.anchor_ratio = args.anchor_ratio;
     if (args.anchor_stride_scale_set) cfg.anchor_stride_scale = args.anchor_stride_scale;
     if (args.mmr_lambda_set) cfg.mmr_lambda = args.mmr_lambda;
@@ -1509,6 +1532,7 @@ Status bench_command(const Args& args) {
     bench.span_max_tokens = cfg.span_max_tokens;
     bench.sentence_trim = cfg.sentence_trim;
     bench.position_compaction = cfg.position_compaction;
+    bench.session_reuse = cfg.session_reuse;
     bench.dump_selection_dir = cfg.dump_selection_dir;
     bench.portfolio_table = cfg.portfolio_table;
     bench.n_gpu_layers = cfg.n_gpu_layers;

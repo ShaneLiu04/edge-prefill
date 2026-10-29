@@ -339,6 +339,18 @@ Status parse_config_file(const std::string& path, Config* out) {
                                      "sentence_completion must be in [0,1]");
             }
             out->sentence_completion = d > 0.5 ? 1 : 0;
+        } else if (key == "session_reuse") {
+            if (!parse_double(value, &d) || !(d >= 0.0 && d <= 1.0)) {
+                return Status::error(ErrorCode::InvalidArgument,
+                                     "session_reuse must be in [0,1]");
+            }
+            out->session_reuse = d > 0.5 ? 1 : 0;
+        } else if (key == "session_ctx_max") {
+            if (!parse_double(value, &d) || d < 0.0 || d > 1048576.0) {
+                return Status::error(ErrorCode::InvalidArgument,
+                                     "session_ctx_max must be in [0, 1048576]");
+            }
+            out->session_ctx_max = static_cast<uint32_t>(d);
         } else if (key == "position_compaction") {
             if (!parse_double(value, &d) || !(d >= 0.0 && d <= 1.0)) {
                 return Status::error(ErrorCode::InvalidArgument,

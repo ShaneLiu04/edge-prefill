@@ -1,6 +1,6 @@
 # AR 全景与最佳组合
 
-这份文档把 AR001–AR012 拆成三类问题：**哪些进了最终组合**、**哪些保留为可选开关**、
+这份文档把 AR001–AR014 拆成三类问题：**哪些进了最终组合**、**哪些保留为可选开关**、
 **哪些被判为负结果并关掉**；最后给出"合到一起"的配置、逐数据集实测和复现命令。
 
 所有数字来自真实 GGUF 推理（Qwen2.5-1.5B-Instruct Q4_K_M，16 线程，Xeon Gold 6234），
@@ -23,6 +23,7 @@
 | AR011 | 结构预算 `structure_budget`（sink/recent 绝对预算）+ 单事实 span 准入 `span_admission` | 4K 226→146 token、8K 228→188、多针 321→247；多事实 hard 0.667→0.709 | `structure_budget=64`、`span_admission=1` 默认 |
 | AR012 | 句子完整准入 `sentence_completion`（证据按整句拉入，跨块闭包） | 多事实 easy 0.836→0.887、hard 0.709→0.739 | 仅多事实启用（默认开） |
 | AR013 | 紧凑上下文：KV 按准入量分配 + 块级位置压缩 `position_compaction` | KV 896 MiB→7 MiB(4K)/21 MiB(32K)；多事实 0.887→0.975、hard 0.739→0.746；64K 文档从不可运行变为可运行 | 默认开（库默认 off） |
+| AR014 | 会话级 KV 复用：append-only 会话 log + 增量解码 `session_reuse` | 多轮第 2–5 轮 TTFT 降到重算臂的 0.27×/0.26×/0.20×/0.13×；40 轮里 39 轮 f1 逐位相同、1 轮浮点翻转（复用臂更优）；单轮数据集逐位不变 | 多轮部署开启（库默认 off） |
 
 注意"默认"指**部署配置**（`ar012` 臂）。库内代码默认值保持保守（`structure_budget=0`、
 `span_admission=0`、`sentence_completion=0`、`fill_priors=1`），必须由 conf 显式打开；
@@ -60,6 +61,8 @@ sentence_completion = 1         # AR012 仅 sub_idf>=2（多事实）生效
 sentence_trim = 0               # 裁剪不路由
 span_max_tokens = 128
 position_compaction = 1         # AR013 块级位置压缩（KV 跨度 = 准入量）
+session_reuse = 1               # AR014 同一会话（index 第 6 列）复用 KV 前缀
+session_ctx_max = 4096          # AR014 会话一次性定容上限（超出则该轮全量重建）
 ```
 
 关掉的：`head_adaptive`/`head_pattern_routing`/`pyramid_prior`（AR003/AR004）、
@@ -100,8 +103,9 @@ position_compaction = 1         # AR013 块级位置压缩（KV 跨度 = 准入�
 | 其余 5 数据集 | — | 逐 token 不变 | 0 |
 | KV 分配（4K / 32K） | 112 / 854 MiB（旧 bench 均 896 MiB） | **7 / 21 MiB** | AR013 位置压缩 |
 | 64K 文档 | 不可运行 | **q=1.000** | AR013 解锁 |
+| 多轮会话第 2–5 轮 TTFT | 每轮全量重算（0.36→0.17× 无从谈起） | **0.27× / 0.26× / 0.20× / 0.13×** | AR014 会话复用（q 0.678→0.693） |
 
-即：**组合在所有已测数据集上没有质量回退**；AR012 用 ~70 token 换完整答案，
+即：**组合在所有已测数据集上没有质量回退**（多轮唯一的 1 例翻转是批次形状的浮点差异，复用臂更优，见 `benchmarks/results/ar014-session-kv-reuse/REPORT.md` §4）；AR012 用 ~70 token 换完整答案，
 AR013 再把这部分 token 的 KV 成本压到 1/11，并把"事实在上下文里却答不全"的残差
 （距离问题）变成质量收益。
 
@@ -113,8 +117,9 @@ cmake --build build -j
 EDGE_PREFILL_TEST_MODEL=/path/qwen2.5-1.5b-instruct-q4_k_m.gguf \
   ctest --test-dir build --output-on-failure      # 167 cases, no mocks
 
+./repro.sh ar014     # 多轮两臂 + 单轮抽查 + 闸门 + 两种注入
+./repro.sh ar013     # 上一条基线：8 数据集紧凑上下文 + KV/能力闸门
 ./repro.sh ar012     # 4 臂矩阵 + 逐 case dump + 闸门 + 注入 + 确定性事实审计
-./repro.sh ar011     # 上一基线（含 dense 参照与加速比）
 ```
 
 干净克隆（`git clone --branch ar012-v1.0`）实测：构建通过、167 用例全通过、
@@ -127,3 +132,5 @@ EDGE_PREFILL_TEST_MODEL=/path/qwen2.5-1.5b-instruct-q4_k_m.gguf \
   残留误差已不在准入层，需转向答案生成侧（提示词/解码）验证。
 - 32K 的 dense 参照需要同会话重测，才能把 192× 变成严格同口径数字。
 - 句子补齐的 +70 token 可尝试"只补答案所在句 + 相邻句首 token"以压低 TTFT。
+- 多轮会话目前是单会话串行：并发会话需要 LRU 淘汰（AR014 的 Out of Scope），
+  且 `session_ctx_max` 一次性定容对"轮次未知"的在线场景要改成按需增长 + 一次重建。

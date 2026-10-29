@@ -89,6 +89,11 @@ struct BenchmarkConfig {
     int sentence_trim = 0;
     // AR013 FR-2: compact KV positions (0 = AR012 identity positions).
     int position_compaction = 0;
+    // AR014 FR-1: reuse the KV prefix of a conversation across turns. Only
+    // datasets whose index carries a `session` column are affected.
+    int session_reuse = 0;
+    // AR014: cap on the up-front session allocation (0 = no cap).
+    uint32_t session_ctx_max = 4096;
     // AR013 FR-1: explicit context size. 0 = grow on demand to the position
     // span the case writes; a value that is too small fails the case instead of
     // silently truncating.

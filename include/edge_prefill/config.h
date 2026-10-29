@@ -78,6 +78,13 @@ struct Config {
     // AR013 FR-2: 0 = identity positions (AR012), 1 = collapse the gaps between
     // admitted blocks so the KV span tracks the admitted tokens.
     int position_compaction = 0;
+    // AR014 FR-1: reuse the KV prefix of a conversation across turns (datasets
+    // whose index carries a `session` column). 0 keeps every row independent.
+    int session_reuse = 0;
+    // Up-front cap on the one-shot session allocation. A conversation is sized
+    // once (re-creating the context mid-conversation wipes the KV), so this
+    // bounds the up-front KV cost; a turn that outgrows it rebuilds the log.
+    uint32_t session_ctx_max = 4096;
     std::string dump_selection_dir;
     // AR008 FR-2: measured execution-combination table. Empty keeps the
     // configured (or default) path — routing is opt-in, exactly like the
