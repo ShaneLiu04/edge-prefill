@@ -35,3 +35,6 @@ models
 # runs before the matrix; index.tsv and manifest.json (with the per-file
 # SHA256) stay in the repository so the expected content is verifiable.
 benchmarks/data/explen/len64k/contexts/
+
+# Local agent instructions (not published)
+AGENTS.md
