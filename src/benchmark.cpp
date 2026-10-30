@@ -1,6 +1,8 @@
 #include "edge_prefill/benchmark.h"
 
 #include "edge_prefill/budget_curve.h"
+#include "edge_prefill/cost_model.h"
+#include "edge_prefill/exec_plan.h"
 #include "edge_prefill/portfolio.h"
 #include "edge_prefill/hash_util.h"
 
@@ -14,6 +16,7 @@
 #include <limits>
 #include <numeric>
 #include <sstream>
+#include <thread>
 #include <unordered_map>
 
 #include "edge_prefill/attention_sparsity.h"
@@ -384,6 +387,20 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
         }
     }
 
+    // AR016: the model fingerprint is a 1 GB SHA256 (seconds of CPU). It used to
+    // be recomputed inside the per-cell portfolio check, which stole CPU from
+    // timed prefills of neighbouring cells and inflated the variance. Compute it
+    // at most once per run.
+    std::string model_sha256;
+    bool model_sha256_ready = false;
+    auto model_hash = [&]() -> const std::string& {
+        if (!model_sha256_ready) {
+            model_sha256 = sha256_of_file(base.model_path);
+            model_sha256_ready = true;
+        }
+        return model_sha256;
+    };
+
     LlamaBackend backend;
     auto st = LlamaBackend::init();
     if (!st.ok()) return st;
@@ -393,21 +410,44 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
         LlamaBackend::shutdown();
         return st;
     }
+    // AR016 FR-1: verify the requested placement instead of assuming it. A
+    // request for GPU layers that offloads nothing is an error unless the
+    // caller explicitly opted into the CPU fallback.
+    PlacementReport placement;
+    placement.requested_layers = cfg.n_gpu_layers;
+    placement.offloaded_layers = backend.placement().offloaded_layers;
+    placement.total_layers = backend.placement().total_layers;
+    placement.gpu_device_present = backend.placement().gpu_device_present;
+    placement.build_supports_gpu = backend.placement().build_supports_gpu;
+    placement.device_name = backend.placement().device_name;
+    st = placement.resolve(cfg.allow_cpu_fallback);
+    if (!st.ok()) {
+        LlamaBackend::shutdown();
+        return st;
+    }
+    if (placement.state == DeviceState::CpuFallback) {
+        log_warn("requested GPU layers but nothing was offloaded; running on CPU (device_state=cpu(fallback))");
+    }
+    const std::string device_state = device_state_name(placement.state);
+    const std::string device_name = backend.placement().device_name;
     ContextOptions ctx_opts;
     // AR013 FR-1: an explicit n_ctx (CLI/conf) is honoured instead of always
     // letting llama.cpp pick the training context. 0 keeps the lazy behaviour:
     // the context starts at the default and grows on demand through
     // LlamaBackend::ensure_context to the span the case actually writes.
     ctx_opts.n_ctx = cfg.n_ctx != 0 ? cfg.n_ctx : kSeedContextCells;
-    ctx_opts.n_ubatch = 512;
-    ctx_opts.n_threads = 0;
-    ctx_opts.n_threads_batch = 0;
+    // AR016 FR-1: the plan's execution knobs are honoured. 0 keeps the old
+    // behaviour (auto threads, 512 ubatch, gather-friendly non-flash graph).
+    ctx_opts.n_ubatch = cfg.n_ubatch != 0 ? cfg.n_ubatch : 512;
+    ctx_opts.n_threads = cfg.n_threads;
+    ctx_opts.n_threads_batch = cfg.n_threads_batch;
+    ctx_opts.n_batch = std::max<uint32_t>(2048, ctx_opts.n_ubatch);
     ctx_opts.type_k = KvPrecision::F16;
     ctx_opts.type_v = KvPrecision::F16;
     // The attention gather paths (scalar top-k and per-head matrix) require
     // the non-flash layout; keep every mode on the same graph family so
     // dense-vs-sparse timings stay internally comparable.
-    ctx_opts.flash_attn = false;
+    ctx_opts.flash_attn = cfg.flash_attn;
     st = backend.create_context(ctx_opts);
     if (!st.ok()) {
         LlamaBackend::shutdown();
@@ -1018,6 +1058,65 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
                                          embed.loaded() ? &embed_adapter : nullptr,
                                          &selection);
                     if (!st.ok()) continue;
+                    // AR016 FR-3: latency-targeted budget. The measured cost
+                    // model maps admitted tokens to TTFT; when the first
+                    // selection overshoots the target, shrink the budget and
+                    // re-select (selection is deterministic pure CPU work, so
+                    // this cannot change the numerics of a given budget).
+                    double sla_predicted_ms = 0.0;
+                    double sla_plan_ms = 0.0;
+                    std::string sla_budget_source;
+                    // Prefill is sublinear, so a fitted intercept may be
+                    // slightly negative; the model is usable as long as it has a
+                    // positive slope and enough samples behind it.
+                    if (cfg.budget_target_ms > 0.0 && !selection.dense &&
+                        cfg.cost_b_ms_per_token > 0.0 && cfg.cost_n >= 5) {
+                        const auto sla_begin = std::chrono::steady_clock::now();
+                        CostModel model;
+                        model.intercept_ms = cfg.cost_a_ms;
+                        model.ms_per_token = cfg.cost_b_ms_per_token;
+                        model.r2 = cfg.cost_r2;
+                        model.n_samples = cfg.cost_n;
+                        model.valid = true;
+                        bool clamped = false;
+                        for (int iter = 0; iter < 8; ++iter) {
+                            const uint32_t admitted =
+                                static_cast<uint32_t>(selection.token_indices.size());
+                            sla_predicted_ms = predict_ttft_ms(model, admitted);
+                            if (sla_predicted_ms <= cfg.budget_target_ms) break;
+                            const uint32_t fit = max_tokens_within(
+                                model, cfg.budget_target_ms, 8u, admitted);
+                            if (fit == 0 || fit >= admitted) break;
+                            const double next =
+                                sopts.budget * static_cast<double>(fit) /
+                                static_cast<double>(admitted);
+                            // Keep shrinking while the conservative prediction
+                            // still overshoots; 0.1% granularity is one
+                            // admission token at these budgets.
+                            if (!(next < sopts.budget * 0.999)) break;
+                            if (sopts.budget <= 0.011) {
+                                clamped = true;
+                                break;
+                            }
+                            sopts.budget = std::max(0.01, next);
+                            Selection retry;
+                            st = selector.select(tokens, c.question, pieces, sopts,
+                                                 embed.loaded() ? &embed_adapter : nullptr,
+                                                 &retry);
+                            if (!st.ok()) break;
+                            selection = std::move(retry);
+                            if (selection.dense) break;
+                        }
+                        // The loop may break on a plateau without re-evaluating
+                        // the last selection; report the prediction of the
+                        // selection we are actually going to run.
+                        sla_predicted_ms = predict_ttft_ms(
+                            model, static_cast<uint32_t>(selection.token_indices.size()));
+                        sla_plan_ms = std::chrono::duration<double, std::milli>(
+                                          std::chrono::steady_clock::now() - sla_begin)
+                                          .count();
+                        sla_budget_source = clamped ? "cost-model-clamped" : "cost-model";
+                    }
                     if (!run_cfg.dump_selection_dir.empty()) {
                         const std::string case_tag = c.id;
                         std::ofstream jout(run_cfg.dump_selection_dir + "/" +
@@ -1071,7 +1170,7 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
                             portfolio_reason = "fallback:table-unusable";
                             log_warn("portfolio table unusable (" + pt.message +
                                      "); keeping selection");
-                        } else if (!table.matches_model(sha256_of_file(base.model_path))) {
+                        } else if (!table.matches_model(model_hash())) {
                             portfolio_reason = "fallback:model-mismatch";
                             log_warn("portfolio table model fingerprint mismatch; keeping selection");
                         } else {
@@ -1634,7 +1733,10 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
                     sample.semantic_score_ms = embed.loaded() ? select_ms : 0.0;
                     sample.draft_score_ms = 0.0;
                     sample.qg_source = qg_source;
-                    sample.budget_source = plan.budget_source;
+                    sample.budget_source =
+                        sla_budget_source.empty() ? plan.budget_source : sla_budget_source;
+                    sample.predicted_ttft_ms = sla_predicted_ms;
+                    sample.plan_select_ms = sla_plan_ms;
                     sample.anchor_blocks = selection.anchor_blocks;
                     sample.phrase_blocks = selection.phrase_blocks;
                     sample.specific_terms = selection.specific_terms;
@@ -1678,6 +1780,30 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
                              " generated=" + generated);
                     out->push_back(sample);
                 }
+            }
+        }
+    }
+
+    // AR016 FR-1: stamp the verified execution plan on every sample. This is
+    // run-level information, so it is applied once at the end instead of being
+    // copied through every construction site.
+    if (out) {
+        for (auto& sample : *out) {
+            sample.device = device_name;
+            sample.gpu_layers_requested = placement.requested_layers;
+            sample.gpu_layers_offloaded = placement.offloaded_layers;
+            sample.gpu_layers_total = placement.total_layers;
+            sample.n_threads = backend.context_options().n_threads;
+            sample.n_threads_batch = backend.context_options().n_threads_batch;
+            sample.n_ubatch = backend.context_options().n_ubatch;
+            sample.plan_source = cfg.plan_source ? cfg.plan_source : "default";
+            sample.device_state = device_state;
+            if (sample.n_threads <= 0) {
+                const unsigned hw = std::thread::hardware_concurrency();
+                sample.n_threads = static_cast<int32_t>(hw > 0 ? hw : 4);
+            }
+            if (sample.n_threads_batch <= 0) {
+                sample.n_threads_batch = sample.n_threads;
             }
         }
     }

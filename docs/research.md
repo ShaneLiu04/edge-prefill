@@ -907,10 +907,20 @@ key = SHA(版本 | 模型指纹 | 准入策略指纹 | KV 精度 | n_ctx | 准�
 
 质量：8 个数据集**逐例 f1 完全相同**（不是"接近"，是同一个 double）。
 
-GPU（RTX 5000 / CUDA 12.0 / 全层卸载）复测两个 cell：4K 3688 → 116 ms（0.031×）、
-多事实 2671 → 95 ms（0.035×），质量同样逐例相同。装载路径是"磁盘 + H2D 拷贝"，
-不随设备算力变化；这也解释了为什么小模型上 GPU 的 cold TTFT 并不比 CPU 快
-（4K 3688 vs 3292 ms），而快照把两端的首 token 拉到同一量级（~100 ms）。
+（**AR016 勘误**）本节最初的"GPU 复测"是**错的**：那批 CSV 用 CLI
+`--n-gpu-layers 99` 跑，而当时的 bench 只认 conf 键，llama.cpp 实际打印
+`offloaded 0/29 layers` —— 数字是真的，但跑在 CPU 上。原始 CSV 保留，勘误见
+`benchmarks/results/ar015-kv-snapshot-gpu/ERRATUM.md`。
+
+修好放置校验后重测（RTX 5000 / CUDA 12.0 / 29-of-29 层）：prefill 斜率
+`b` = 2.60 ms/token（CPU 12 线程 3.46）即 **1.33×**；dense 4K（3962 token）
+CPU 35.0 s vs GPU 24.0 s（1.4×）。GPU 监控显示 `pstate=P8`、`clocks.sm=645 MHz`
+（上限 2100）、`power=31 W`（上限 230），`nvidia-smi -lgc` 在 WSL 下被拒 ——
+本机 GPU 被低 P-state 限制，这是环境事实而非代码缺陷。
+
+真正与设备无关的部分仍然成立：快照**装载**是"磁盘 + H2D 拷贝"，所以 warm TTFT
+（116 ms / 95 ms）换到 GPU 上同样有效；不成立的是"GPU 的 cold TTFT 更快"这一
+暗示。AR016 因此把设备结论改为"由 probe 实测决定"，而不是硬编码。
 
 ### 17.5 与 AR014 组合：重启后续跑
 
@@ -946,3 +956,95 @@ GPU（RTX 5000 / CUDA 12.0 / 全层卸载）复测两个 cell：4K 3688 → 116 
   冷盘（200 MB/s）估计 100–200 ms，仍是 20×+ 收益，但报告里要写清楚口径；
 - 快照不跨 KV 精度/上下文格数/llama.cpp 版本共享（key 已隔离）；
 - 多轮场景每轮一个快照，磁盘占用随轮数线性增长，靠 `snapshot_max_bytes` 的 LRU 兜底。
+
+## 18. AR016：执行计划与延迟预算规划（把"跑多快"变成可验证、可求解的对象）
+
+### 18.1 问题的发现顺序
+
+AR016 不是从"再做一个优化"开始的，而是从"怀疑前面的数字"开始的。AR015 交付后要往
+"设备上做组合"走，第一步自然是问：GPU 到底比 CPU 快多少？于是把
+`--n-gpu-layers 99` 传给 bench，看 llama.cpp 的加载日志：
+
+```
+load_tensors: offloaded 0/29 layers to GPU
+```
+
+即：**AR015 入库的 "GPU" 结果是 CPU 结果**。根因不是 llama.cpp，而是
+`bench` 路径只读 conf 里的 `n_gpu_layers`，CLI 值从未进入 `BenchmarkConfig`；
+同时没有任何地方核对"请求的卸载"与"实际卸载"。
+
+顺着这条线继续查，同一类问题还有三处：
+
+| 问题 | 证据 | 后果 |
+|---|---|---|
+| `--threads` 在 bench 不生效 | `BenchmarkConfig` 无该字段，`benchmark.cpp` 硬写 0 → `hardware_concurrency()` | 所有 bench 数字都是 16 线程（本机最优 12），TTFT 虚高 37% |
+| 模型 SHA256 在每 cell 的 portfolio 检查里现算 | 1 GB 文件、秒级 CPU，落在计时循环内 | 与相邻 cell 的 prefill 争 CPU，制造 1.5–3× 抖动 |
+| 所有入库 conf 的 `warmup = 0` | conf | 首次调用（图 reserve、页入）计入 TTFT |
+
+当测量本身不可靠时，任何"优化"都无法验证。所以 AR016 的第一价值不是加速，
+而是**让结论可证伪**。
+
+### 18.2 执行计划（ExecPlan）
+
+把 `(n_gpu_layers, threads, threads_batch, ubatch, n_batch, flash_attn)` 变成一等对象，
+每个字段带"是否显式设置"标志，合并规则 `CLI > conf > probe > default` **逐字段**生效
+（整体覆盖会让 CLI 的一个线程数把 conf 的 GPU 层数清掉——正是最初的 bug 形态）。
+
+装载后用两种独立证据核对放置：
+
+1. `llama_supports_gpu_offload()` + `ggml_backend_dev_*` 枚举（构建/设备可用性、设备名）；
+2. 用 `llama_log_set` 捕获 llama.cpp 自己打印的 `offloaded N/M layers`。
+
+判定：请求 `>0` 层而观察到 0 层 → `ErrorCode::Unavailable`（除非
+`allow_cpu_fallback=1`，此时审计列写 `cpu(fallback)` 并告警）。日志缺失则记
+`unverified`，**不假装成功**。这一条把"假 GPU 结果"从可能变成不可能。
+
+### 18.3 成本模型与延迟预算
+
+`probe` 用真实 GGUF 在真实文档前缀上测 64/128/256/512/1024 token 的 prefill（各 3 次取最小），
+最小二乘拟合 `TTFT = a + b·tokens`，要求 `n≥5`、`b>0`、`r2≥0.90`，并且**采样点上的预测为正**
+（prefill 是次线性，截距可以为负，实测 CPU `a=-3.12 ms`、`b=3.460 ms/token`、`r2=0.9994`）。
+
+规划时给定 `budget_target_ms`，不近似选择过程本身：直接**重跑真实 selector**
+（纯 CPU、确定性、毫秒级），用 `predict = (a + b·n)·1.15` 判断是否超标，超标就按
+`target/pred` 收缩预算再选，最多 8 轮，记录 `predicted_ttft_ms`、`plan_select_ms`、
+`budget_source=cost-model`。这样"预算"与"延迟"第一次被显式联系起来，
+而不是一张手工调出来的长度→预算表。
+
+### 18.4 实测（本机，全部同会话；详见 `benchmarks/results/ar016-exec-plan/REPORT.md`）
+
+| 数据集 | 旧行为(16 线程) | probe 计划(12 线程) | +SLA 2500 ms | 质量 |
+|---|---:|---:|---:|---|
+| 4K | 12588 ms | 2578 ms | **2125 ms** | 1.000 |
+| 8K | 9054 ms | 4512 ms | **2210 ms** | 1.000 |
+| 16K | 9779 ms | 4498 ms | **2241 ms** | 1.000 |
+| 32K | 10085 ms | 4758 ms | **2248 ms** | 1.000 |
+| 多针 | 9476 ms | 4692 ms | **2195 ms** | 1.000 |
+| 多事实 | 2876 ms | 1877 ms | 1871 ms（未触发收缩） | 0.975 |
+| 多事实 hard | 2571 ms | 1806 ms | 1805 ms | 0.746 |
+| 64K | 6465 ms | 4339 ms | **2226 ms** | 1.000 |
+
+58 个用例 × 3 臂：f1 **逐例相同**。中位 `base16/plan = 2.01×`、`plan/sla = 1.98×`。
+
+GPU（同一台 RTX 5000，29/29 层，P8 645 MHz）：线程在 GPU 上不起作用
+（`base16/plan = 0.99×`，闸门显式记为 n/a），但**成本模型的斜率更低**
+（2.614 vs 3.460 ms/token），因此在同样的 2500 ms 目标下，
+GPU 能负担 **797–803 个准入 token，而 CPU 只有 610–622**（+29–31%）。
+这是"用设备速度换证据"的干净证据——即便这台机器的 GPU 被低 P-state 限制。
+
+### 18.5 失败与取舍
+
+| 尝试 | 观测 | 结论 |
+|---|---|---|
+| 跨问题共享"查询无关头部"的 KV 池 | 结构块仅占准入 token 的 8–10%（47–55 / 146–1163） | 收益 <15%，不做；记为负结果 |
+| 用本机 GPU 拿大倍率 | P8/645 MHz、`nvidia-smi -lgc` 在 WSL 被拒；b 仅快 1.33× | 如实记录；plan 由 probe 生成，换高频 GPU 自动受益 |
+| 让 SLA 放宽预算以提质量 | 多事实加预算已证明无收益（§14.1） | SLA 只允许"同质量下压延迟"：`sla-no-grow` 闸门 |
+| 用 `ttft_ms`（中位）做闸门统计 | 主机秒级停顿 → 单点可差 2.4× | 一律用 `ttft_min`，并保留跨轮区间 |
+
+### 18.6 局限
+
+- 成本模型是**仿射**的：token 数跨度太大（几十 → 上万）时需要分段拟合，
+  当前只在 64–1024 采样，超出范围靠保守系数兜底；
+- SLA 求解依赖 selector 的确定性（当前成立：纯 CPU、无随机）；
+- 线程最优值依赖主机拓扑（本机 12），所以 plan 必须由 probe 产出而不是硬编码；
+- 放置校验依赖 llama.cpp 的日志行（该版本无公开 getter），日志缺失时只能记 `unverified`。

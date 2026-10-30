@@ -91,7 +91,19 @@ struct Config {
     // only write snapshots (cold arm).
     int snapshot_use = 1;
     uint64_t snapshot_max_bytes = 512ull * 1024 * 1024;
-    std::string dump_selection_dir;
+    // AR016 FR-3: latency target for the token budget (0 = disabled). When set,
+    // the runner solves for the largest budget whose predicted TTFT fits.
+    double budget_target_ms = 0.0;
+    // AR016 FR-2: fitted prefill cost model (TTFT = a + b * tokens). A negative
+    // value means "not fitted"; the SLA path requires a valid model.
+    double cost_a_ms = -1.0;
+    double cost_b_ms_per_token = -1.0;
+    double cost_r2 = 0.0;
+    uint32_t cost_n = 0;
+    // AR016 FR-1: permit a silent-looking downgrade from a requested GPU
+    // placement. Off by default: requesting GPU layers and getting zero is an
+    // error, because that is how the AR015 GPU record was mislabelled.
+    int allow_cpu_fallback = 0;    std::string dump_selection_dir;
     // AR008 FR-2: measured execution-combination table. Empty keeps the
     // configured (or default) path — routing is opt-in, exactly like the
     // budget curve.

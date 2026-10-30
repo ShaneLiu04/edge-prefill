@@ -347,6 +347,32 @@ case "${SUITE}" in
             && fail "gate did not reject the injected answer drift"
         OUT="${ROOT}/benchmarks/results/ar015-kv-snapshot"
         ;;
+    ar016)
+        # AR016: execution plan + latency-targeted budget. The cost model comes
+        # from a separate `probe` run (never from the data being optimised), the
+        # matrix compares the hardware-default plan with the probed one and with
+        # the SLA planner, and the gate checks placement/threads/quality/speedup.
+        rm -rf "${ROOT}/benchmarks/results/ar016-exec-plan/probe-plan"
+        "${BIN}" probe --model "${MAIN_MODEL}" \
+            --prompt-file "${ROOT}/benchmarks/data/explen/len4k/contexts/niah-01.txt" \
+            --threads 12 --out "${ROOT}/benchmarks/results/ar016-exec-plan/probe-plan" \
+            || fail "AR016 probe could not fit the prefill cost model"
+        python3 benchmarks/scripts/ar016_matrix.py \
+            --bin "${BIN}" --model "${MAIN_MODEL}" \
+            --plan-dir benchmarks/results/ar016-exec-plan/probe-plan \
+            --base-threads 16 --sla-target-ms 2500 --repeats 2 --warmup 1 \
+            --datasets explen/len4k,explen/len8k,deep/multifact8k,deep/multifact8k-hard \
+            --force --out benchmarks/results/ar016-exec-plan \
+            || fail "AR016 matrix failed"
+        python3 benchmarks/scripts/ar016_report.py \
+            benchmarks/results/ar016-exec-plan --gate --sla-target-ms 2500 \
+            || fail "AR016 plan is not honoured or is not faster"
+        python3 benchmarks/scripts/ar016_report.py \
+            benchmarks/results/ar016-exec-plan --gate --inject cost-skew \
+            --sla-target-ms 2500 > /dev/null 2>&1 \
+            && fail "gate did not reject the injected cost-model skew"
+        OUT="${ROOT}/benchmarks/results/ar016-exec-plan"
+        ;;
     ar009)
         # AR009 FR-3: regenerate the deterministic multi-fact families, run the
         # coverage ablation (AR008 ranking vs coverage-fair fill) and gate the
@@ -367,7 +393,7 @@ case "${SUITE}" in
         OUT="${ROOT}/benchmarks/results/ar009-multifact"
         ;;
     *)
-        fail "unknown suite: ${SUITE} (smoke|matrix|full|budget|ar007..ar015)"
+        fail "unknown suite: ${SUITE} (smoke|matrix|full|budget|ar007..ar016)"
         ;;
 esac
 

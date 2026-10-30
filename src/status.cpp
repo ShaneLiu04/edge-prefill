@@ -16,6 +16,7 @@ const char* error_code_name(ErrorCode code) {
         case ErrorCode::OutOfMemory: return "OutOfMemory";
         case ErrorCode::Io: return "Io";
         case ErrorCode::Internal: return "Internal";
+        case ErrorCode::Unavailable: return "Unavailable";
     }
     return "Unknown";
 }

@@ -46,7 +46,10 @@ Status Reporter::write_raw_csv(const std::string& path) {
            "compaction_reason,ttft_min_ms,session_id,reused_tokens,appended_tokens,"
            "session_reset_reason,session_log_tokens,session_log_hash,"
            "snapshot_hit,snapshot_bytes,snapshot_load_ms,snapshot_save_ms,"
-           "snapshot_state,snapshot_key\n";
+           "snapshot_state,snapshot_key,"
+           "device,gpu_layers_requested,gpu_layers_offloaded,gpu_layers_total,"
+           "n_threads,n_threads_batch,n_ubatch,plan_source,device_state,"
+           "predicted_ttft_ms,plan_select_ms\n";
     out << std::setprecision(10);
     for (const auto& s : samples_) {
         out << s.task << ',' << s.case_id << ',' << s.ttft_ms << ',' << s.e2e_ms << ','
@@ -72,7 +75,12 @@ Status Reporter::write_raw_csv(const std::string& path) {
             << s.session_reset_reason << ',' << s.session_log_tokens << ','
             << s.session_log_hash << ',' << s.snapshot_hit << ',' << s.snapshot_bytes << ','
             << s.snapshot_load_ms << ',' << s.snapshot_save_ms << ',' << s.snapshot_state
-            << ',' << s.snapshot_key << '\n';
+            << ',' << s.snapshot_key << ','
+            << (s.device.empty() ? "cpu" : s.device) << ','
+            << s.gpu_layers_requested << ',' << s.gpu_layers_offloaded << ','
+            << s.gpu_layers_total << ',' << s.n_threads << ',' << s.n_threads_batch << ','
+            << s.n_ubatch << ',' << s.plan_source << ',' << s.device_state << ','
+            << s.predicted_ttft_ms << ',' << s.plan_select_ms << '\n';
     }
     return Status::success();
 }

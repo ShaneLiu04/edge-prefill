@@ -65,6 +65,12 @@ AR014 的复用只在进程内。端侧进程被回收是常态（重问、冷�
 - `resume` 模拟"进程每轮都死一次"的最坏情形，仍然只付装载成本；
 - 单轮与多轮的差别正好来自快照体积：单轮 15–34 MB（93–203 ms），多轮每轮 ~47 MB（~300 ms）。
 
+> **AR016 勘误**：本节数字是在 CPU 上测的。当时 bench 只认 conf 里的
+> `n_gpu_layers`，CLI 的 `--n-gpu-layers 99` 被丢弃，llama.cpp 实际打印
+> `offloaded 0/29`。原始 CSV 保留为证据，完整说明见
+> `benchmarks/results/ar015-kv-snapshot-gpu/ERRATUM.md`；真实 GPU 数据见
+> `benchmarks/results/ar016-exec-plan/`。
+
 ## 4.5 GPU（RTX 5000 16 GB，CUDA 12.0，全层卸载）
 
 `build-cuda/edge-prefill`，同两个数据集，`--gpu-layers 99`：

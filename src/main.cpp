@@ -5,6 +5,7 @@
 #include <cstring>
 #include <fstream>
 #include <iostream>
+#include <filesystem>
 #include <iterator>
 #include <sstream>
 #include <string>
@@ -18,6 +19,8 @@
 #include "edge_prefill/benchmark.h"
 #include "edge_prefill/hash_util.h"
 #include "edge_prefill/config.h"
+#include "edge_prefill/cost_model.h"
+#include "edge_prefill/exec_plan.h"
 #include "edge_prefill/draft_scorer.h"
 #include "edge_prefill/embedding_scorer.h"
 #include "edge_prefill/ffn_skip.h"
@@ -62,6 +65,9 @@ struct Args {
     uint32_t n_ubatch = 512;
     int32_t threads = 0;
     int32_t n_gpu_layers = 0;
+    // AR016: distinguishes "not given" from an explicit 0 so the CLI can
+    // override a conf value in the bench path.
+    bool n_gpu_layers_set = false;
     // -1 means "not given on the command line": the config file's repeats
     // (or the 5x default) wins. A 0/5 default here used to silently
     // override every conf file and quintuple matrix runtimes.
@@ -173,6 +179,7 @@ void usage() {
         "  edge-prefill bench  --config C [--model M] [--out DIR]\n"
         "  edge-prefill eval   --config C [--model M] [--out DIR]\n"
         "  edge-prefill classify-heads --model M --output profile.json [options]\n"
+        "  edge-prefill probe  --model M [--data-dir D] [--threads N] [--out DIR]\n"
         "  edge-prefill inspect --model M [--json]\n\n"
         "Common options:\n"
         "  --mode latency|balanced|quality|reuse|dense\n"
@@ -582,6 +589,7 @@ Status parse_args(int argc, char** argv, Args* args) {
             auto st = next(&value);
             if (!st.ok()) return st;
             args->n_gpu_layers = static_cast<int32_t>(std::stol(value));
+            args->n_gpu_layers_set = true;
         } else if (flag == "--repeats") {
             std::string value;
             auto st = next(&value);
@@ -1463,6 +1471,180 @@ Status plan_command(const Args& args) {
     return Status::success();
 }
 
+
+// AR016 FR-2: measure the prefill cost model on the real model. The samples are
+// dense prefills of real document prefixes (64/128/256/512/1024 tokens), each
+// repeated three times with the minimum kept, because the host is noisy. The
+// output is an overlay config (`plan.conf`) that the existing config reader can
+// consume, plus the raw samples for audit.
+Status probe_command(const Args& args) {
+    const std::string model = args.model;
+    if (model.empty()) {
+        return Status::error(ErrorCode::InvalidArgument, "probe needs --model");
+    }
+    std::string context_path = args.prompt_file;
+    if (context_path.empty() && !args.data_dir.empty()) {
+        const std::string index = args.data_dir + "/index.tsv";
+        std::ifstream in(index);
+        if (!in) {
+            return Status::error(ErrorCode::Io, "cannot read " + index);
+        }
+        std::string line;
+        std::getline(in, line); // header
+        while (std::getline(in, line)) {
+            if (line.empty()) continue;
+            std::vector<std::string> cols;
+            std::string cur;
+            std::istringstream ss(line);
+            while (std::getline(ss, cur, '\t')) cols.push_back(cur);
+            if (cols.size() >= 3 && !cols[2].empty()) {
+                context_path = args.data_dir + "/" + cols[2];
+                break;
+            }
+        }
+    }
+    if (context_path.empty()) {
+        return Status::error(ErrorCode::InvalidArgument,
+                             "probe needs --prompt-file or --data-dir with an index.tsv");
+    }
+    std::ifstream ctx_in(context_path);
+    if (!ctx_in) return Status::error(ErrorCode::Io, "cannot read " + context_path);
+    std::stringstream buf;
+    buf << ctx_in.rdbuf();
+    const std::string text = buf.str();
+
+    auto st = LlamaBackend::init();
+    if (!st.ok()) return st;
+    LlamaBackend backend;
+    backend.set_n_gpu_layers(args.n_gpu_layers_set ? args.n_gpu_layers : 0);
+    st = backend.load_model(model);
+    if (!st.ok()) {
+        LlamaBackend::shutdown();
+        return st;
+    }
+    PlacementReport placement;
+    placement.requested_layers = backend.placement().requested_layers;
+    placement.offloaded_layers = backend.placement().offloaded_layers;
+    placement.total_layers = backend.placement().total_layers;
+    placement.gpu_device_present = backend.placement().gpu_device_present;
+    placement.build_supports_gpu = backend.placement().build_supports_gpu;
+    placement.device_name = backend.placement().device_name;
+    st = placement.resolve(false);
+    if (!st.ok()) {
+        LlamaBackend::shutdown();
+        return st;
+    }
+
+    std::vector<llama_token> tokens;
+    st = backend.tokenize(text, &tokens, true);
+    if (!st.ok()) {
+        LlamaBackend::shutdown();
+        return st;
+    }
+    if (tokens.empty()) {
+        LlamaBackend::shutdown();
+        return Status::error(ErrorCode::Tokenize, "empty tokenization");
+    }
+
+    ContextOptions opts;
+    opts.n_threads = args.threads;
+    opts.n_threads_batch = args.threads;
+    opts.n_ubatch = args.n_ubatch != 512 ? args.n_ubatch : 512;
+    opts.n_batch = std::max<uint32_t>(2048, opts.n_ubatch);
+    opts.n_ctx = std::min<uint32_t>(static_cast<uint32_t>(backend.n_ctx_train()),
+                                    std::max<uint32_t>(2048, static_cast<uint32_t>(tokens.size()) + 64));
+    st = backend.create_context(opts);
+    if (!st.ok()) {
+        LlamaBackend::shutdown();
+        return st;
+    }
+
+    const uint32_t lengths[] = {64, 128, 256, 512, 1024};
+    std::vector<CostSample> samples;
+    std::string csv = "tokens,ttft_ms,repeats,min_ms\n";
+    for (uint32_t want : lengths) {
+        if (want > tokens.size()) continue;
+        std::vector<llama_token> prefix(tokens.begin(), tokens.begin() + want);
+        std::vector<llama_pos> positions(want);
+        for (uint32_t i = 0; i < want; ++i) positions[i] = static_cast<llama_pos>(i);
+        // warmup (graph reserve, page-in) is untimed
+        st = backend.reset_sequence();
+        if (!st.ok()) break;
+        PrefillStats warm;
+        st = backend.prefill(prefix, positions, 0, &warm);
+        if (!st.ok()) break;
+        double best = 1e30;
+        for (int rep = 0; rep < 3; ++rep) {
+            st = backend.reset_sequence();
+            if (!st.ok()) break;
+            PrefillStats stats;
+            const auto t0 = std::chrono::steady_clock::now();
+            st = backend.prefill(prefix, positions, 0, &stats);
+            const auto t1 = std::chrono::steady_clock::now();
+            if (!st.ok()) break;
+            const double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+            if (ms < best) best = ms;
+        }
+        if (!st.ok()) break;
+        samples.push_back(CostSample{want, best});
+        csv += std::to_string(want) + "," + std::to_string(best) + ",3," +
+               std::to_string(best) + "\n";
+    }
+    if (samples.size() < 5) {
+        LlamaBackend::shutdown();
+        return Status::error(ErrorCode::Internal,
+                             "probe needs at least 5 sample lengths (context too short)");
+    }
+    CostModel model_fit;
+    st = fit_cost_model(samples, &model_fit);
+    if (!st.ok()) {
+        LlamaBackend::shutdown();
+        return st;
+    }
+
+    const std::string out_dir = args.out_dir.empty() ? std::string(".") : args.out_dir;
+    std::error_code ec;
+    std::filesystem::create_directories(out_dir, ec);
+    {
+        std::ofstream conf(out_dir + "/plan.conf");
+        if (!conf) {
+            LlamaBackend::shutdown();
+            return Status::error(ErrorCode::Io, "cannot write " + out_dir + "/plan.conf");
+        }
+        if (args.threads > 0) conf << "threads = " << args.threads << '\n';
+        if (args.n_ubatch != 512) conf << "n_ubatch = " << args.n_ubatch << '\n';
+        conf << "n_gpu_layers = " << placement.requested_layers << '\n';
+        conf << "cost_a_ms = " << model_fit.intercept_ms << '\n';
+        conf << "cost_b_ms_per_token = " << model_fit.ms_per_token << '\n';
+        conf << "cost_r2 = " << model_fit.r2 << '\n';
+        conf << "cost_n = " << model_fit.n_samples << '\n';
+    }
+    {
+        std::ofstream out(out_dir + "/probe_samples.csv");
+        if (out) out << csv;
+    }
+    {
+        std::ofstream meta(out_dir + "/probe_device.txt");
+        if (meta) {
+            meta << "device=" << placement.device_name << '\n'
+                 << "device_state=" << device_state_name(placement.state) << '\n'
+                 << "requested_layers=" << placement.requested_layers << '\n'
+                 << "offloaded_layers=" << placement.offloaded_layers << '\n'
+                 << "total_layers=" << placement.total_layers << '\n'
+                 << "threads=" << (args.threads > 0 ? args.threads : 0) << '\n'
+                 << "n_ubatch=" << (args.n_ubatch != 512 ? args.n_ubatch : 512) << '\n'
+                 << "model=" << model << '\n'
+                 << "context=" << context_path << '\n';
+        }
+    }
+    std::cout << "probe: a=" << model_fit.intercept_ms
+              << " ms b=" << model_fit.ms_per_token << " ms/token r2=" << model_fit.r2
+              << " n=" << model_fit.n_samples
+              << " device=" << placement.device_name << '\n';
+    LlamaBackend::shutdown();
+    return Status::success();
+}
+
 Status bench_command(const Args& args) {
     if (args.config.empty() && args.model.empty()) {
         return Status::error(ErrorCode::InvalidArgument, "missing --config or --model");
@@ -1527,6 +1709,21 @@ Status bench_command(const Args& args) {
     bench.qg_pool_pages = cfg.qg_pool_pages;
     bench.embedding_model = cfg.embedding_model;
     bench.embed_threads = cfg.n_threads;
+    // AR016 FR-1: the bench path used to drop --threads / --n-gpu-layers
+    // entirely (only the run path read them), which silently measured
+    // hardware_concurrency() threads and 0 GPU layers. CLI wins over conf.
+    bench.n_threads = args.threads != 0 ? args.threads : cfg.n_threads;
+    bench.n_threads_batch = cfg.n_threads_batch;
+    bench.n_ubatch = args.n_ubatch != 512 ? args.n_ubatch : cfg.n_ubatch;
+    bench.n_gpu_layers =
+        args.n_gpu_layers_set ? args.n_gpu_layers : cfg.n_gpu_layers;
+    bench.allow_cpu_fallback = cfg.allow_cpu_fallback != 0;
+    bench.plan_source = args.n_gpu_layers_set || args.threads != 0 ? "cli" : "conf";
+    bench.budget_target_ms = cfg.budget_target_ms;
+    bench.cost_a_ms = cfg.cost_a_ms;
+    bench.cost_b_ms_per_token = cfg.cost_b_ms_per_token;
+    bench.cost_r2 = cfg.cost_r2;
+    bench.cost_n = cfg.cost_n;
     bench.weights = cfg.weights;
     bench.weights_overridden = cfg.weights_overridden;
     bench.sink_blocks = cfg.sink_blocks;
@@ -1700,6 +1897,7 @@ int main(int argc, char** argv) {
     if (args.command == "run") st = run_command(args);
     else if (args.command == "plan") st = plan_command(args);
     else if (args.command == "bench" || args.command == "eval") st = bench_command(args);
+    else if (args.command == "probe") st = probe_command(args);
     else if (args.command == "classify-heads") st = classify_heads_command(args);
     else if (args.command == "inspect") st = inspect_command(args);
     else if (args.command == "help" || args.command == "--help") {

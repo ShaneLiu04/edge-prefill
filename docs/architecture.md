@@ -345,6 +345,38 @@ clears every other sparse path in the context so exactly one mechanism owns
 the attention graph; disabling it restores the dense graph, verified by
 `bound_gating_execution_and_restore`.
 
+## Execution plan and latency budget (AR016)
+
+Nothing above is observable unless the run executes where it says it does.
+AR016 makes the execution path an object instead of an implicit default:
+
+```
+conf/CLI -> ExecPlan { n_gpu_layers, threads, threads_batch,
+                       ubatch, n_batch, flash_attn }   // per-field provenance
+            |
+            v
+      LlamaBackend::load_model()
+            |  ggml_backend_dev_*  -> device name / availability
+            |  llama_log_set        -> "offloaded N/M layers to GPU"
+            v
+      PlacementReport.resolve(allow_cpu_fallback)
+            |  0 <-- requested > 0  -> ErrorCode::Unavailable
+            v
+      audit columns: device, device_state, gpu_layers_{requested,offloaded,total},
+                     n_threads, n_threads_batch, n_ubatch, plan_source
+```
+
+`probe` fits `TTFT = a + b * tokens` on real prefills of real document prefixes
+(r2 and sample-count gates; a bad fit refuses to plan) and writes an overlay
+config. With `budget_target_ms > 0`, the runner re-runs the *real* selector
+(never a proxy) and shrinks the budget until `(a + b*n) * 1.15` fits the target,
+recording `predicted_ttft_ms`, `plan_select_ms` and `budget_source=cost-model`.
+
+The point is not only speed (12 vs 16 threads is 37% here): it is that a stale,
+misconfigured or silently-downgraded placement can no longer produce a
+plausible-looking number. `docs/research.md` §18 has the measurements and the
+AR015 erratum that motivated this.
+
 ## Chunked prefill
 
 `ChunkScheduler` splits a long prompt into physical ubatches.

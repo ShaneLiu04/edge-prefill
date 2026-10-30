@@ -175,6 +175,19 @@ public:
     // Context creations performed so far (audit: growth should be rare).
     uint32_t context_creations() const { return context_creations_; }
 
+    // AR016 FR-1: what llama.cpp actually did with the model, so a requested
+    // GPU placement can be verified instead of assumed.
+    struct Placement {
+        int32_t requested_layers = 0;
+        // -1 when llama.cpp did not report; 0 when nothing was offloaded.
+        int32_t offloaded_layers = -1;
+        int32_t total_layers = 0;
+        bool build_supports_gpu = false;
+        bool gpu_device_present = false;
+        std::string device_name = "CPU";
+    };
+    const Placement& placement() const { return placement_; }
+
 private:
     llama_model* model_ = nullptr;
     llama_context* ctx_ = nullptr;
@@ -183,6 +196,7 @@ private:
     ContextOptions context_options_;
     int32_t n_gpu_layers_ = 0;
     uint32_t context_creations_ = 0;
+    Placement placement_;
 };
 
 } // namespace edge_prefill

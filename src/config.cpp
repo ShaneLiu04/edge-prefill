@@ -251,6 +251,25 @@ Status parse_config_file(const std::string& path, Config* out) {
         } else if (key == "max_new_tokens") {
             if (!parse_u64(value, &u)) goto bad_value;
             out->max_new_tokens = static_cast<uint32_t>(u);
+        } else if (key == "budget_target_ms") {
+            if (!parse_double(value, &d)) goto bad_value;
+            if (d < 0.0) goto bad_value;
+            out->budget_target_ms = d;
+        } else if (key == "cost_a_ms") {
+            if (!parse_double(value, &d)) goto bad_value;
+            out->cost_a_ms = d;
+        } else if (key == "cost_b_ms_per_token") {
+            if (!parse_double(value, &d)) goto bad_value;
+            out->cost_b_ms_per_token = d;
+        } else if (key == "cost_r2") {
+            if (!parse_double(value, &d)) goto bad_value;
+            out->cost_r2 = d;
+        } else if (key == "cost_n") {
+            if (!parse_u64(value, &u)) goto bad_value;
+            out->cost_n = static_cast<uint32_t>(u);
+        } else if (key == "allow_cpu_fallback") {
+            if (!parse_i64(value, &i)) goto bad_value;
+            out->allow_cpu_fallback = static_cast<int>(i);
         } else if (key == "block_size") {
             if (!parse_u64(value, &u)) goto bad_value;
             out->block_size = static_cast<uint32_t>(u);

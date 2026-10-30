@@ -10,11 +10,52 @@
 #include <sys/stat.h>
 
 #include <ggml.h>
+#include <ggml-backend.h>
 
 #include "edge_prefill/log.h"
 
 namespace edge_prefill {
 namespace {
+
+// AR016: llama.cpp reports the real placement as
+//   load_tensors: offloaded 29/29 layers to GPU
+// This is the only ground truth this pinned version exposes. The callback
+// forwards every line to stderr exactly like the default handler so nothing is
+// lost, and additionally scrapes the placement line while a load is observed.
+struct LoadCapture {
+    bool active = false;
+    int32_t offloaded = -1;
+    int32_t total = 0;
+};
+
+LoadCapture& load_capture() {
+    static LoadCapture capture;
+    return capture;
+}
+
+void forward_log(ggml_log_level level, const char* text, void* /*user_data*/) {
+    if (!text) return;
+    std::fputs(text, stderr);
+    std::fflush(stderr);
+    (void) level;
+    LoadCapture& capture = load_capture();
+    if (!capture.active) return;
+    const char* hit = std::strstr(text, "offloaded ");
+    if (!hit) return;
+    int offloaded = -1;
+    int total = 0;
+    if (std::sscanf(hit, "offloaded %d/%d layers", &offloaded, &total) == 2) {
+        capture.offloaded = offloaded;
+        capture.total = total;
+    }
+}
+
+void install_log_capture() {
+    static bool installed = false;
+    if (installed) return;
+    llama_log_set(forward_log, nullptr);
+    installed = true;
+}
 
 ggml_type to_ggml_type(KvPrecision precision) {
     switch (precision) {
@@ -75,9 +116,33 @@ Status LlamaBackend::load_model(const std::string& path, bool use_mmap) {
     llama_model_params params = llama_model_default_params();
     params.load_mode = use_mmap ? LLAMA_LOAD_MODE_MMAP : LLAMA_LOAD_MODE_NONE;
     params.n_gpu_layers = n_gpu_layers_;
+    placement_ = Placement{};
+    placement_.requested_layers = n_gpu_layers_;
+    placement_.build_supports_gpu = llama_supports_gpu_offload();
+    for (size_t i = 0; i < ggml_backend_dev_count(); ++i) {
+        ggml_backend_dev_t dev = ggml_backend_dev_get(i);
+        if (!dev) continue;
+        if (ggml_backend_dev_type(dev) != GGML_BACKEND_DEVICE_TYPE_GPU) continue;
+        placement_.gpu_device_present = true;
+        const char* name = ggml_backend_dev_name(dev);
+        const char* desc = ggml_backend_dev_description(dev);
+        placement_.device_name = std::string(name ? name : "GPU");
+        if (desc && *desc) placement_.device_name += std::string(" (") + desc + ")";
+        break;
+    }
+    install_log_capture();
+    LoadCapture& capture = load_capture();
+    capture = LoadCapture{};
+    capture.active = true;
     model_ = llama_model_load_from_file(path.c_str(), params);
+    capture.active = false;
+    placement_.offloaded_layers = capture.offloaded;
+    placement_.total_layers = capture.total;
     if (!model_) {
         return Status::error(ErrorCode::ModelLoad, "failed to load model: " + path);
+    }
+    if (placement_.requested_layers == 0) {
+        placement_.device_name = "CPU";
     }
     vocab_ = llama_model_get_vocab(model_);
     model_path_ = path;

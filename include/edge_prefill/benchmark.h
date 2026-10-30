@@ -110,6 +110,21 @@ struct BenchmarkConfig {
     // GPU offload: layers above this index move to the GPU backend (99 =
     // full offload). 0 keeps everything on CPU.
     int32_t n_gpu_layers = 0;
+    // AR016 FR-1: execution plan plumbing. 0 means auto (hardware_concurrency
+    // for threads, backend default for ubatch). Requesting GPU layers and
+    // observing zero offloaded layers is an error unless allow_cpu_fallback.
+    int32_t n_threads = 0;
+    int32_t n_threads_batch = 0;
+    uint32_t n_ubatch = 0;
+    bool flash_attn = false;
+    bool allow_cpu_fallback = false;
+    const char* plan_source = "default";
+    // AR016 FR-2/FR-3: fitted cost model + latency target for the budget.
+    double budget_target_ms = 0.0;
+    double cost_a_ms = -1.0;
+    double cost_b_ms_per_token = -1.0;
+    double cost_r2 = 0.0;
+    uint32_t cost_n = 0;
     std::string out_dir;
 };
 

@@ -17,6 +17,9 @@ enum class ErrorCode : int {
     OutOfMemory = 10,
     Io = 11,
     Internal = 12,
+    // AR016 FR-1: the requested execution plan could not be honoured (e.g. GPU
+    // layers requested but none offloaded). Never silently downgraded.
+    Unavailable = 13,
 };
 
 struct Status {

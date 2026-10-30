@@ -113,6 +113,19 @@ struct Sample {
     std::string snapshot_key;     // first 16 hex chars of the snapshot name
     std::string portfolio_choice = "none";
     std::string portfolio_reason;
+    // AR016 audit: the execution plan actually used (and verified), plus what
+    // the SLA planner predicted and how long the extra planning selection took.
+    std::string device = "cpu";
+    int32_t gpu_layers_requested = 0;
+    int32_t gpu_layers_offloaded = -1;
+    int32_t gpu_layers_total = 0;
+    int32_t n_threads = 0;
+    int32_t n_threads_batch = 0;
+    uint32_t n_ubatch = 0;
+    std::string plan_source = "default";
+    std::string device_state = "cpu";
+    double predicted_ttft_ms = 0.0;
+    double plan_select_ms = 0.0;
 };
 
 class Reporter {

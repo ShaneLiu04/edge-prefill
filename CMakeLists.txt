@@ -58,6 +58,8 @@ add_library(edge_prefill
     src/budget_curve.cpp
     src/portfolio.cpp
     src/hash_util.cpp
+    src/exec_plan.cpp
+    src/cost_model.cpp
     src/sparse_prefill.cpp
     src/metrics.cpp
     src/benchmark.cpp
@@ -102,6 +104,9 @@ if(EDGE_PREFILL_BUILD_TESTS)
         tests/test_embedding_scorer.cpp
         tests/test_session.cpp
         tests/test_kv_snapshot.cpp
+        tests/test_exec_plan.cpp
+        tests/test_cost_model.cpp
+        tests/test_plan_exec.cpp
     )
     target_link_libraries(edge_prefill_tests PRIVATE edge_prefill)
     target_include_directories(edge_prefill_tests PRIVATE ${llama_SOURCE_DIR}/include ${llama_SOURCE_DIR}/ggml/include)

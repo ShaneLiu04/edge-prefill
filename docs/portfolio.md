@@ -1,6 +1,6 @@
 # AR 全景与最佳组合
 
-这份文档把 AR001–AR015 拆成三类问题：**哪些进了最终组合**、**哪些保留为可选开关**、
+这份文档把 AR001-AR016 拆成三类问题：**哪些进了最终组合**、**哪些保留为可选开关**、
 **哪些被判为负结果并关掉**；最后给出"合到一起"的配置、逐数据集实测和复现命令。
 
 所有数字来自真实 GGUF 推理（Qwen2.5-1.5B-Instruct Q4_K_M，16 线程，Xeon Gold 6234），
@@ -25,6 +25,7 @@
 | AR013 | 紧凑上下文：KV 按准入量分配 + 块级位置压缩 `position_compaction` | KV 896 MiB→7 MiB(4K)/21 MiB(32K)；多事实 0.887→0.975、hard 0.739→0.746；64K 文档从不可运行变为可运行 | 默认开（库默认 off） |
 | AR014 | 会话级 KV 复用：append-only 会话 log + 增量解码 `session_reuse` |
 | AR015 | 持久化 KV 快照（内容寻址）+ 跨进程热启动 `snapshot_dir` | warm TTFT 降到 cold 的 0.027–0.046×（8 数据集，质量逐例相同）；多轮重启续跑 40/40 轮命中；快照 = 已用 KV + 0.6 MB logits | 端侧冷启动场景开启（库默认关闭） | 多轮第 2–5 轮 TTFT 降到重算臂的 0.27×/0.26×/0.20×/0.13×；40 轮里 39 轮 f1 逐位相同、1 轮浮点翻转（复用臂更优）；单轮数据集逐位不变 | 多轮部署开启（库默认 off） |
+| AR016 | 执行计划一等化（device/threads/ubatch + 放置校验）+ 延迟预算规划（SLA） | threads 16→12：TTFT 4.2-6.6 s → 2.3-4.4 s（1.39-1.89×）；SLA 2500 ms 下 8 数据集质量逐例不变、TTFT 再降到 2.2-2.3 s；GPU 放置可验证（本机 29/29 层） | 默认开启（plan 由 probe 生成；`budget_target_ms` 默认 0） | 修正 AR015 的假 GPU 记录；发现并修复模型哈希在计时区内重复计算 |
 
 注意"默认"指**部署配置**（`ar012` 臂）。库内代码默认值保持保守（`structure_budget=0`、
 `span_admission=0`、`sentence_completion=0`、`fill_priors=1`），必须由 conf 显式打开；
@@ -41,6 +42,8 @@
 | 硬负例抑制 | 零质量收益 + 额外开销 | research §12.8 |
 | 单事实也做句子补齐 | q 不变、token +15%（多针 247→283） | research §14.6 |
 | 只把 n_ctx 调小、不做位置压缩 | 4K 仍 28 MiB，跨度仍由文档长度决定 | research §15.5 |
+| 跨问题共享"查询无关头部"KV 池 | 结构块只占准入 token 的 8-10%（47-55 / 146-1163），共享收益 <15% | AR016 SRS §6 |
+| 用本机 GPU 拿到大倍率 | 本机 GPU 处 P8（645/2100 MHz、31/230 W）；实测 b=2.60 vs CPU 3.46 ms/token（1.33×） | AR016 勘误 |
 
 ## 2. 最佳组合（默认部署配置）
 
@@ -66,6 +69,10 @@ session_reuse = 1               # AR014 同一会话（index 第 6 列）复用 
 session_ctx_max = 4096          # AR014 会话一次性定容上限（超出则该轮全量重建）
 snapshot_dir = <cache>          # AR015 内容寻址 KV 快照目录（重复请求/冷启动）
 snapshot_use = 1                # AR015 命中则装载，未命中则重算并落盘
+threads = <probe>               # AR016 由 probe 实测得出（本机 12，而非 hw_concurrency 16）
+n_gpu_layers = <probe>          # AR016 请求值 + 装载后校验（假放置直接报错）
+cost_a_ms / cost_b_ms_per_token # AR016 probe 产出的成本模型
+budget_target_ms = 0            # AR016 >0 时按延迟目标求解预算（默认关，保持可复现）
 ```
 
 关掉的：`head_adaptive`/`head_pattern_routing`/`pyramid_prior`（AR003/AR004）、
