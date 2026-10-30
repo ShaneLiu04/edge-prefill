@@ -162,6 +162,8 @@ EDGE_PREFILL_TEST_MODEL=/path/to/model.gguf ./build/edge_prefill_tests
 | `--n-ctx N` | explicit context size; too small is an error, not a truncation (AR013) | grow to the span |
 | `--session-reuse on\|off` | reuse the KV prefix across turns of the same conversation (AR014) | off |
 | `--session-ctx-max N` | cap on the one-shot allocation for a conversation; 0 = no cap (AR014) | 4096 |
+| `--snapshot-dir P` | content-addressed KV snapshot directory; empty disables (AR015) | — |
+| `--snapshot-use 0\|1` | 1 = restore a matching snapshot instead of prefilling (AR015) | 1 |
 | `--qg-bound on\|off` | in-graph query-aware page gating (AR006) | off |
 | `--qg-sel-pages N` | pages kept per ubatch by the gate (quality knob) | 16 |
 | `--qg-local-rows N` | local window rows around the ubatch (0 = ubatch span) | 0 |
@@ -467,6 +469,50 @@ its fields) instead of pretending fp is associative.
 spot checks, gates them and fails on two injected degradations
 (`no-reuse`, `quality-drift`).
 
+### AR015: persistent KV snapshots (a repeat request pays disk, not compute)
+
+AR014 keeps KV inside one process. Edge processes die: the user re-asks, the app
+is killed and relaunched, an agent retries. AR015 makes the *admitted* log a
+content-addressed object on disk, so the next process restores the sequence
+instead of recomputing it.
+
+The key is everything that decides what the model sees: the model fingerprint,
+the whole admission policy, the KV precision, the context size, and the admitted
+tokens plus their positions. The snapshot is the sequence state *plus the logits
+of the last prompt token*, which is what makes the warm path both compute-free
+and bit-identical: the first generated token comes from stored bytes, and the
+rest of the generation continues from the restored KV.
+
+| Dataset | cold TTFT (min) | warm TTFT (min) | ratio | snapshot | quality |
+| --- | ---: | ---: | ---: | ---: | --- |
+| 4K | 3292 ms | **117 ms** | 0.036x | 19.0 MB | identical |
+| 8K | 6141 ms | **190 ms** | 0.031x | 32.6 MB | identical |
+| 16K | 5979 ms | **195 ms** | 0.033x | 33.0 MB | identical |
+| 32K | 7422 ms | **203 ms** | 0.027x | 34.0 MB | identical |
+| multi-needle | 6174 ms | **188 ms** | 0.030x | 32.6 MB | identical |
+| multi-fact | 2356 ms | **93 ms** | 0.040x | 15.2 MB | identical |
+| multi-fact hard | 2073 ms | **95 ms** | 0.046x | 15.3 MB | identical |
+| 64K document | 5074 ms | **191 ms** | 0.038x | 34.0 MB | identical |
+
+On GPU (RTX 5000, CUDA, all layers offloaded) the same two cells give
+0.031x/0.035x with identical f1 -- restore is disk + H2D, so it does not get
+slower with device compute, and a small model whose sparse gather already
+favours CPU gets the same ~100 ms first token on either device.
+
+Snapshot size is the compact KV AR013 made possible (`kv_used + 0.6 MB` of
+logits): before AR013 the same sequence would have needed 896 MiB.
+
+Composed with AR014, a conversation replayed in a *new* process restores every
+turn (40/40 turns, identical answers and identical `session_log_hash`) instead
+of re-prefilling the accumulated log.
+
+Safety comes from the key, not from trust: a stale or corrupt snapshot is a miss
+(manifest mismatch, payload hash mismatch, token mismatch), never a silent
+reuse, and the cold path records its own snapshot right after the prefill.
+
+`./repro.sh ar015` runs the cold/warm matrix, the multi-turn resume trio and the
+gate, and fails on injected `no-hit` and `quality-drift` degradations.
+
 ## Repository layout
 
 ```
@@ -477,7 +523,7 @@ tests/          unit + real-model integration tests (SKIP without model)
 benchmarks/     configs, datasets, raw CSV reports, analysis scripts
 scripts/        experiment orchestration; diagnostics/ = archived probes
 specs/          SRS / design / task tracking per change request
-docs/           architecture.md, experiments.md, portfolio.md (AR001–AR014 inventory)
+docs/           architecture.md, experiments.md, portfolio.md (AR001–AR015 inventory)
 ```
 
 ## Reproducibility rules

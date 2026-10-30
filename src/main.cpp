@@ -138,6 +138,9 @@ struct Args {
     bool session_reuse_set = false;
     double session_ctx_max = 4096.0;
     bool session_ctx_max_set = false;
+    std::string snapshot_dir;
+    int snapshot_use = 1;
+    bool snapshot_use_set = false;
     double anchor_ratio = 0.0;
     bool anchor_ratio_set = false;
     double anchor_stride_scale = 0.0;
@@ -184,6 +187,8 @@ void usage() {
         "  --position-compaction 0|1   (AR013: compact KV positions)\n"
         "  --session-reuse 0|1        (AR014: reuse the KV prefix across turns)\n"
         "  --session-ctx-max N        (AR014: cap on the conversation's KV, 0 = none)\n"
+        "  --snapshot-dir P           (AR015: content-addressed KV snapshot directory)\n"
+        "  --snapshot-use 0|1         (AR015: 1 = restore a matching snapshot)\n"
         "  --draft-model M   --attn-top-k N  --attn-top-k-layers 4,8,16\n"
         "  --embedding-model P  (bge-small style GGUF; activates semantic gating)\n"
         "  --selector-w-lexical F  --selector-w-diversity F\n"
@@ -660,6 +665,17 @@ Status parse_args(int argc, char** argv, Args* args) {
             if (!st.ok()) return st;
             args->session_reuse = std::stoi(value);
             args->session_reuse_set = true;
+        } else if (flag == "--snapshot-dir") {
+            std::string value;
+            auto st = next(&value);
+            if (!st.ok()) return st;
+            args->snapshot_dir = value;
+        } else if (flag == "--snapshot-use") {
+            std::string value;
+            auto st = next(&value);
+            if (!st.ok()) return st;
+            args->snapshot_use = std::stoi(value);
+            args->snapshot_use_set = true;
         } else if (flag == "--session-ctx-max") {
             std::string value;
             auto st = next(&value);
@@ -817,6 +833,8 @@ Status apply_common_config(const Args& args, Config* cfg) {
         cfg->position_compaction = args.position_compaction > 0 ? 1 : 0;
     }
     if (args.session_reuse_set) cfg->session_reuse = args.session_reuse > 0 ? 1 : 0;
+    if (!args.snapshot_dir.empty()) cfg->snapshot_dir = args.snapshot_dir;
+    if (args.snapshot_use_set) cfg->snapshot_use = args.snapshot_use > 0 ? 1 : 0;
     if (args.session_ctx_max_set) {
         cfg->session_ctx_max = static_cast<uint32_t>(std::max(0.0, args.session_ctx_max));
     }
@@ -1533,6 +1551,10 @@ Status bench_command(const Args& args) {
     bench.sentence_trim = cfg.sentence_trim;
     bench.position_compaction = cfg.position_compaction;
     bench.session_reuse = cfg.session_reuse;
+    bench.session_ctx_max = cfg.session_ctx_max;
+    bench.snapshot_dir = cfg.snapshot_dir;
+    bench.snapshot_use = cfg.snapshot_use;
+    bench.snapshot_max_bytes = cfg.snapshot_max_bytes;
     bench.dump_selection_dir = cfg.dump_selection_dir;
     bench.portfolio_table = cfg.portfolio_table;
     bench.n_gpu_layers = cfg.n_gpu_layers;

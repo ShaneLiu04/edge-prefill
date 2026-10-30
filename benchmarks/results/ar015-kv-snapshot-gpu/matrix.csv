@@ -1,0 +1,5 @@
+dataset,arm,cases,q_mean,q_min,ttft_median,ttft_min,snapshot_hits,snapshot_bytes,load_ms,save_ms,kv_used
+deep/multifact8k,cold,16,0.975,0.6,2823.2674,2670.7943,0,15235503,0.0,112.9958,14627751
+deep/multifact8k,warm,16,0.975,0.6,96.7776,94.6559,16,15235503,93.8659,0.0,14627751
+explen/len4k,cold,4,1.0,1.0,3848.6627,3687.6528,0,19030755,0.0,123.0146,18423003
+explen/len4k,warm,4,1.0,1.0,121.8105,115.5937,4,19030755,112.2526,0.0,18423003

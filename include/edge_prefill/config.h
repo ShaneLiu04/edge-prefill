@@ -85,6 +85,12 @@ struct Config {
     // once (re-creating the context mid-conversation wipes the KV), so this
     // bounds the up-front KV cost; a turn that outgrows it rebuilds the log.
     uint32_t session_ctx_max = 4096;
+    // AR015: content-addressed KV snapshots. Empty disables the feature.
+    std::string snapshot_dir;
+    // 1 = load a matching snapshot when present (warm arm); 0 = recompute and
+    // only write snapshots (cold arm).
+    int snapshot_use = 1;
+    uint64_t snapshot_max_bytes = 512ull * 1024 * 1024;
     std::string dump_selection_dir;
     // AR008 FR-2: measured execution-combination table. Empty keeps the
     // configured (or default) path — routing is opt-in, exactly like the

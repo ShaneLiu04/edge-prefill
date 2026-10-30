@@ -351,6 +351,20 @@ Status parse_config_file(const std::string& path, Config* out) {
                                      "session_ctx_max must be in [0, 1048576]");
             }
             out->session_ctx_max = static_cast<uint32_t>(d);
+        } else if (key == "snapshot_dir") {
+            out->snapshot_dir = value;
+        } else if (key == "snapshot_use") {
+            if (!parse_double(value, &d) || !(d >= 0.0 && d <= 1.0)) {
+                return Status::error(ErrorCode::InvalidArgument,
+                                     "snapshot_use must be in [0,1]");
+            }
+            out->snapshot_use = d > 0.5 ? 1 : 0;
+        } else if (key == "snapshot_max_bytes") {
+            if (!parse_double(value, &d) || d < 0.0) {
+                return Status::error(ErrorCode::InvalidArgument,
+                                     "snapshot_max_bytes must be >= 0");
+            }
+            out->snapshot_max_bytes = static_cast<uint64_t>(d);
         } else if (key == "position_compaction") {
             if (!parse_double(value, &d) || !(d >= 0.0 && d <= 1.0)) {
                 return Status::error(ErrorCode::InvalidArgument,

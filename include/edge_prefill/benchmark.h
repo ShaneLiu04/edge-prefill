@@ -94,6 +94,10 @@ struct BenchmarkConfig {
     int session_reuse = 0;
     // AR014: cap on the up-front session allocation (0 = no cap).
     uint32_t session_ctx_max = 4096;
+    // AR015: content-addressed KV snapshots (empty = disabled).
+    std::string snapshot_dir;
+    int snapshot_use = 1;
+    uint64_t snapshot_max_bytes = 512ull * 1024 * 1024;
     // AR013 FR-1: explicit context size. 0 = grow on demand to the position
     // span the case writes; a value that is too small fails the case instead of
     // silently truncating.

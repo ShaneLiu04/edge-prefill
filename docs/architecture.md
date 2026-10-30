@@ -307,6 +307,36 @@ incremental decode reach the same K/V through different ggml tilings. The gate
 therefore checks the provable invariant (logs) plus bounded statistics (mean must
 not drop, at most 5% of turns may flip), not bit-identical f1.
 
+## Persistent KV snapshots (AR015)
+
+AR014 keeps KV inside one process; AR015 makes it survive the process. The
+admitted log is turned into a content-addressed object:
+
+- **Key** = version + model fingerprint + admission policy fingerprint + KV
+  precision + `n_ctx` + hash of the admitted tokens + hash of their positions.
+  Every knob that can change *which* tokens are admitted is in the policy
+  fingerprint (`admission_policy_key`), because a cache that misses a knob would
+  silently serve another context's KV.
+- **Payload** = the llama sequence state (`llama_state_seq_get_data`) *plus the
+  logits of the last prompt token*. Storing the logits is what makes the warm
+  path compute-free and bit-identical: re-decoding that token would cost more
+  than the whole load and would drift with the batch shape.
+- **Layout**: `<key>.kv` (state), `<key>.lg` (magic + n_vocab + f32 logits),
+  `<key>.meta` (line-based manifest with both payload hashes). The state and the
+  logits are written first and the manifest last, so a crash can only leave a
+  snapshot that verifies as incomplete (a miss).
+- **Verification**: manifest fields must equal the key, both payloads must hash
+  to the manifest, and the token count must match. Anything else is
+  `miss:<reason>`, which falls back to the prefill and overwrites the entry.
+- **Eviction**: `snapshot_max_bytes` (default 512 MiB) removes whole snapshots
+  oldest-first, never a manifest without its payload.
+
+The bench wires it in at the two places that build a KV: the single-turn sparse
+path (`snapshot_use` decides load vs recompute) and the AR014 session path
+(one snapshot per turn, so a conversation replayed in a new process restores
+turn by turn). Measured on this host: warm TTFT is 0.027x–0.046x of cold across
+the eight datasets, with identical f1.
+
 ## Edge accounting and the dense invariant
 
 `budget=1.0`, `qg_bound=false`, `query_gating=false`, `attn_top_k=0` and

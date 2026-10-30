@@ -103,6 +103,14 @@ struct Sample {
     // assembly (not the KV reuse) diverged.
     uint32_t session_log_tokens = 0;
     uint64_t session_log_hash = 0;
+    // AR015 audit: a warm sample restored its prompt KV from a content-addressed
+    // snapshot instead of running the prefill.
+    uint32_t snapshot_hit = 0;
+    uint64_t snapshot_bytes = 0;
+    double snapshot_load_ms = 0.0;
+    double snapshot_save_ms = 0.0;
+    std::string snapshot_state;   // off / cold / warm / miss:<reason>
+    std::string snapshot_key;     // first 16 hex chars of the snapshot name
     std::string portfolio_choice = "none";
     std::string portfolio_reason;
 };

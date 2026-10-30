@@ -23,6 +23,7 @@
 #include "edge_prefill/log.h"
 #include "edge_prefill/planner.h"
 #include "edge_prefill/selector.h"
+#include "edge_prefill/kv_snapshot.h"
 #include "edge_prefill/session.h"
 #include "edge_prefill/semantic_gate.h"
 #include "edge_prefill/sparse_prefill.h"
@@ -194,6 +195,50 @@ double log_softmax_at(const std::vector<float>& logits, llama_token token) {
 // AR014: the session path needs the same admission options as the regular
 // path. Keeping one builder means a future option added to the selector cannot
 // silently apply to only half of the benchmark.
+// AR015: everything that decides *which* tokens a case admits, in one string.
+// A snapshot is only valid inside one policy, so this string is part of its
+// key; adding a knob here is what keeps old snapshots from being reused.
+std::string admission_policy_key(const Config& cfg, const Plan& plan) {
+    std::string out;
+    auto add = [&out](const char* name, double v) {
+        out += name;
+        out += '=';
+        out += std::to_string(v);
+        out += ';';
+    };
+    add("mode", static_cast<double>(static_cast<int>(cfg.mode)));
+    add("budget", plan.budget);
+    add("dense_fallback", plan.dense_fallback ? 1.0 : 0.0);
+    add("block", cfg.block_size);
+    add("topk", cfg.attn_top_k);
+    add("sinkb", cfg.sink_blocks);
+    add("recentb", cfg.recent_blocks);
+    add("covstride", cfg.coverage_stride);
+    add("anchor", cfg.anchor_ratio);
+    add("anchorscale", cfg.anchor_stride_scale);
+    add("mmrt", cfg.mmr_threshold);
+    add("mmrl", cfg.mmr_lambda);
+    add("phrase", cfg.phrase_weight);
+    add("coverage", cfg.coverage_weight);
+    add("priorgate", cfg.prior_gate);
+    add("fillpriors", cfg.fill_priors);
+    add("structure", cfg.structure_budget);
+    add("spanradius", cfg.anchor_span_radius);
+    add("covreserve", cfg.coverage_reserve);
+    add("spanadm", cfg.span_admission);
+    add("spanmin", cfg.span_min_tokens);
+    add("sentcomp", cfg.sentence_completion);
+    add("senttrim", cfg.sentence_trim);
+    add("spanmax", cfg.span_max_tokens);
+    add("compaction", cfg.position_compaction);
+    add("wlex", cfg.weights.lexical);
+    add("wdiv", cfg.weights.diversity);
+    out += "budget_curve=";
+    out += cfg.budget_curve;
+    out += ';';
+    return out;
+}
+
 SelectionOptions selection_options_for(const Config& run_cfg, const Plan& plan) {
     SelectionOptions sopts;
     sopts.block_size = run_cfg.block_size;
@@ -319,6 +364,9 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
     base.position_compaction = cfg.position_compaction;
     base.session_reuse = cfg.session_reuse;
     base.session_ctx_max = cfg.session_ctx_max;
+    base.snapshot_dir = cfg.snapshot_dir;
+    base.snapshot_use = cfg.snapshot_use;
+    base.snapshot_max_bytes = cfg.snapshot_max_bytes;
     base.dump_selection_dir = cfg.dump_selection_dir;
     base.portfolio_table = cfg.portfolio_table;
     if (!base.budget_curve.empty()) {
@@ -395,6 +443,17 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
         PrefixCache::create(base.prefix_cache_bytes, backend.fingerprint().to_key(), &cache);
     }
     SparsePrefiller prefilter(&backend, cache.get());
+    // AR015: one snapshot directory per run; empty disables the feature
+    // entirely so every existing configuration stays bit-identical.
+    KvSnapshotStore* snapshot_store = nullptr;
+    if (!base.snapshot_dir.empty()) {
+        auto sst = KvSnapshotStore::create(base.snapshot_dir, base.snapshot_max_bytes,
+                                           &snapshot_store);
+        if (!sst.ok()) {
+            log_warn("snapshot store disabled: " + sst.message);
+            snapshot_store = nullptr;
+        }
+    }
     // AR014: one KV sequence per conversation.
     SessionStore sessions;
 
@@ -569,6 +628,36 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
                                      ": context re-created, rebuilding the log");
                         }
 
+                        // AR015 x AR014: a resumed conversation can restore the
+                        // KV this exact log produced in a previous process. The
+                        // key covers the whole log, so a hit proves the prefix
+                        // matches and the turn's delta does not need decoding.
+                        SnapshotKey turn_key;
+                        SnapshotPayload turn_payload;
+                        SnapshotLoadResult turn_load;
+                        SnapshotSaveResult turn_save;
+                        bool turn_from_snapshot = false;
+                        if (snapshot_store != nullptr) {
+                            turn_key.model_key = backend.fingerprint().to_key();
+                            turn_key.policy_key = admission_policy_key(base, plan);
+                            turn_key.kv_type = kv_precision_name(base.kv_type);
+                            turn_key.n_tokens = static_cast<uint32_t>(log_after.size());
+                            turn_key.n_ctx = llama_n_ctx(backend.context());
+                            turn_key.token_hash = hash_tokens(log_after);
+                            std::vector<llama_pos> turn_positions(log_after.size());
+                            std::iota(turn_positions.begin(), turn_positions.end(), 0);
+                            turn_key.position_hash = hash_positions(turn_positions);
+                            if (base.snapshot_use != 0) {
+                                turn_load = snapshot_store->load(turn_key, log_after,
+                                                                 &turn_payload);
+                                if (turn_load.hit) {
+                                    turn_from_snapshot =
+                                            backend.load_state(turn_payload.state).ok();
+                                    if (!turn_from_snapshot) turn_load.state = "miss:load";
+                                }
+                            }
+                        }
+
                         std::vector<llama_token> batch_tokens = reuse ? delta : log_after;
                         Selection dense;
                         dense.dense = true;
@@ -597,17 +686,57 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
 
                         PrefillStats stats;
                         const auto turn_begin = std::chrono::steady_clock::now();
-                        const auto pst = prefilter.prefill(batch_tokens, dense, popts, &stats);
+                        if (turn_from_snapshot) {
+                            auto* restored_mem = llama_get_memory(backend.context());
+                            stats.kv_pos_max = llama_memory_seq_pos_max(restored_mem, 0);
+                            stats.kv_pos_min = llama_memory_seq_pos_min(restored_mem, 0);
+                            stats.prompt_tokens = static_cast<uint32_t>(log_after.size());
+                            stats.selected_tokens = static_cast<uint32_t>(log_after.size());
+                            stats.kv_bytes = turn_payload.state.size();
+                        } else {
+                            st = prefilter.prefill(batch_tokens, dense, popts, &stats);
+                        }
                         const auto turn_first = std::chrono::steady_clock::now();
-                        if (!pst.ok()) {
-                            SessionStore::reset(session, pst.message);
+                        if (!st.ok()) {
+                            SessionStore::reset(session, st.message);
                             if (warnings) warnings->push_back("session-prefill:" + c.id);
                             continue;
                         }
-                        const double ttft_ms = std::chrono::duration<double, std::milli>(
-                                turn_first - turn_begin).count();
+                        // A resumed turn did its work (read + verify + restore)
+                        // during the probe above, so that is its TTFT; charging
+                        // only the otherwise-empty timed region would report 0.
+                        const double ttft_ms =
+                                turn_from_snapshot
+                                        ? turn_load.load_ms
+                                        : std::chrono::duration<double, std::milli>(
+                                                  turn_first - turn_begin)
+                                                  .count();
 
-                        const float* logits = llama_get_logits_ith(backend.context(), -1);
+                        // AR015: persist the turn's prompt KV for the next
+                        // process. Taken before generation so the stored state
+                        // holds exactly `log_after` at positions 0..n-1.
+                        if (snapshot_store != nullptr && !turn_from_snapshot) {
+                            const float* turn_raw = llama_get_logits_ith(backend.context(), -1);
+                            if (turn_raw != nullptr) {
+                                SnapshotPayload out_payload;
+                                out_payload.logits.assign(turn_raw, turn_raw + backend.n_vocab());
+                                out_payload.n_vocab =
+                                        static_cast<uint32_t>(out_payload.logits.size());
+                                if (backend.save_state(&out_payload.state).ok()) {
+                                    turn_save =
+                                            snapshot_store->save(turn_key, log_after, out_payload);
+                                }
+                            }
+                        }
+
+                        std::vector<float> turn_logits_owned;
+                        if (turn_from_snapshot) {
+                            turn_logits_owned = turn_payload.logits;
+                        } else if (const float* raw = llama_get_logits_ith(backend.context(), -1)) {
+                            turn_logits_owned.assign(raw, raw + backend.n_vocab());
+                        }
+                        const float* logits =
+                                turn_logits_owned.empty() ? nullptr : turn_logits_owned.data();
                         std::string generated;
                         // AR014: every id we actually decode becomes part of the
                         // conversation KV, so the log must contain it — otherwise
@@ -692,6 +821,23 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
                         }
                         sample.session_log_tokens = session->next_pos;
                         sample.session_log_hash = log_hash;
+                        // AR015 audit on the session path: a resumed turn is
+                        // served from a snapshot instead of the delta decode.
+                        sample.snapshot_hit = turn_from_snapshot ? 1 : 0;
+                        sample.snapshot_state =
+                                snapshot_store == nullptr
+                                        ? "off"
+                                        : (turn_from_snapshot
+                                                   ? turn_load.state
+                                                   : (base.snapshot_use != 0 ? turn_load.state
+                                                                             : "cold"));
+                        sample.snapshot_bytes =
+                                turn_from_snapshot ? turn_load.bytes : turn_save.bytes;
+                        sample.snapshot_load_ms = turn_from_snapshot ? turn_load.load_ms : 0.0;
+                        sample.snapshot_save_ms = turn_save.ok ? turn_save.save_ms : 0.0;
+                        sample.snapshot_key =
+                                snapshot_store != nullptr ? turn_key.hex().substr(0, 16)
+                                                          : std::string();
                         log_info("turn=" + sample.case_id + " session=" + c.session +
                                  " reused=" + std::to_string(sample.reused_tokens) +
                                  " appended=" + std::to_string(sample.appended_tokens) +
@@ -1271,13 +1417,86 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
                         continue;
                     }
 
+                    // AR015: content-addressed snapshot. The key is derived
+                    // from exactly the inputs the prefill sees (model, policy,
+                    // tokens, positions, context size, KV precision), so a hit
+                    // provably refers to the same sequence. The cold arm
+                    // recomputes and saves; the warm arm loads and skips the
+                    // prefill entirely.
+                    SnapshotKey snapshot_key;
+                    // The KV holds only the admitted tokens, so the snapshot is
+                    // keyed by those (not by the whole prompt): two prompts that
+                    // admit the same evidence share one snapshot.
+                    std::vector<llama_token> admitted_tokens;
+                    if (snapshot_store != nullptr) {
+                        admitted_tokens.reserve(selection.token_indices.size());
+                        for (uint32_t index : selection.token_indices) {
+                            if (index < tokens.size()) admitted_tokens.push_back(tokens[index]);
+                        }
+                    }
+                    const bool snapshot_enabled = snapshot_store != nullptr;
+                    if (snapshot_enabled) {
+                        snapshot_key.model_key = backend.fingerprint().to_key();
+                        snapshot_key.policy_key = admission_policy_key(base, plan);
+                        snapshot_key.kv_type = kv_precision_name(base.kv_type);
+                        snapshot_key.n_tokens = static_cast<uint32_t>(admitted_tokens.size());
+                        snapshot_key.n_ctx = llama_n_ctx(backend.context());
+                        snapshot_key.token_hash = hash_tokens(admitted_tokens);
+                        // AR013 may leave positions implicit (identity) when
+                        // compaction is off; hash what the decode will use.
+                        std::vector<llama_pos> effective_positions;
+                        if (selection.positions.empty()) {
+                            effective_positions.reserve(selection.token_indices.size());
+                            for (uint32_t index : selection.token_indices) {
+                                effective_positions.push_back(static_cast<llama_pos>(index));
+                            }
+                        } else {
+                            effective_positions.reserve(selection.positions.size());
+                            for (uint32_t position : selection.positions) {
+                                effective_positions.push_back(static_cast<llama_pos>(position));
+                            }
+                        }
+                        snapshot_key.position_hash = hash_positions(effective_positions);
+                    }
+                    SnapshotPayload snapshot_payload;
+                    SnapshotLoadResult snapshot_load;
+                    SnapshotSaveResult snapshot_save;
+                    bool from_snapshot = false;
+                    if (snapshot_enabled && base.snapshot_use != 0) {
+                        // Probe once to decide the arm (hit or not). The timed
+                        // loop below redoes the whole load so TTFT includes the
+                        // read + verify, not just the memcpy.
+                        snapshot_load = snapshot_store->load(snapshot_key, admitted_tokens,
+                                                             &snapshot_payload);
+                        if (snapshot_load.hit) {
+                            const auto lst = backend.load_state(snapshot_payload.state);
+                            from_snapshot = lst.ok();
+                            if (!from_snapshot) snapshot_load.state = "miss:load";
+                        }
+                    }
+
                     const uint32_t reps = std::max<uint32_t>(1, base.repeats);
                     std::vector<double> ttft_samples;
                     PrefillStats stats;
                     const auto last_begin = std::chrono::steady_clock::now();
                     for (uint32_t r = 0; r < reps; ++r) {
                         const auto begin = std::chrono::steady_clock::now();
-                        st = prefilter.prefill(tokens, selection, popts, &stats);
+                        if (from_snapshot) {
+                            // A warm request reads, verifies and restores; all
+                            // three are inside the timer so the number is the
+                            // latency a caller would actually see.
+                            const SnapshotLoadResult again = snapshot_store->load(
+                                    snapshot_key, admitted_tokens, &snapshot_payload);
+                            if (!again.hit) {
+                                st = Status::error(ErrorCode::Io,
+                                                   "snapshot vanished between probe and timed load");
+                            } else {
+                                st = backend.load_state(snapshot_payload.state);
+                                snapshot_load = again;
+                            }
+                        } else {
+                            st = prefilter.prefill(tokens, selection, popts, &stats);
+                        }
                         const auto first = std::chrono::steady_clock::now();
                         if (!st.ok()) {
                             prefill_ok = false;
@@ -1295,7 +1514,48 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
                     const double ttft_ms = ttft_samples[ttft_samples.size() / 2];
                     const double ttft_min_ms = ttft_samples.front();
 
-                    const float* first_logits = llama_get_logits_ith(backend.context(), -1);
+                    if (from_snapshot) {
+                        // Rebuild the bookkeeping the rest of the loop reads
+                        // from the restored state instead of from prefill.
+                        auto* loaded_mem = llama_get_memory(backend.context());
+                        stats.kv_pos_max = llama_memory_seq_pos_max(loaded_mem, 0);
+                        stats.kv_pos_min = llama_memory_seq_pos_min(loaded_mem, 0);
+                        stats.prompt_tokens = static_cast<uint32_t>(tokens.size());
+                        stats.selected_tokens = snapshot_key.n_tokens;
+                        stats.prompt_tokens = static_cast<uint32_t>(tokens.size());
+                        stats.total_us = static_cast<uint64_t>(ttft_min_ms * 1000.0);
+                        stats.ttft_us = stats.total_us;
+                        stats.kv_bytes = snapshot_payload.state.size();
+                    }
+
+                    std::vector<float> first_logits_owned;
+                    if (from_snapshot) {
+                        first_logits_owned = snapshot_payload.logits;
+                    } else {
+                        const float* raw = llama_get_logits_ith(backend.context(), -1);
+                        if (raw) {
+                            first_logits_owned.assign(raw, raw + backend.n_vocab());
+                        }
+                    }
+                    const float* first_logits =
+                            first_logits_owned.empty() ? nullptr : first_logits_owned.data();
+
+                    // AR015: the cold arm persists the prompt KV *before* any
+                    // generation token is written, so the stored state is the
+                    // prompt alone and the stored logits are the first-token
+                    // distribution the cold path is about to use.
+                    if (snapshot_enabled && !from_snapshot && first_logits != nullptr) {
+                        SnapshotPayload out_payload;
+                        if (backend.save_state(&out_payload.state).ok()) {
+                            out_payload.logits.assign(first_logits,
+                                                      first_logits + backend.n_vocab());
+                            out_payload.n_vocab =
+                                    static_cast<uint32_t>(out_payload.logits.size());
+                            snapshot_save = snapshot_store->save(snapshot_key, admitted_tokens,
+                                                                 out_payload);
+                        }
+                    }
+
                     std::string generated;
                     double quality = 0.0;
                     double sample_ppl_dense = 0.0;
@@ -1398,6 +1658,21 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
                     sample.rss_mb = backend.rss_mb();
                     sample.position_span = selection.position_span;
                     sample.compaction_reason = selection.compaction_reason;
+                    // AR015 audit: whether this sample came from a snapshot and
+                    // what it cost, so the gate can tell warm from cold without
+                    // trusting timings alone.
+                    sample.snapshot_hit = from_snapshot ? 1 : 0;
+                    sample.snapshot_state = !snapshot_enabled
+                                                    ? "off"
+                                                    : (from_snapshot ? snapshot_load.state
+                                                                     : (base.snapshot_use != 0
+                                                                                ? snapshot_load.state
+                                                                                : "cold"));
+                    sample.snapshot_bytes = from_snapshot ? snapshot_load.bytes : snapshot_save.bytes;
+                    sample.snapshot_load_ms = from_snapshot ? snapshot_load.load_ms : 0.0;
+                    sample.snapshot_save_ms = snapshot_save.ok ? snapshot_save.save_ms : 0.0;
+                    sample.snapshot_key =
+                            snapshot_enabled ? snapshot_key.hex().substr(0, 16) : std::string();
                     log_info("case=" + sample.case_id + " mode=" + sample.mode +
                              " quality=" + std::to_string(sample.quality) +
                              " generated=" + generated);

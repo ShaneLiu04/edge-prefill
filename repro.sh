@@ -13,6 +13,7 @@
 #   ./repro.sh ar012    # AR012 sentence-complete admission: matrix + facts + gate
 #   ./repro.sh ar013    # AR013 compact context: matrix + KV/latency/capability gate
 #   ./repro.sh ar014    # AR014 session KV reuse: multiturn two arms + gate + injections
+#   ./repro.sh ar015    # AR015 KV snapshots: cold/warm 8 datasets + restart resume + gate
 #
 # Every step is fail-fast (set -euo pipefail) and prints the exact command
 # it runs. Models are downloaded with SHA256 verification into ./models
@@ -328,6 +329,24 @@ case "${SUITE}" in
             && fail "gate did not reject the injected answer drift"
         OUT="${ROOT}/benchmarks/results/ar014-session-kv-reuse"
         ;;
+    ar015)
+        # AR015: persistent KV snapshots. Cold and warm arms run as separate
+        # processes over one snapshot directory, plus a conversation replayed
+        # after a "restart"; the gate checks hit rate, bit-identical quality,
+        # warm/cold latency and snapshot size, and two injections must fail.
+        python3 benchmarks/scripts/ar015_matrix.py \
+            --bin "${BIN}" --model "${MAIN_MODEL}" \
+            --datasets deep/multiturn,explen/len4k,explen/len64k --force
+        python3 benchmarks/scripts/ar015_report.py --gate \
+            || fail "AR015 snapshots are not faster or not bit-identical"
+        python3 benchmarks/scripts/ar015_report.py --gate \
+            --inject explen/len4k:no-hit > /dev/null 2>&1 \
+            && fail "gate did not reject the injected no-hit arm"
+        python3 benchmarks/scripts/ar015_report.py --gate \
+            --inject explen/len4k:quality-drift > /dev/null 2>&1 \
+            && fail "gate did not reject the injected answer drift"
+        OUT="${ROOT}/benchmarks/results/ar015-kv-snapshot"
+        ;;
     ar009)
         # AR009 FR-3: regenerate the deterministic multi-fact families, run the
         # coverage ablation (AR008 ranking vs coverage-fair fill) and gate the
@@ -348,7 +367,7 @@ case "${SUITE}" in
         OUT="${ROOT}/benchmarks/results/ar009-multifact"
         ;;
     *)
-        fail "unknown suite: ${SUITE} (smoke|matrix|full|budget|ar007..ar014)"
+        fail "unknown suite: ${SUITE} (smoke|matrix|full|budget|ar007..ar015)"
         ;;
 esac
 

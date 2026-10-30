@@ -44,7 +44,9 @@ Status Reporter::write_raw_csv(const std::string& path) {
            "span_tokens,uncovered_facts,sentences_completed,sentences_extended,"
            "ctx_cells,kv_alloc_bytes,kv_used_bytes,rss_mb,position_span,"
            "compaction_reason,ttft_min_ms,session_id,reused_tokens,appended_tokens,"
-           "session_reset_reason,session_log_tokens,session_log_hash\n";
+           "session_reset_reason,session_log_tokens,session_log_hash,"
+           "snapshot_hit,snapshot_bytes,snapshot_load_ms,snapshot_save_ms,"
+           "snapshot_state,snapshot_key\n";
     out << std::setprecision(10);
     for (const auto& s : samples_) {
         out << s.task << ',' << s.case_id << ',' << s.ttft_ms << ',' << s.e2e_ms << ','
@@ -68,7 +70,9 @@ Status Reporter::write_raw_csv(const std::string& path) {
             << s.rss_mb << ',' << s.position_span << ',' << s.compaction_reason << ',' << s.ttft_min_ms << ','
             << s.session_id << ',' << s.reused_tokens << ',' << s.appended_tokens << ','
             << s.session_reset_reason << ',' << s.session_log_tokens << ','
-            << s.session_log_hash << '\n';
+            << s.session_log_hash << ',' << s.snapshot_hit << ',' << s.snapshot_bytes << ','
+            << s.snapshot_load_ms << ',' << s.snapshot_save_ms << ',' << s.snapshot_state
+            << ',' << s.snapshot_key << '\n';
     }
     return Status::success();
 }
