@@ -102,6 +102,19 @@ public:
                         std::vector<int32_t>* top1);
     Status save_state(std::vector<uint8_t>* out) const;
     Status load_state(const std::vector<uint8_t>& in);
+    // AR018 FR-2: per-sequence state, the transfer unit between the prefill
+    // context and the decode context. The payload is llama.cpp's own sequence
+    // serialisation (KV cells + their positions); restoring it on another
+    // context with the same model and KV precision reproduces the sequence
+    // exactly, which is what makes the pipeline lossless.
+    Status get_seq_state(int32_t seq_id, std::vector<uint8_t>* out) const;
+    Status set_seq_state(int32_t seq_id, const std::vector<uint8_t>& in);
+    // AR018: copy the logits of the most recent forward pass. The prefill
+    // context produces the first-token distribution; the state transfer carries
+    // the KV, this carries the distribution that goes with it, so the decode
+    // context does not have to re-decode the last prompt token (which the KV
+    // layout forbids: positions must advance by exactly one).
+    Status copy_last_logits(std::vector<float>* out) const;
     Status reset_sequence(int32_t seq_id = 0);
     // AR017: llama.cpp requires the first decode position of a sequence to be
     // exactly last_pos + 1. Read it from the cache instead of reconstructing it

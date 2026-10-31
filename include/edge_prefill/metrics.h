@@ -137,6 +137,15 @@ struct Sample {
     // AR017: FNV-1a of the generated text. Batching must not change a single
     // byte of the answer, and f1 alone cannot prove that.
     uint64_t generated_hash = 0;
+    // AR018 audit: prefill and decode ran on separate contexts/devices; the
+    // sequence crossed as KV state. queue_wait_ms is the part of the product
+    // latency spent waiting for a decode slot, so E2E stays honest.
+    int32_t pipeline_mode = 0;
+    std::string prefill_device;
+    std::string prefill_device_state;
+    double queue_wait_ms = 0.0;
+    double handoff_ms = 0.0;
+    uint64_t handoff_bytes = 0;
 };
 
 class Reporter {

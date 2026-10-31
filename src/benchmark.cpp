@@ -9,6 +9,11 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <condition_variable>
+#include <deque>
+#include <map>
+#include <mutex>
+#include <thread>
 #include <cmath>
 #include <cstdlib>
 #include <filesystem>
@@ -486,6 +491,182 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
     // prefill on its own KV sequence; the next tokens are then advanced together,
     // one forward pass per step for the whole batch. Samples are pushed with all
     // audit fields filled except the generation-derived ones, and patched here.
+    // AR018: prefill/decode separation. A second model instance owns the
+    // prefill context so it can be placed on a different device than the
+    // decoder; a worker thread runs the sparse prefill there and the finished
+    // sequence travels to the decode context as KV state (AR018 FR-2).
+    struct PipeTask {
+        size_t index = 0;
+        std::vector<llama_token> tokens;
+        Selection selection;
+        SparsePrefiller::Options opts;
+        uint32_t required_ctx = 0;
+    };
+    struct PipeResult {
+        Status status;
+        std::vector<uint8_t> state;
+        std::vector<float> logits;
+        PrefillStats stats;
+        double prefill_ms = 0.0;
+        bool ready = false;
+    };
+    const bool pipeline_mode = cfg.pipeline_mode;
+    std::unique_ptr<LlamaBackend> prefill_backend;
+    std::unique_ptr<SparsePrefiller> prefill_prefilter;
+    std::deque<PipeTask> pipe_tasks;
+    std::map<size_t, PipeResult> pipe_results;
+    std::mutex pipe_mu;
+    std::condition_variable pipe_task_cv;
+    std::condition_variable pipe_done_cv;
+    bool pipe_stop = false;
+    size_t pipe_submitted = 0;
+    std::thread pipe_worker;
+    std::string prefill_device_state = device_state;
+    std::string prefill_device_name = device_name;
+    if (pipeline_mode) {
+        prefill_backend = std::make_unique<LlamaBackend>();
+        const int32_t pngl = cfg.pipeline_prefill_gpu_layers >= 0
+                                     ? cfg.pipeline_prefill_gpu_layers
+                                     : cfg.n_gpu_layers;
+        prefill_backend->set_n_gpu_layers(pngl);
+        st = prefill_backend->load_model(base.model_path);
+        if (!st.ok()) {
+            LlamaBackend::shutdown();
+            return st;
+        }
+        PlacementReport pplace;
+        pplace.requested_layers = pngl;
+        pplace.offloaded_layers = prefill_backend->placement().offloaded_layers;
+        pplace.total_layers = prefill_backend->placement().total_layers;
+        pplace.gpu_device_present = prefill_backend->placement().gpu_device_present;
+        pplace.build_supports_gpu = prefill_backend->placement().build_supports_gpu;
+        pplace.device_name = prefill_backend->placement().device_name;
+        st = pplace.resolve(cfg.allow_cpu_fallback);
+        if (!st.ok()) {
+            LlamaBackend::shutdown();
+            return st;
+        }
+        prefill_device_state = device_state_name(pplace.state);
+        prefill_device_name = pplace.device_name;
+        ContextOptions popts_ctx;
+        // Same structure as the decode cache: with kv_unified disabled every
+        // stream owns n_ctx/n_seq_max cells and a ubatch needs a contiguous run
+        // inside one stream, so the span factor (~2x, AR017 FR-4) applies per
+        // stream.
+        popts_ctx.n_ctx = cfg.n_ctx != 0 ? cfg.n_ctx
+                                         : kSeedContextCells * 2 * batch_k;
+        popts_ctx.n_batch = 2048;
+        popts_ctx.n_ubatch = ctx_opts.n_ubatch;
+        popts_ctx.n_threads = cfg.pipeline_prefill_threads != 0
+                                      ? cfg.pipeline_prefill_threads
+                                      : cfg.n_threads;
+        popts_ctx.n_threads_batch = popts_ctx.n_threads;
+        popts_ctx.type_k = KvPrecision::F16;
+        popts_ctx.type_v = KvPrecision::F16;
+        popts_ctx.flash_attn = cfg.flash_attn;
+        // llama.cpp serialises the sequence state per KV stream, so the
+        // prefill context must expose the same stream count as the decode
+        // context even though it only ever uses sequence 0.
+        popts_ctx.n_seq_max = batch_k;
+        st = prefill_backend->create_context(popts_ctx);
+        if (!st.ok()) {
+            LlamaBackend::shutdown();
+            return st;
+        }
+        // No prefix cache on the prefill side: its states are context-local and
+        // would be restored into the wrong context here.
+        prefill_prefilter = std::make_unique<SparsePrefiller>(prefill_backend.get(), nullptr);
+        if (!base.snapshot_dir.empty()) {
+            if (warnings) warnings->push_back("snapshot-disabled-in-pipeline-mode");
+            log_warn("pipeline_mode disables KV snapshots (single-context only)");
+        }
+        log_info("pipeline: prefill_device=" + prefill_device_state + " (" +
+                 prefill_device_name + ") decode_device=" + device_state + " (" +
+                 device_name + ") K=" + std::to_string(batch_k));
+        pipe_worker = std::thread([&]() {
+            for (;;) {
+                PipeTask task;
+                {
+                    std::unique_lock<std::mutex> lk(pipe_mu);
+                    pipe_task_cv.wait(lk, [&] { return pipe_stop || !pipe_tasks.empty(); });
+                    if (pipe_stop && pipe_tasks.empty()) return;
+                    task = std::move(pipe_tasks.front());
+                    pipe_tasks.pop_front();
+                }
+                PipeResult result;
+                const auto begin = std::chrono::steady_clock::now();
+                Status wst = Status::success();
+                // llama.cpp throws on malformed state; a worker thread must
+                // never let that escape, or the process terminates without a
+                // diagnostic that names the case.
+                try {
+                const uint32_t need =
+                        task.required_ctx * 2 * std::max<uint32_t>(1, batch_k);
+                wst = prefill_backend->ensure_context(need);
+                if (wst.ok()) wst = prefill_backend->reset_sequence(0);
+                if (wst.ok()) {
+                    wst = prefill_prefilter->prefill(task.tokens, task.selection,
+                                                     task.opts, &result.stats);
+                }
+                if (wst.ok()) wst = prefill_backend->get_seq_state(0, &result.state);
+                if (wst.ok()) wst = prefill_backend->copy_last_logits(&result.logits);
+                result.prefill_ms = std::chrono::duration<double, std::milli>(
+                                            std::chrono::steady_clock::now() - begin)
+                                            .count();
+                } catch (const std::exception& e) {
+                    wst = Status::error(ErrorCode::Prefill,
+                                        std::string("prefill worker exception: ") + e.what());
+                } catch (...) {
+                    wst = Status::error(ErrorCode::Prefill,
+                                        "prefill worker exception (unknown)");
+                }
+                result.status = wst;
+                if (wst.ok()) prefill_backend->reset_sequence(0);
+                {
+                    std::lock_guard<std::mutex> lk(pipe_mu);
+                    result.ready = true;
+                    pipe_results[task.index] = std::move(result);
+                }
+                pipe_done_cv.notify_all();
+            }
+        });
+    }
+    struct PipeJoiner {
+        std::thread* worker;
+        std::mutex* mu;
+        std::condition_variable* cv;
+        bool* stop;
+        ~PipeJoiner() {
+            if (worker && worker->joinable()) {
+                {
+                    std::lock_guard<std::mutex> lk(*mu);
+                    *stop = true;
+                }
+                cv->notify_all();
+                worker->join();
+            }
+        }
+    } pipe_joiner{pipe_worker.joinable() ? &pipe_worker : nullptr, &pipe_mu,
+                  &pipe_task_cv, &pipe_stop};
+    auto pipe_submit = [&](PipeTask task) {
+        {
+            std::lock_guard<std::mutex> lk(pipe_mu);
+            pipe_tasks.push_back(std::move(task));
+            ++pipe_submitted;
+        }
+        pipe_task_cv.notify_one();
+    };
+    auto pipe_wait = [&](size_t index) -> PipeResult {
+        std::unique_lock<std::mutex> lk(pipe_mu);
+        pipe_done_cv.wait(lk, [&] {
+            auto it = pipe_results.find(index);
+            return it != pipe_results.end() && it->second.ready;
+        });
+        PipeResult out_copy = std::move(pipe_results[index]);
+        pipe_results.erase(index);
+        return out_copy;
+    };
+
     auto text_hash = [](const std::string& text) {
         uint64_t hash = 1469598103934665603ull;
         for (unsigned char c : text) {
@@ -495,6 +676,15 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
         return hash;
     };
     struct BatchJob {
+        // AR018: a deferred job carries no prefilled state of its own; the
+        // worker produces it and flush_batch hands it to the decode context.
+        bool deferred = false;
+        size_t pipe_index = 0;
+        double prefill_ms = 0.0;
+        double enqueue_wall_ms = 0.0;
+        double handoff_ms = 0.0;
+        double queue_wait_ms = 0.0;
+        uint64_t handoff_bytes = 0;
         int32_t seq = 0;
         llama_token next = 0;
         llama_pos pos = 0;
@@ -510,8 +700,52 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
     std::vector<BatchJob> batch_jobs;
     uint32_t batch_steps_total = 0;
     uint32_t batch_effective = 0;
-    auto flush_batch = [&]() -> Status {
+    auto flush_batch = [&](uint32_t limit) -> Status {
         if (batch_jobs.empty()) return Status::success();
+        std::vector<BatchJob> deferred_tail;
+        if (limit < batch_jobs.size()) {
+            deferred_tail.assign(std::make_move_iterator(batch_jobs.begin() + limit),
+                                 std::make_move_iterator(batch_jobs.end()));
+            batch_jobs.erase(batch_jobs.begin() + limit, batch_jobs.end());
+        }
+        // AR018: a deferred job has no KV in this context yet. Block until its
+        // prefill finished on the prefill backend, then move the sequence over.
+        // Slots are handed out here, not at enqueue time, so the decode context
+        // never holds a sequence that has not been written yet.
+        int32_t next_deferred_seq = 0;
+        for (auto& j : batch_jobs) {
+            if (j.deferred) j.seq = next_deferred_seq++;
+        }
+        for (size_t i = 0; i < batch_jobs.size(); ++i) {
+            BatchJob& job = batch_jobs[i];
+            if (!job.deferred) continue;
+            PipeResult result = pipe_wait(job.pipe_index);
+            if (!result.status.ok()) {
+                for (auto& j : batch_jobs) j.done = true;
+                batch_jobs.clear();
+                return Status::error(result.status.code,
+                                     "pipeline prefill failed: " + result.status.message);
+            }
+            const auto hs = std::chrono::steady_clock::now();
+            Status hst = backend.set_seq_state(job.seq, result.state);
+            job.handoff_ms = std::chrono::duration<double, std::milli>(
+                                     std::chrono::steady_clock::now() - hs)
+                                     .count();
+            if (!hst.ok()) {
+                for (auto& j : batch_jobs) j.done = true;
+                batch_jobs.clear();
+                return hst;
+            }
+            job.handoff_bytes = result.state.size();
+            job.prefill_ms = result.prefill_ms;
+            job.pos = static_cast<llama_pos>(backend.seq_pos_max(job.seq)) + 1;
+            job.next = greedy(result.logits);
+            job.deferred = false;
+            const double waited = std::chrono::duration<double, std::milli>(
+                                          std::chrono::steady_clock::now() - job.enqueued)
+                                          .count();
+            job.queue_wait_ms = std::max(0.0, waited - result.prefill_ms - job.handoff_ms);
+        }
         const auto batch_begin = std::chrono::steady_clock::now();
         uint32_t steps = 0;
         while (true) {
@@ -572,8 +806,20 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
             sample.seq_id = job.seq;
             sample.decode_ms_per_token =
                     steps > 0 ? batch_ms / static_cast<double>(steps) : 0.0;
+            if (pipeline_mode) {
+                // AR018: in a pipeline the case waited for a decode slot after
+                // its prefill finished. Report the product latencies honestly:
+                // TTFT is the prefill itself, E2E includes the queueing.
+                sample.ttft_ms = job.prefill_ms;
+                sample.ttft_min_ms = job.prefill_ms;
+                sample.e2e_ms = job.prefill_ms + job.queue_wait_ms + batch_ms;
+                sample.queue_wait_ms = job.queue_wait_ms;
+                sample.handoff_ms = job.handoff_ms;
+                sample.handoff_bytes = job.handoff_bytes;
+            }
         }
         batch_jobs.clear();
+        batch_jobs = std::move(deferred_tail);
         // Release every sequence the batch used. Without this the unified KV
         // cache accumulates dead cells across batches and a later prefill can
         // fail to find a slot for its ubatch.
@@ -612,6 +858,8 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
         PrefixCache::create(base.prefix_cache_bytes, backend.fingerprint().to_key(), &cache);
     }
     SparsePrefiller prefilter(&backend, cache.get());
+
+
     // AR015: one snapshot directory per run; empty disables the feature
     // entirely so every existing configuration stays bit-identical.
     KvSnapshotStore* snapshot_store = nullptr;
@@ -650,6 +898,7 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
     // reused across modes/budgets so every ppl sample's quality is a
     // retention ratio against the same dense number.
     std::unordered_map<std::string, double> ppl_dense_ref;
+    bool dense_arm_warned = false;
     for (const auto& c : cases) {
         const std::string context_path =
             (std::filesystem::path(cfg.data_dir) / c.context_path).string();
@@ -1127,6 +1376,18 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
                 for (double budget : cfg.budgets) {
                     if (mode == Mode::Dense && budget < 0.95) continue;
                     if (mode != Mode::Dense && budget >= 0.95) continue;
+                    if ((batching || pipeline_mode) && mode == Mode::Dense) {
+                        // AR018 FR-4: the dense arm writes the whole document
+                        // into whichever context this loop owns. A batch
+                        // context is sized for K sequences and cannot hold a
+                        // full document, so the arm is skipped explicitly
+                        // instead of being measured on a truncated context.
+                        if (warnings && !dense_arm_warned) {
+                            warnings->push_back("dense-arm-disabled-in-batch-mode");
+                            dense_arm_warned = true;
+                        }
+                        continue;
+                    }
                     Config run_cfg = base;
                     run_cfg.mode = mode;
                     // A 0 grid point is the AR007 "let the curve decide"
@@ -1642,7 +1903,7 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
                             popts.seq_id = batch_seq;
                             popts.append = false;
                         } else if (!batch_jobs.empty()) {
-                            const Status fst = flush_batch();
+                            const Status fst = flush_batch(batch_k);
                             if (!fst.ok()) return fst;
                         }
                     }
@@ -1650,7 +1911,50 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
                         // Serial fallback: never inherit the batch's seq_id.
                         popts.seq_id = 0;
                     }
-                    {
+                    // AR018: everything below runs on the decode backend
+                    // unless the case is deferred to the prefill worker, so the
+                    // bookkeeping it produces is declared here and filled in
+                    // either way.
+                    SnapshotKey snapshot_key;
+                    SnapshotPayload snapshot_payload;
+                    SnapshotLoadResult snapshot_load;
+                    SnapshotSaveResult snapshot_save;
+                    std::vector<llama_token> admitted_tokens;
+                    bool snapshot_enabled = false;
+                    bool from_snapshot = false;
+                    const uint32_t reps = std::max<uint32_t>(1, base.repeats);
+                    PrefillStats stats;
+                    std::vector<float> first_logits_owned;
+                    const float* first_logits = nullptr;
+                    double ttft_ms = 0.0;
+                    double ttft_min_ms = 0.0;
+                    std::vector<double> ttft_reps;
+                    std::chrono::steady_clock::time_point last_begin =
+                            std::chrono::steady_clock::now();
+                    bool pipeline_pending = false;
+                    size_t pipeline_index = 0;
+                    if (pipeline_mode && !selection.dense && c.session.empty()) {
+                        PipeTask task;
+                        task.index = pipe_submitted;
+                        task.tokens = tokens;
+                        task.selection = selection;
+                        task.required_ctx = required_ctx;
+                        task.opts = popts;
+                        task.opts.seq_id = 0;
+                        task.opts.append = false;
+                        task.opts.enable_prefix_cache = false;
+                        task.opts.collect_chunk_stats = false;
+                        task.opts.enable_ffn_skip = false;
+                        pipeline_index = task.index;
+                        pipe_submit(std::move(task));
+                        pipeline_pending = true;
+                        stats.prompt_tokens = static_cast<uint32_t>(tokens.size());
+                        stats.selected_tokens =
+                                static_cast<uint32_t>(selection.token_indices.size());
+                        stats.collect_chunk_stats = false;
+                    }
+                    if (!pipeline_pending) {
+                        snapshot_enabled = snapshot_store != nullptr;
                         auto gst = backend.ensure_context(
                                 batch_case ? batch_ctx_cells : required_ctx);
                         if (!gst.ok()) {
@@ -1663,7 +1967,6 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
                                      gst.message);
                             continue;
                         }
-                    }
 
                     // Untimed warmup runs stabilize caches and page in model
                     // weights so the timed repeats measure steady state.
@@ -1690,18 +1993,15 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
                     // provably refers to the same sequence. The cold arm
                     // recomputes and saves; the warm arm loads and skips the
                     // prefill entirely.
-                    SnapshotKey snapshot_key;
                     // The KV holds only the admitted tokens, so the snapshot is
                     // keyed by those (not by the whole prompt): two prompts that
                     // admit the same evidence share one snapshot.
-                    std::vector<llama_token> admitted_tokens;
                     if (snapshot_store != nullptr) {
                         admitted_tokens.reserve(selection.token_indices.size());
                         for (uint32_t index : selection.token_indices) {
                             if (index < tokens.size()) admitted_tokens.push_back(tokens[index]);
                         }
                     }
-                    const bool snapshot_enabled = snapshot_store != nullptr;
                     if (snapshot_enabled) {
                         snapshot_key.model_key = backend.fingerprint().to_key();
                         snapshot_key.policy_key = admission_policy_key(base, plan);
@@ -1725,10 +2025,6 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
                         }
                         snapshot_key.position_hash = hash_positions(effective_positions);
                     }
-                    SnapshotPayload snapshot_payload;
-                    SnapshotLoadResult snapshot_load;
-                    SnapshotSaveResult snapshot_save;
-                    bool from_snapshot = false;
                     if (snapshot_enabled && base.snapshot_use != 0) {
                         // Probe once to decide the arm (hit or not). The timed
                         // loop below redoes the whole load so TTFT includes the
@@ -1742,10 +2038,7 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
                         }
                     }
 
-                    const uint32_t reps = std::max<uint32_t>(1, base.repeats);
-                    std::vector<double> ttft_samples;
-                    PrefillStats stats;
-                    const auto last_begin = std::chrono::steady_clock::now();
+                    last_begin = std::chrono::steady_clock::now();
                     for (uint32_t r = 0; r < reps; ++r) {
                         const auto begin = std::chrono::steady_clock::now();
                         if (from_snapshot) {
@@ -1769,7 +2062,7 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
                             prefill_ok = false;
                             break;
                         }
-                        ttft_samples.push_back(
+                        ttft_reps.push_back(
                             std::chrono::duration<double, std::milli>(first - begin).count());
                     }
                     if (!prefill_ok) {
@@ -1781,9 +2074,12 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
                         continue;
                     }
                     // Median TTFT: robust to scheduler noise on either side.
-                    std::sort(ttft_samples.begin(), ttft_samples.end());
-                    const double ttft_ms = ttft_samples[ttft_samples.size() / 2];
-                    const double ttft_min_ms = ttft_samples.front();
+                    {
+                        std::vector<double> ttft_samples(ttft_reps.begin(), ttft_reps.end());
+                        std::sort(ttft_samples.begin(), ttft_samples.end());
+                        ttft_ms = ttft_samples[ttft_samples.size() / 2];
+                        ttft_min_ms = ttft_samples.front();
+                    }
 
                     if (from_snapshot) {
                         // Rebuild the bookkeeping the rest of the loop reads
@@ -1799,7 +2095,6 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
                         stats.kv_bytes = snapshot_payload.state.size();
                     }
 
-                    std::vector<float> first_logits_owned;
                     if (from_snapshot) {
                         first_logits_owned = snapshot_payload.logits;
                     } else {
@@ -1808,7 +2103,7 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
                             first_logits_owned.assign(raw, raw + backend.n_vocab());
                         }
                     }
-                    const float* first_logits =
+                    first_logits =
                             first_logits_owned.empty() ? nullptr : first_logits_owned.data();
 
                     // AR015: the cold arm persists the prompt KV *before* any
@@ -1826,12 +2121,28 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
                                                                  out_payload);
                         }
                     }
+                    }  // end of the non-pipeline prefill
 
                     std::string generated;
                     double quality = 0.0;
                     double sample_ppl_dense = 0.0;
                     double sample_ppl_sparse = 0.0;
-                    if (c.task == "ppl") {
+                    if (pipeline_pending) {
+                        // AR018: the prefill is running on the other device.
+                        // Queue the case now; flush_batch waits for its KV,
+                        // hands it to this context and decodes it with the
+                        // rest of the batch.
+                        BatchJob job;
+                        job.deferred = true;
+                        job.pipe_index = pipeline_index;
+                        job.max_new = base.max_new_tokens;
+                        job.answer = c.answer;
+                        job.enqueued = std::chrono::steady_clock::now();
+                        job.seq = -1;
+                        batch_jobs.push_back(job);
+                        quality = 0.0;
+                        generated = std::string();
+                    } else if (c.task == "ppl") {
                         // AR004 FR-5: quality is the retention ratio
                         // min(1, ppl_dense/ppl_sparse) =
                         // min(1, exp(lp_sparse - lp_dense)). The raw
@@ -1974,8 +2285,14 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
                         // The case is queued: attach the sample index so the
                         // flush can patch quality/e2e, and flush when full.
                         batch_jobs.back().out_index = out->size() - 1;
-                        if (batch_jobs.size() >= batch_k) {
-                            const Status fst = flush_batch();
+                        // AR018: hold a full batch plus the lookahead so the
+                        // prefill worker still has work while the decoder runs.
+                        const uint32_t ahead = cfg.pipeline_ahead != 0
+                                                       ? cfg.pipeline_ahead
+                                                       : 2 * batch_k;
+                        const uint32_t trigger = pipeline_mode ? batch_k + ahead : batch_k;
+                        if (batch_jobs.size() >= trigger) {
+                            const Status fst = flush_batch(batch_k);
                             if (!fst.ok()) return fst;
                         }
                     }
@@ -1984,8 +2301,13 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
         }
     }
     if (batching) {
-        const Status fst = flush_batch();
-        if (!fst.ok()) return fst;
+        // Drain every remaining job: with a pipeline lookahead the queue is
+        // longer than one batch, so a single flush would leave cases unpatched
+        // (their samples would keep the placeholder quality).
+        while (!batch_jobs.empty()) {
+            const Status fst = flush_batch(batch_k);
+            if (!fst.ok()) return fst;
+        }
         if (batch_effective > 0) {
             log_info("batched decode: K=" + std::to_string(batch_k) +
                      " effective=" + std::to_string(batch_effective) +
@@ -2007,6 +2329,11 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
             sample.n_ubatch = backend.context_options().n_ubatch;
             sample.plan_source = cfg.plan_source ? cfg.plan_source : "default";
             sample.device_state = device_state;
+            if (pipeline_mode) {
+                sample.pipeline_mode = 1;
+                sample.prefill_device = prefill_device_name;
+                sample.prefill_device_state = prefill_device_state;
+            }
             if (sample.n_threads <= 0) {
                 const unsigned hw = std::thread::hardware_concurrency();
                 sample.n_threads = static_cast<int32_t>(hw > 0 ? hw : 4);
@@ -2015,6 +2342,15 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
                 sample.n_threads_batch = sample.n_threads;
             }
         }
+    }
+
+    if (pipe_worker.joinable()) {
+        {
+            std::lock_guard<std::mutex> lk(pipe_mu);
+            pipe_stop = true;
+        }
+        pipe_task_cv.notify_all();
+        pipe_worker.join();
     }
 
     const auto wall_end = std::chrono::steady_clock::now();

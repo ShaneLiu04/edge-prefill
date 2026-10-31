@@ -107,7 +107,13 @@ struct Config {
     // AR017: continuous batching for the generation phase (1 = serial).
     uint32_t decode_batch_size = 1;
     uint32_t decode_batch_ctx = 0;
-    uint32_t decode_batch_max_span = 1024;    std::string dump_selection_dir;
+    uint32_t decode_batch_max_span = 1024;
+    // AR018: prefill/decode separation (see BenchmarkConfig).
+    int pipeline_mode = 0;
+    int32_t pipeline_prefill_gpu_layers = -1;
+    int32_t pipeline_prefill_threads = 0;
+    uint32_t pipeline_ahead = 0;
+    std::string dump_selection_dir;
     // AR008 FR-2: measured execution-combination table. Empty keeps the
     // configured (or default) path — routing is opt-in, exactly like the
     // budget curve.

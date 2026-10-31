@@ -413,6 +413,46 @@ silent serial fallback is visible in the data. Quality is unchanged (36/36 f1);
 exact token identity is not guaranteed because batch shape changes GEMM
 reduction order. See `docs/research.md` §19.
 
+## Disaggregated prefill/decode (AR018)
+
+The two stages want different hardware on an edge box: prefill is compute-heavy
+(GPU 1.6-1.9x faster here), decode is weight-bandwidth-bound (CPU 2.3x cheaper
+per sequence). AR018 gives each stage its own context and its own device:
+
+```
+                     prefill worker thread            main thread
+                     ─────────────────────            ───────────
+ case -> selection ─► PipeTask ─► prefill_backend      BatchJob{deferred}
+                                  (own model+ctx,       |
+                                   n_seq_max = K)       |
+                                  sparse prefill        |
+                                  get_seq_state(0) ─────► pipe_wait(index)
+                                  copy_last_logits              |
+                                                                v
+                                          set_seq_state(seq) on decode_backend
+                                          pos = seq_pos_max(seq)+1
+                                          decode_batch (AR017 lockstep)
+                                          reset_sequence(0..K-1)
+```
+
+Hard requirements discovered by measurement (see `docs/research.md` §20.2):
+
+- both contexts must expose the same number of KV streams (`n_seq_max`), because
+  `llama_state_seq_get_data` serialises per stream;
+- the prefill context is sized `required * 2 * K`: without a unified cache each
+  stream owns `n_ctx/n_seq_max` cells and a ubatch needs a contiguous run;
+- decode sequence slots are assigned at flush time, never at enqueue time (the
+  queue is deliberately longer than one batch);
+- the worker catches llama.cpp's exceptions and is joined by RAII, otherwise an
+  early return destroys a joinable thread and terminates the process.
+
+Audit columns `pipeline_mode`, `prefill_device`, `prefill_device_state`,
+`queue_wait_ms`, `handoff_ms`, `handoff_bytes` make the split visible per case;
+`e2e_ms` includes the queue wait, so the throughput/latency trade-off cannot be
+hidden. Snapshots (AR015) and session cases (AR014) are disabled in this mode
+with a warning rather than silently mangled, and the dense reference arm is
+skipped explicitly (it would need a whole document in a batch-sized context).
+
 ## Chunked prefill
 
 `ChunkScheduler` splits a long prompt into physical ubatches.

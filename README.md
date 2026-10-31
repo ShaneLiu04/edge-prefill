@@ -177,6 +177,10 @@ EDGE_PREFILL_TEST_MODEL=/path/to/model.gguf ./build/edge_prefill_tests
 | `decode_batch_size K` | decode K sequences per forward pass (AR017); 1 = serial | 1 |
 | `decode_batch_ctx N` | total KV cells of the batch context (AR017); 0 = K*1536 | 0 |
 | `decode_batch_max_span N` | longest admitted span allowed to join a batch (AR017) | 1024 |
+| `pipeline_mode 0\|1` | prefill/decode on separate contexts and devices (AR018) | 0 |
+| `pipeline_prefill_gpu_layers N` | GPU layers for the prefill context (AR018); -1 = n_gpu_layers | -1 |
+| `pipeline_prefill_threads N` | threads for the prefill context (AR018); 0 = n_threads | 0 |
+| `pipeline_ahead N` | cases allowed ahead of the decode batch (AR018); 0 = 2K | 0 |
 
 ## Expected results
 
@@ -619,6 +623,47 @@ cases, 2 of 72 batched arms differ by one token.
 `./repro.sh ar017` runs the K sweep matrix, the gate, and rejects injected
 `shared-seq` and `quality-drift` degradations.
 
+### AR018: prefill on one device, decode on the other
+
+On this machine the two stages have opposite device preferences (measured, see
+`benchmarks/results/ar018-disaggregated/REPORT.md`): the GPU prefills 1.6-1.9x
+faster than the CPU, while the CPU decodes 2.3x cheaper per sequence than the
+GPU. AR018 splits them into two contexts and lets them run at the same time:
+
+```
+ case -> GPU context: sparse prefill (AR012/13) -> get_seq_state -> |
+                                                                    v
+        CPU context: set_seq_state -> AR017 batched decode -> answers
+```
+
+The sequence crosses as llama.cpp's own KV state, so the result is exact (36/36
+cases identical f1, 4.6% of arms differ by one token) and the transfer costs
+2.9-3.5 ms / 16-18 MB per case.
+
+```ini
+pipeline_mode = 1              # 0 = single-context (AR017) path
+pipeline_prefill_gpu_layers = 99   # -1 = same as n_gpu_layers
+pipeline_prefill_threads = 0       # 0 = n_threads
+pipeline_ahead = 4                 # lookahead; the overlap comes from this
+```
+
+| arm (16 cases, 8K multi-fact) | wall | per-case E2E |
+| --- | ---: | ---: |
+| serial | 108.2 s | 4703 ms |
+| AR017 batch (K=4) | 100.4 s | 3578 ms |
+| GPU only (prefill+decode) | 118.1 s | 8797 ms |
+| **pipeline (GPU prefill / CPU decode)** | **38.0 s (2.85x serial, 2.65x AR017)** | 12056 ms |
+
+It is a **throughput mode**: a case queues for a decode slot, so single-case
+latency is 3.2-3.4x AR017. The portfolio therefore keeps AR017 as the default
+and offers the pipeline for serving queued work. Constraints are enforced, not
+hidden: snapshots and session cases are disabled in this mode (single-context
+assumptions), the dense arm is skipped explicitly, and both backends run the
+AR016 placement check independently.
+
+`./repro.sh ar018` runs the four-arm interleaved matrix, the 9-check gate and
+rejects injected `no-overlap`, `drop-handoff` and `device-swap` degradations.
+
 ## Repository layout
 
 ```
@@ -629,7 +674,7 @@ tests/          unit + real-model integration tests (SKIP without model)
 benchmarks/     configs, datasets, raw CSV reports, analysis scripts
 scripts/        experiment orchestration; diagnostics/ = archived probes
 specs/          SRS / design / task tracking per change request
-docs/           architecture.md, experiments.md, portfolio.md (AR001-AR017 inventory)
+docs/           architecture.md, experiments.md, portfolio.md (AR001-AR018 inventory)
 ```
 
 ## Reproducibility rules

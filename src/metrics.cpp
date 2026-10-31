@@ -51,7 +51,9 @@ Status Reporter::write_raw_csv(const std::string& path) {
            "n_threads,n_threads_batch,n_ubatch,plan_source,device_state,"
            "predicted_ttft_ms,plan_select_ms,"
            "batch_size,batch_steps,batch_wall_ms,seq_id,decode_ms_per_token,"
-           "generated_hash\n";
+           "generated_hash,"
+           "pipeline_mode,prefill_device,prefill_device_state,queue_wait_ms,"
+           "handoff_ms,handoff_bytes\n";
     out << std::setprecision(10);
     for (const auto& s : samples_) {
         out << s.task << ',' << s.case_id << ',' << s.ttft_ms << ',' << s.e2e_ms << ','
@@ -85,7 +87,12 @@ Status Reporter::write_raw_csv(const std::string& path) {
             << s.predicted_ttft_ms << ',' << s.plan_select_ms << ','
             << s.batch_size << ',' << s.batch_steps << ',' << s.batch_wall_ms << ','
             << s.seq_id << ',' << s.decode_ms_per_token << ','
-            << s.generated_hash << '\n';
+            << s.generated_hash << ',' << s.pipeline_mode << ','
+            << (s.prefill_device.empty() ? (s.device.empty() ? "cpu" : s.device)
+                                         : s.prefill_device)
+            << ',' << (s.prefill_device_state.empty() ? s.device_state : s.prefill_device_state)
+            << ',' << s.queue_wait_ms << ',' << s.handoff_ms << ','
+            << s.handoff_bytes << '\n';
     }
     return Status::success();
 }

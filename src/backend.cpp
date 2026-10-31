@@ -434,8 +434,48 @@ Status LlamaBackend::load_state(const std::vector<uint8_t>& in) {
     return Status::success();
 }
 
-Status LlamaBackend::reset_sequence(int32_t seq_id) {
+Status LlamaBackend::get_seq_state(int32_t seq_id,
+                                   std::vector<uint8_t>* out) const {
+    if (!out) return Status::error(ErrorCode::InvalidArgument, "null state output");
     if (!ctx_) return Status::error(ErrorCode::Cache, "context is not created");
+    const size_t size = llama_state_seq_get_size(ctx_, seq_id);
+    if (size == 0) return Status::error(ErrorCode::Cache, "empty sequence state");
+    out->resize(size);
+    const size_t written = llama_state_seq_get_data(ctx_, out->data(), size, seq_id);
+    if (written != size) {
+        return Status::error(ErrorCode::Cache, "failed to serialize sequence state");
+    }
+    return Status::success();
+}
+
+Status LlamaBackend::set_seq_state(int32_t seq_id,
+                                   const std::vector<uint8_t>& in) {
+    if (!ctx_) return Status::error(ErrorCode::Cache, "context is not created");
+    if (in.size() < 16) {
+        return Status::error(ErrorCode::InvalidArgument, "sequence state too small");
+    }
+    // The target sequence must be empty first: llama.cpp copies the source
+    // cells verbatim, so leftovers from an earlier case would survive.
+    llama_memory_seq_rm(llama_get_memory(ctx_), seq_id, -1, -1);
+    const size_t read = llama_state_seq_set_data(ctx_, in.data(), in.size(), seq_id);
+    if (read != in.size()) {
+        return Status::error(ErrorCode::Cache, "failed to restore sequence state");
+    }
+    return Status::success();
+}
+
+Status LlamaBackend::copy_last_logits(std::vector<float>* out) const {
+    if (!out) return Status::error(ErrorCode::InvalidArgument, "null logits output");
+    if (!ctx_) return Status::error(ErrorCode::Decode, "context is not created");
+    const float* raw = llama_get_logits_ith(ctx_, -1);
+    if (raw == nullptr) {
+        return Status::error(ErrorCode::Decode, "no logits from the last forward pass");
+    }
+    out->assign(raw, raw + n_vocab());
+    return Status::success();
+}
+
+Status LlamaBackend::reset_sequence(int32_t seq_id) {    if (!ctx_) return Status::error(ErrorCode::Cache, "context is not created");
     llama_memory_seq_rm(llama_get_memory(ctx_), seq_id, -1, -1);
     return Status::success();
 }

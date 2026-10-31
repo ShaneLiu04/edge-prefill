@@ -139,6 +139,20 @@ struct BenchmarkConfig {
     // ubatch window per stream, and spans above ~1K were observed to collide
     // with that reservation. 0 = no limit beyond the per-sequence share.
     uint32_t decode_batch_max_span = 1024;
+    // AR018: prefill/decode separation. The prefill runs on its own backend
+    // (its own model instance, so it can sit on a different device) in a worker
+    // thread; the finished sequence is handed to the decode backend as KV state
+    // and decoded there, batched. 0 keeps the single-context path (AR017).
+    bool pipeline_mode = false;
+    // GPU layers for the prefill backend (-1 = same as n_gpu_layers). The
+    // decode backend keeps n_gpu_layers.
+    int32_t pipeline_prefill_gpu_layers = -1;
+    // Threads for the prefill backend (0 = n_threads).
+    int32_t pipeline_prefill_threads = 0;
+    // How many cases may run ahead of the decode batch (0 = 2 * decode_batch_size).
+    // This is what buys the overlap: the worker keeps prefilling while the
+    // decoder works through the batch already in flight.
+    uint32_t pipeline_ahead = 0;
     std::string out_dir;
 };
 

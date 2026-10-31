@@ -1724,6 +1724,10 @@ Status bench_command(const Args& args) {
     bench.cost_b_ms_per_token = cfg.cost_b_ms_per_token;
     bench.cost_r2 = cfg.cost_r2;
     bench.cost_n = cfg.cost_n;
+    bench.pipeline_mode = cfg.pipeline_mode != 0;
+    bench.pipeline_prefill_gpu_layers = cfg.pipeline_prefill_gpu_layers;
+    bench.pipeline_prefill_threads = cfg.pipeline_prefill_threads;
+    bench.pipeline_ahead = cfg.pipeline_ahead;
     bench.decode_batch_size = cfg.decode_batch_size;
     bench.decode_batch_ctx = cfg.decode_batch_ctx;
     bench.decode_batch_max_span = cfg.decode_batch_max_span;

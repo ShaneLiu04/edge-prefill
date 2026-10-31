@@ -16,6 +16,7 @@
 #   ./repro.sh ar015    # AR015 KV snapshots: cold/warm 8 datasets + restart resume + gate
 #   ./repro.sh ar016    # AR016 probe/plan + three-arm matrix + SLA gate + injections
 #   ./repro.sh ar017    # AR017 batched decode: K sweep + interleaved A/B + gate
+#   ./repro.sh ar018    # AR018 prefill/decode split: 4-arm matrix + overlap gate
 #
 # Every step is fail-fast (set -euo pipefail) and prints the exact command
 # it runs. Models are downloaded with SHA256 verification into ./models
@@ -374,6 +375,36 @@ case "${SUITE}" in
             --sla-target-ms 2500 > /dev/null 2>&1 \
             && fail "gate did not reject the injected cost-model skew"
         OUT="${ROOT}/benchmarks/results/ar016-exec-plan"
+        ;;
+    ar018)
+        # AR018: prefill/decode separation. The pipeline runs the sparse
+        # prefill on the GPU context and the batched decode on the CPU context,
+        # handing the sequence over as KV state. The matrix interleaves four
+        # arms (serial / AR017 batch / GPU-only / pipeline) so host drift hits
+        # every arm equally; the gate then rejects a non-overlapping pipeline,
+        # a dropped handoff and a device swap.
+        python3 benchmarks/scripts/ar018_matrix.py \
+            --plan-dir benchmarks/results/ar016-exec-plan/probe-plan \
+            --datasets explen/len4k,deep/multifact8k,deep/multifact8k-hard \
+            --arms serial,batch,gpuall,pipeline --k 4 --rounds 2 --force \
+            --out benchmarks/results/ar018-disaggregated \
+            || fail "AR018 matrix failed"
+        python3 benchmarks/scripts/ar018_report.py \
+            benchmarks/results/ar018-disaggregated --gate \
+            || fail "AR018 pipeline is slower, lossy, or not actually overlapping"
+        python3 benchmarks/scripts/ar018_report.py \
+            benchmarks/results/ar018-disaggregated --gate --inject no-overlap \
+            > /dev/null 2>&1 \
+            && fail "gate did not reject the injected non-overlapping pipeline"
+        python3 benchmarks/scripts/ar018_report.py \
+            benchmarks/results/ar018-disaggregated --gate --inject drop-handoff \
+            > /dev/null 2>&1 \
+            && fail "gate did not reject the dropped KV handoff"
+        python3 benchmarks/scripts/ar018_report.py \
+            benchmarks/results/ar018-disaggregated --gate --inject device-swap \
+            > /dev/null 2>&1 \
+            && fail "gate did not reject the injected device swap"
+        OUT="${ROOT}/benchmarks/results/ar018-disaggregated"
         ;;
     ar017)
         # AR017: batched decode. The K sweep matrix checks quality/audit columns

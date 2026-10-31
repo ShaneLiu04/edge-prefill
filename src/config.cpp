@@ -276,6 +276,18 @@ Status parse_config_file(const std::string& path, Config* out) {
         } else if (key == "decode_batch_max_span") {
             if (!parse_u64(value, &u)) goto bad_value;
             out->decode_batch_max_span = static_cast<uint32_t>(u);
+        } else if (key == "pipeline_mode") {
+            if (!parse_i64(value, &i)) goto bad_value;
+            out->pipeline_mode = i != 0;
+        } else if (key == "pipeline_prefill_gpu_layers") {
+            if (!parse_i64(value, &i)) goto bad_value;
+            out->pipeline_prefill_gpu_layers = static_cast<int32_t>(i);
+        } else if (key == "pipeline_prefill_threads") {
+            if (!parse_i64(value, &i)) goto bad_value;
+            out->pipeline_prefill_threads = static_cast<int32_t>(i);
+        } else if (key == "pipeline_ahead") {
+            if (!parse_u64(value, &u)) goto bad_value;
+            out->pipeline_ahead = static_cast<uint32_t>(u);
         } else if (key == "allow_cpu_fallback") {
             if (!parse_i64(value, &i)) goto bad_value;
             out->allow_cpu_fallback = static_cast<int>(i);
