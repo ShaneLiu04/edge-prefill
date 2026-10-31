@@ -1,9 +1,57 @@
-# EdgePrefill
+<p align="center">
+  <img src="docs/assets/cover.png" alt="EdgePrefill AR018 cover" width="100%">
+</p>
+
+<p align="center">
+  <img alt="C++17" src="https://img.shields.io/badge/C%2B%2B-17-0F766E?style=flat-square">
+  <img alt="CMake 3.20+" src="https://img.shields.io/badge/CMake-3.20%2B-0F766E?style=flat-square">
+  <img alt="llama.cpp pinned commit" src="https://img.shields.io/badge/llama.cpp-3bb63cbc-334155?style=flat-square">
+  <img alt="CPU + CUDA" src="https://img.shields.io/badge/platform-CPU%20%2B%20CUDA-334155?style=flat-square">
+  <img alt="AR018 ST" src="https://img.shields.io/badge/status-AR018%20ST-B45309?style=flat-square">
+  <img alt="Tests" src="https://img.shields.io/badge/tests-204%20PASS-0F766E?style=flat-square">
+</p>
+
+<h1 align="center">EdgePrefill</h1>
+
+<p align="center">
+  面向端侧长上下文大模型的分层稀疏 Prefill 引擎<br>
+  <sub>Disaggregated prefill/decode / batched decode / verified execution plans / compact KV</sub>
+</p>
+
+<p align="center">
+  <a href="https://gitee.com/liu-xingyan04/edge-prefill">Gitee</a> /
+  <a href="https://github.com/ShaneLiu04/edge-prefill">GitHub</a> /
+  <a href="#中文速览">中文速览</a> /
+  <a href="#quick-start-linuxwsl2">快速开始</a> /
+  <a href="#expected-results">结果</a> /
+  <a href="#reproducibility-rules">复现</a>
+</p>
+
+---
+
+**最新状态：** Gitee `17bd466`（AR018，2026-10-31），tags `ar004-v1.0` 到 `ar018-v1.0`。GitHub 仓库同步该快照。最新全量真机测试 **204 PASS / 0 FAIL**。
 
 Real-GGUF, prefill-stage acceleration for edge-class CPUs/GPUs, built directly
 on a pinned [llama.cpp](https://github.com/ggml-org/llama.cpp) commit. No
 mocks, no synthetic timings: every number in `benchmarks/results/` comes from
 a real model run with the exact command recorded alongside it.
+
+## 中文速览
+
+**一条主线：** AR001-AR011 用证据准入把稀疏 prefill 做到 40-192x dense；AR012 用句子补全修复多事实边界；AR013 把 KV 压到准入 span 并支持 64K 文档；AR014 让会话只解码新增证据；AR015 用内容寻址快照跨进程热启动；AR016 把执行计划、设备放置和 SLA 预算变成可验证对象；AR017 把解码批成一次前向；AR018 把 GPU 稀疏预填充与 CPU 批解码拆成双上下文流水线。
+
+| 版本 | 机制 | 关键结果 |
+| --- | --- | --- |
+| **AR018** | GPU 稀疏 prefill / CPU 批 decode，双上下文 + KV 状态交接 | 8K 多事实 16 用例：serial 108.2 s -> **pipeline 38.0 s**（**2.85x** serial，2.65x AR017）；36/36 f1 相同；交接 2.9-3.5 ms / 16-18 MB；9/9 门禁。**吞吐模式，不设为默认**；单例 E2E 3.2-3.4x AR017。 |
+| **AR017** | 多序列批解码（decode batch） | K=2：decode wall **2.01x**，单例 E2E **0.89x**；K=4 2.74x / 0.71x；36 用例 f1 逐例相同；10/10 门禁。推荐 K=2。 |
+| **AR016** | ExecPlan + 设备放置校验 + 成本模型 / SLA | bench 真正使用 12 线程（此前 16）；8K/32K/64K TTFT 6117/6594/6407 -> **4193/4352/4376 ms**；SLA 2500 ms 目标下约 **2.2 s**；58 用例 × 3 臂 f1 相同；9/9 门禁。 |
+| **AR015** | 内容寻址 KV 快照 + 末位 logits | warm TTFT 为 cold 的 **0.027-0.046x**；快照 = 已用 KV + 0.6 MB；质量逐例相同。**AR016 勘误：原先标注的 GPU cold 结果实为 CPU**；warm 数字仍成立，cold 见 `ar015-kv-snapshot-gpu/ERRATUM.md`。 |
+| **AR013** | compact context / position compaction | 旧 bench KV 896 MiB -> **7 MiB (4K) / 21 MiB (32K)**；64K on 32K-trained model q=1.00；AR011 的 40-192x vs dense 基线保持。 |
+| **AR012** | sentence-complete admission | multi-fact easy/hard 0.887/0.739；facts_in_context 1.000/0.990。 |
+
+**诚实边界：** AR018 是排队吞吐模式，单例延迟换吞吐；默认组合仍是 AR013 + AR016 + AR017(K=2)。AR017 批解码不改变 prefill，K=8 会因 KV 份额触发串行回退。AR016 修正了 AR015 的 GPU 放置误记；所有新结果都带 `device / gpu_layers_offloaded / device_state` 审计列。
+
+**证据入口：** [AR018 REPORT](benchmarks/results/ar018-disaggregated/REPORT.md)、[AR017 REPORT](benchmarks/results/ar017-batched-decode/REPORT.md)、[AR016 REPORT](benchmarks/results/ar016-exec-plan/REPORT.md)、[AR015 REPORT](benchmarks/results/ar015-kv-snapshot/REPORT.md)、[AR013 REPORT](benchmarks/results/ar013-compact-context/REPORT.md)。每个加速数字都与质量同表；无 mock、无伪造计时。
 
 ## What it does
 
