@@ -377,6 +377,42 @@ misconfigured or silently-downgraded placement can no longer produce a
 plausible-looking number. `docs/research.md` §18 has the measurements and the
 AR015 erratum that motivated this.
 
+## Batched decode (AR017)
+
+Prefill is per-sequence by nature (sparse gather => per-sequence positions and
+mask => no shared graph), but the decode step is one token per sequence and can
+share a single forward pass:
+
+```
+bench: cases join a BatchJob queue (one seq_id per case)
+        |  eligible: !selection.dense && session.empty()
+        |            && required_ctx <= ctx/K/2 && <= decode_batch_max_span
+        v
+   Backend::ensure_context(K * decode_batch_ctx)    // sized once, before any prefill
+        |  prefill(case_tokens, seq_id = i)          // one prefilled sequence per case
+        v
+   flush_batch(): while any sequence alive
+        |  pos_i = seq_pos_max(i) + 1               // never from global stats
+        v
+   Backend::decode_batch(tokens, seq_ids, positions, logits_out)
+        |
+        v
+   reset_sequence(0..K-1)   // release every cell, or later prefill starves
+
+constraints that drive the code:
+  - unified KV needs ~2x admitted span per sequence, so per_seq = ctx/K/2;
+  - growing the context re-creates it and wipes prefilled KV => size up front,
+    fall back to serial (batch_size=1) when a case does not fit;
+  - snapshots (AR015) assume seq 0 => disabled in batch mode;
+  - `decode_batch` rejects duplicate seq_ids (two cases must never share KV).
+```
+
+Audit columns (`batch_size`, `batch_steps`, `batch_wall_ms`, `seq_id`,
+`decode_ms_per_token`, `generated_hash`) report the realised batching, so a
+silent serial fallback is visible in the data. Quality is unchanged (36/36 f1);
+exact token identity is not guaranteed because batch shape changes GEMM
+reduction order. See `docs/research.md` §19.
+
 ## Chunked prefill
 
 `ChunkScheduler` splits a long prompt into physical ubatches.

@@ -174,6 +174,9 @@ EDGE_PREFILL_TEST_MODEL=/path/to/model.gguf ./build/edge_prefill_tests
 | `budget_target_ms F` | shrink the budget until the predicted TTFT fits (AR016) | 0 (off) |
 | `cost_a_ms` / `cost_b_ms_per_token` | fitted cost model, from `edge-prefill probe` (AR016) | unset |
 | `allow_cpu_fallback 0\|1` | permit a requested-GPU run to continue on CPU (AR016) | 0 |
+| `decode_batch_size K` | decode K sequences per forward pass (AR017); 1 = serial | 1 |
+| `decode_batch_ctx N` | total KV cells of the batch context (AR017); 0 = K*1536 | 0 |
+| `decode_batch_max_span N` | longest admitted span allowed to join a batch (AR017) | 1024 |
 
 ## Expected results
 
@@ -570,6 +573,52 @@ Same quality, half the wait, on every dataset:
 `./repro.sh ar016` runs the probe, the three-arm matrix, the gate, and rejects a
 cost-model skew injection.
 
+### AR017: one decode step for many sequences
+
+Every case above still paid its generation tokens one at a time, one case at a
+time. AR017 batches the *decode* phase: N cases that are already prefilled each
+contribute one token, and llama.cpp decodes them in a single forward pass
+(`decode_batch`). Prefill is untouched — the sparse gather keeps a different
+position map and mask per sequence, so it cannot share a graph.
+
+| | serial (K=1) | K=2 | K=4 | K=8 |
+| --- | ---: | ---: | ---: | ---: |
+| decode wall (interleaved A/B) | 1.00x | **2.01x** | 2.74x | 2.51x |
+| single-case end-to-end | 1.00x | 0.89x | 0.71x | 0.39x |
+| f1 (36 cases) | identical | identical | identical | identical |
+
+K=2 is the recommended point: decode throughput doubles while a single case
+still finishes only 11% later. Larger K trades per-case latency for aggregate
+throughput, and K=8 loses to K=4 because the per-sequence KV share (`decode_batch_ctx`
+split K ways) starts pushing cases onto the serial fallback.
+
+```bash
+# batch the decode of up to 4 cases whose admitted span fits the KV share
+printf 'decode_batch_size = 4\ndecode_batch_ctx = 12288\n' >> conf
+./build/edge-prefill bench --config conf
+```
+
+```ini
+decode_batch_size = 2       # 1 = serial; K = sequences decoded per step
+decode_batch_ctx = 6144     # total KV cells of the batch context (0 = K*1536)
+decode_batch_max_span = 1024 # longest admitted span that may join a batch
+```
+
+The audit columns say what actually happened rather than what was requested:
+`batch_size`, `batch_steps`, `batch_wall_ms`, `seq_id`, `decode_ms_per_token`,
+`generated_hash`. A case that does not fit the KV share, or a session case
+(AR014), runs serially and reports `batch_size=1` — never silently.
+
+Constraints are real and recorded in the report: the batch context must be sized
+*before* the first sequence is prefilled (`ensure_context` growth wipes the KV of
+every prefilled sequence), snapshots are disabled in batch mode (AR015 snapshots
+assume seq 0), and an exact `generated_hash` match is not guaranteed because the
+batch shape changes GEMM reduction order — quality (f1) is identical on all 36
+cases, 2 of 72 batched arms differ by one token.
+
+`./repro.sh ar017` runs the K sweep matrix, the gate, and rejects injected
+`shared-seq` and `quality-drift` degradations.
+
 ## Repository layout
 
 ```
@@ -580,7 +629,7 @@ tests/          unit + real-model integration tests (SKIP without model)
 benchmarks/     configs, datasets, raw CSV reports, analysis scripts
 scripts/        experiment orchestration; diagnostics/ = archived probes
 specs/          SRS / design / task tracking per change request
-docs/           architecture.md, experiments.md, portfolio.md (AR001-AR016 inventory)
+docs/           architecture.md, experiments.md, portfolio.md (AR001-AR017 inventory)
 ```
 
 ## Reproducibility rules

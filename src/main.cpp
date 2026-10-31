@@ -1724,6 +1724,9 @@ Status bench_command(const Args& args) {
     bench.cost_b_ms_per_token = cfg.cost_b_ms_per_token;
     bench.cost_r2 = cfg.cost_r2;
     bench.cost_n = cfg.cost_n;
+    bench.decode_batch_size = cfg.decode_batch_size;
+    bench.decode_batch_ctx = cfg.decode_batch_ctx;
+    bench.decode_batch_max_span = cfg.decode_batch_max_span;
     bench.weights = cfg.weights;
     bench.weights_overridden = cfg.weights_overridden;
     bench.sink_blocks = cfg.sink_blocks;

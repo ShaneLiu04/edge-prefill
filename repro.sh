@@ -14,6 +14,8 @@
 #   ./repro.sh ar013    # AR013 compact context: matrix + KV/latency/capability gate
 #   ./repro.sh ar014    # AR014 session KV reuse: multiturn two arms + gate + injections
 #   ./repro.sh ar015    # AR015 KV snapshots: cold/warm 8 datasets + restart resume + gate
+#   ./repro.sh ar016    # AR016 probe/plan + three-arm matrix + SLA gate + injections
+#   ./repro.sh ar017    # AR017 batched decode: K sweep + interleaved A/B + gate
 #
 # Every step is fail-fast (set -euo pipefail) and prints the exact command
 # it runs. Models are downloaded with SHA256 verification into ./models
@@ -372,6 +374,34 @@ case "${SUITE}" in
             --sla-target-ms 2500 > /dev/null 2>&1 \
             && fail "gate did not reject the injected cost-model skew"
         OUT="${ROOT}/benchmarks/results/ar016-exec-plan"
+        ;;
+    ar017)
+        # AR017: batched decode. The K sweep matrix checks quality/audit columns
+        # and capacity; the interleaved A/B is the authoritative timing (host
+        # drift hits every arm equally); the gate then rejects shared-seq and
+        # quality-drift injections.
+        python3 benchmarks/scripts/ar017_matrix.py \
+            --bin "${BIN}" --model "${MAIN_MODEL}" \
+            --plan-dir benchmarks/results/ar016-exec-plan/probe-plan \
+            --datasets explen/len4k,deep/multifact8k,deep/multifact8k-hard \
+            --arms 1,2,4 --repeats 2 --warmup 1 --force \
+            --out benchmarks/results/ar017-batched-decode \
+            || fail "AR017 matrix failed"
+        EDGE_PREFILL_MODEL="${MAIN_MODEL}" EDGE_PREFILL_BIN="${BIN}" \
+            bash benchmarks/scripts/ar017_ab.sh deep/multifact8k 3 32 \
+            || fail "AR017 interleaved A/B failed"
+        python3 benchmarks/scripts/ar017_report.py \
+            benchmarks/results/ar017-batched-decode --gate \
+            || fail "AR017 batching is slower, lossy, or silently serial"
+        python3 benchmarks/scripts/ar017_report.py \
+            benchmarks/results/ar017-batched-decode --gate --inject shared-seq \
+            > /dev/null 2>&1 \
+            && fail "gate did not reject the injected shared-sequence batch"
+        python3 benchmarks/scripts/ar017_report.py \
+            benchmarks/results/ar017-batched-decode --gate --inject quality-drift \
+            > /dev/null 2>&1 \
+            && fail "gate did not reject the injected answer drift"
+        OUT="${ROOT}/benchmarks/results/ar017-batched-decode"
         ;;
     ar009)
         # AR009 FR-3: regenerate the deterministic multi-fact families, run the

@@ -103,7 +103,11 @@ struct Config {
     // AR016 FR-1: permit a silent-looking downgrade from a requested GPU
     // placement. Off by default: requesting GPU layers and getting zero is an
     // error, because that is how the AR015 GPU record was mislabelled.
-    int allow_cpu_fallback = 0;    std::string dump_selection_dir;
+    int allow_cpu_fallback = 0;
+    // AR017: continuous batching for the generation phase (1 = serial).
+    uint32_t decode_batch_size = 1;
+    uint32_t decode_batch_ctx = 0;
+    uint32_t decode_batch_max_span = 1024;    std::string dump_selection_dir;
     // AR008 FR-2: measured execution-combination table. Empty keeps the
     // configured (or default) path — routing is opt-in, exactly like the
     // budget curve.

@@ -267,6 +267,15 @@ Status parse_config_file(const std::string& path, Config* out) {
         } else if (key == "cost_n") {
             if (!parse_u64(value, &u)) goto bad_value;
             out->cost_n = static_cast<uint32_t>(u);
+        } else if (key == "decode_batch_size") {
+            if (!parse_u64(value, &u)) goto bad_value;
+            out->decode_batch_size = static_cast<uint32_t>(u);
+        } else if (key == "decode_batch_ctx") {
+            if (!parse_u64(value, &u)) goto bad_value;
+            out->decode_batch_ctx = static_cast<uint32_t>(u);
+        } else if (key == "decode_batch_max_span") {
+            if (!parse_u64(value, &u)) goto bad_value;
+            out->decode_batch_max_span = static_cast<uint32_t>(u);
         } else if (key == "allow_cpu_fallback") {
             if (!parse_i64(value, &i)) goto bad_value;
             out->allow_cpu_fallback = static_cast<int>(i);

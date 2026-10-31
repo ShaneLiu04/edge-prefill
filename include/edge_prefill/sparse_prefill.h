@@ -24,6 +24,9 @@ public:
         // previous turn, so the KV prefix built by earlier turns is reused
         // verbatim. Off = the AR013 behaviour (every prefill starts at 0).
         bool append = false;
+        // AR017: which KV sequence this prefill writes. Batched decoding keeps
+        // one sequence per in-flight case, so a prefill may target seq != 0.
+        int32_t seq_id = 0;
         uint64_t ffn_skip_mask = 0;
         bool collect_chunk_stats = true;
         // Honor selection.attention_indices with per-chunk gather

@@ -435,7 +435,35 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
     // letting llama.cpp pick the training context. 0 keeps the lazy behaviour:
     // the context starts at the default and grows on demand through
     // LlamaBackend::ensure_context to the span the case actually writes.
-    ctx_opts.n_ctx = cfg.n_ctx != 0 ? cfg.n_ctx : kSeedContextCells;
+    // AR017: a decode batch keeps every in-flight sequence resident at once, so
+    // the context must be sized up front -- growing it mid-batch would wipe the
+    // KV of the sequences already prefilled.
+    const uint32_t batch_k = std::max<uint32_t>(1, cfg.decode_batch_size);
+    const bool batching = batch_k > 1;
+    uint32_t batch_ctx_cells = 0;
+    if (batching) {
+        // Measured on this llama.cpp build: a sequence resident in a
+        // multi-sequence unified cache needs roughly 2x its token span in cells
+        // (the ubatch window is reserved per stream). The default leaves that
+        // factor plus one admission span of headroom; `per_seq` below then caps
+        // the admitted span at half of the per-sequence share.
+        batch_ctx_cells = cfg.decode_batch_ctx != 0
+                                  ? cfg.decode_batch_ctx
+                                  : batch_k * 4096u;
+        const uint32_t train = static_cast<uint32_t>(
+                std::max<int32_t>(0, llama_model_n_ctx_train(backend.model())));
+        if (train > 0 && batch_ctx_cells > train) batch_ctx_cells = train;
+    }
+    ctx_opts.n_ctx = batching
+                             ? batch_ctx_cells
+                             : (cfg.n_ctx != 0 ? cfg.n_ctx : kSeedContextCells);
+    if (batching) {
+        ctx_opts.n_seq_max = batch_k;
+    }
+    // AR017: snapshot save/load is sequence-0 only (AR015), so a batched run
+    // cannot use it without corrupting a non-zero sequence. Disabling is the
+    // honest option: a warning, not a silent wrong restore.
+
     // AR016 FR-1: the plan's execution knobs are honoured. 0 keeps the old
     // behaviour (auto threads, 512 ubatch, gather-friendly non-flash graph).
     ctx_opts.n_ubatch = cfg.n_ubatch != 0 ? cfg.n_ubatch : 512;
@@ -453,6 +481,107 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
         LlamaBackend::shutdown();
         return st;
     }
+
+    // AR017 FR-2: deferred generation queue. Each case runs its own admission and
+    // prefill on its own KV sequence; the next tokens are then advanced together,
+    // one forward pass per step for the whole batch. Samples are pushed with all
+    // audit fields filled except the generation-derived ones, and patched here.
+    auto text_hash = [](const std::string& text) {
+        uint64_t hash = 1469598103934665603ull;
+        for (unsigned char c : text) {
+            hash ^= static_cast<uint64_t>(c);
+            hash *= 1099511628211ull;
+        }
+        return hash;
+    };
+    struct BatchJob {
+        int32_t seq = 0;
+        llama_token next = 0;
+        llama_pos pos = 0;
+        uint32_t max_new = 0;
+        uint32_t steps = 0;
+        bool done = false;
+        std::string generated;
+        std::string answer;
+        size_t out_index = 0;
+        std::chrono::steady_clock::time_point enqueued;
+        double ttft_ms = 0.0;
+    };
+    std::vector<BatchJob> batch_jobs;
+    uint32_t batch_steps_total = 0;
+    uint32_t batch_effective = 0;
+    auto flush_batch = [&]() -> Status {
+        if (batch_jobs.empty()) return Status::success();
+        const auto batch_begin = std::chrono::steady_clock::now();
+        uint32_t steps = 0;
+        while (true) {
+            std::vector<size_t> active;
+            for (size_t i = 0; i < batch_jobs.size(); ++i) {
+                if (!batch_jobs[i].done) active.push_back(i);
+            }
+            if (active.empty()) break;
+            std::vector<llama_token> toks;
+            std::vector<int32_t> seqs;
+            std::vector<llama_pos> poss;
+            toks.reserve(active.size());
+            seqs.reserve(active.size());
+            poss.reserve(active.size());
+            for (size_t i : active) {
+                toks.push_back(batch_jobs[i].next);
+                seqs.push_back(batch_jobs[i].seq);
+                poss.push_back(batch_jobs[i].pos);
+            }
+            std::vector<std::vector<float>> logits;
+            const Status st = backend.decode_batch(toks, seqs, poss, &logits);
+            if (!st.ok()) {
+                for (auto& job : batch_jobs) job.done = true;
+                batch_jobs.clear();
+                return st;
+            }
+            for (size_t k = 0; k < active.size(); ++k) {
+                BatchJob& job = batch_jobs[active[k]];
+                std::string piece;
+                backend.token_to_piece(job.next, &piece);
+                job.generated += piece;
+                job.pos += 1;
+                job.steps += 1;
+                if (job.next == llama_vocab_eos(backend.vocab()) ||
+                    job.steps >= job.max_new) {
+                    job.done = true;
+                    continue;
+                }
+                job.next = greedy(logits[k]);
+            }
+            ++steps;
+        }
+        batch_steps_total += steps;
+        const auto batch_end = std::chrono::steady_clock::now();
+        const double batch_ms =
+                std::chrono::duration<double, std::milli>(batch_end - batch_begin).count();
+        batch_effective = std::max<uint32_t>(batch_effective,
+                                             static_cast<uint32_t>(batch_jobs.size()));
+        for (auto& job : batch_jobs) {
+            if (job.out_index >= out->size()) continue;
+            Sample& sample = (*out)[job.out_index];
+            sample.quality = f1_score(job.generated, job.answer);
+            sample.generated_hash = text_hash(job.generated);
+            sample.e2e_ms = job.ttft_ms + batch_ms;
+            sample.batch_size = static_cast<uint32_t>(batch_jobs.size());
+            sample.batch_steps = steps;
+            sample.batch_wall_ms = batch_ms;
+            sample.seq_id = job.seq;
+            sample.decode_ms_per_token =
+                    steps > 0 ? batch_ms / static_cast<double>(steps) : 0.0;
+        }
+        batch_jobs.clear();
+        // Release every sequence the batch used. Without this the unified KV
+        // cache accumulates dead cells across batches and a later prefill can
+        // fail to find a slot for its ubatch.
+        for (uint32_t s = 0; s < batch_k; ++s) {
+            backend.reset_sequence(static_cast<int32_t>(s));
+        }
+        return Status::success();
+    };
 
     // AR003: load and validate the offline head profile once. A missing or
     // mismatched profile downgrades the run to the scalar path with a
@@ -486,7 +615,14 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
     // AR015: one snapshot directory per run; empty disables the feature
     // entirely so every existing configuration stays bit-identical.
     KvSnapshotStore* snapshot_store = nullptr;
-    if (!base.snapshot_dir.empty()) {
+    if (batching && !base.snapshot_dir.empty()) {
+        // AR017: snapshot save/load is sequence-0 only (AR015); a batched run
+        // would restore into the wrong sequence. Disable with a warning rather
+        // than silently corrupting KV.
+        if (warnings) warnings->push_back("snapshot-disabled-in-batch-mode");
+        log_warn("decode_batch_size>1 disables KV snapshots (sequence-0 only)");
+    }
+    if (!base.snapshot_dir.empty() && !batching) {
         auto sst = KvSnapshotStore::create(base.snapshot_dir, base.snapshot_max_bytes,
                                            &snapshot_store);
         if (!sst.ok()) {
@@ -822,6 +958,7 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
                                         : 0.0;
                         sample.kv_bytes = stats.kv_bytes;
                         sample.quality = f1_score(generated, c.answer);
+                        sample.generated_hash = text_hash(generated);
                         sample.dense = false;
                         sample.prompt_tokens = stats.prompt_tokens;
                         sample.selected_tokens = stats.selected_tokens;
@@ -1487,8 +1624,35 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
                                   " for case " + c.id + "@" + std::to_string(length));
                         continue;
                     }
+                    // AR017 FR-4: a batch case must fix its KV capacity before
+                    // any sequence is prefilled. If this case would need more
+                    // than its share, flush the current batch first and let the
+                    // serial sizing path take over (never grow mid-batch: growth
+                    // re-creates the context and wipes every prefilled sequence).
+                    int32_t batch_seq = 0;
+                    bool batch_case = false;
+                    if (batching && !selection.dense && c.session.empty()) {
+                        const uint32_t per_seq = batch_ctx_cells / batch_k / 2;
+                        const bool span_ok =
+                                base.decode_batch_max_span == 0 ||
+                                required_ctx <= base.decode_batch_max_span;
+                        if (required_ctx <= per_seq && span_ok) {
+                            batch_case = true;
+                            batch_seq = static_cast<int32_t>(batch_jobs.size());
+                            popts.seq_id = batch_seq;
+                            popts.append = false;
+                        } else if (!batch_jobs.empty()) {
+                            const Status fst = flush_batch();
+                            if (!fst.ok()) return fst;
+                        }
+                    }
+                    if (!batch_case) {
+                        // Serial fallback: never inherit the batch's seq_id.
+                        popts.seq_id = 0;
+                    }
                     {
-                        auto gst = backend.ensure_context(required_ctx);
+                        auto gst = backend.ensure_context(
+                                batch_case ? batch_ctx_cells : required_ctx);
                         if (!gst.ok()) {
                             if (warnings) {
                                 warnings->push_back("context-grow-failed:" + c.id + "@" +
@@ -1512,7 +1676,11 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
                         }
                     }
                     if (!prefill_ok) {
-                        if (warnings) warnings->push_back("prefill-failed:" + c.id);
+                        if (warnings) {
+                            warnings->push_back("prefill-failed:" + c.id +
+                                                ":" + st.message);
+                        }
+                        log_warn("prefill failed for " + c.id + ": " + st.message);
                         continue;
                     }
 
@@ -1605,7 +1773,11 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
                             std::chrono::duration<double, std::milli>(first - begin).count());
                     }
                     if (!prefill_ok) {
-                        if (warnings) warnings->push_back("prefill-failed:" + c.id);
+                        if (warnings) {
+                            warnings->push_back("prefill-failed:" + c.id +
+                                                ":" + st.message);
+                        }
+                        log_warn("prefill failed for " + c.id + ": " + st.message);
                         continue;
                     }
                     // Median TTFT: robust to scheduler noise on either side.
@@ -1679,6 +1851,24 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
                         quality = std::min(1.0, std::exp(lp_sparse - ppl_lp_dense));
                         sample_ppl_dense = std::exp(-ppl_lp_dense);
                         sample_ppl_sparse = std::exp(-lp_sparse);
+                    } else if (first_logits && batch_case) {
+                        // AR017: hand the first token to the batch and end this
+                        // iteration; quality/e2e are patched when the batch is
+                        // flushed. The audit fields below stay on the serial
+                        // path's definition so a batched row is comparable.
+                        BatchJob job;
+                        job.seq = batch_seq;
+                        job.next = greedy(std::vector<float>(
+                                first_logits, first_logits + backend.n_vocab()));
+                        // Ground truth, not stats: llama.cpp asserts pos ==
+                        // last_pos + 1 for the sequence's first decode token.
+                        job.pos = static_cast<llama_pos>(backend.seq_pos_max(job.seq)) + 1;
+                        job.max_new = base.max_new_tokens;
+                        job.answer = c.answer;
+                        job.ttft_ms = ttft_min_ms;
+                        job.enqueued = std::chrono::steady_clock::now();
+                        batch_jobs.push_back(job);
+                        quality = 0.0;
                     } else if (first_logits) {
                         std::vector<float> logits(first_logits,
                                                   first_logits + backend.n_vocab());
@@ -1733,6 +1923,7 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
                     sample.semantic_score_ms = embed.loaded() ? select_ms : 0.0;
                     sample.draft_score_ms = 0.0;
                     sample.qg_source = qg_source;
+                    sample.generated_hash = text_hash(generated);
                     sample.budget_source =
                         sla_budget_source.empty() ? plan.budget_source : sla_budget_source;
                     sample.predicted_ttft_ms = sla_predicted_ms;
@@ -1779,8 +1970,26 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
                              " quality=" + std::to_string(sample.quality) +
                              " generated=" + generated);
                     out->push_back(sample);
+                    if (batch_case) {
+                        // The case is queued: attach the sample index so the
+                        // flush can patch quality/e2e, and flush when full.
+                        batch_jobs.back().out_index = out->size() - 1;
+                        if (batch_jobs.size() >= batch_k) {
+                            const Status fst = flush_batch();
+                            if (!fst.ok()) return fst;
+                        }
+                    }
                 }
             }
+        }
+    }
+    if (batching) {
+        const Status fst = flush_batch();
+        if (!fst.ok()) return fst;
+        if (batch_effective > 0) {
+            log_info("batched decode: K=" + std::to_string(batch_k) +
+                     " effective=" + std::to_string(batch_effective) +
+                     " steps=" + std::to_string(batch_steps_total));
         }
     }
 

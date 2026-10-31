@@ -1,6 +1,6 @@
 # AR 全景与最佳组合
 
-这份文档把 AR001-AR016 拆成三类问题：**哪些进了最终组合**、**哪些保留为可选开关**、
+这份文档把 AR001-AR017 拆成三类问题：**哪些进了最终组合**、**哪些保留为可选开关**、
 **哪些被判为负结果并关掉**；最后给出"合到一起"的配置、逐数据集实测和复现命令。
 
 所有数字来自真实 GGUF 推理（Qwen2.5-1.5B-Instruct Q4_K_M，16 线程，Xeon Gold 6234），
@@ -26,6 +26,7 @@
 | AR014 | 会话级 KV 复用：append-only 会话 log + 增量解码 `session_reuse` |
 | AR015 | 持久化 KV 快照（内容寻址）+ 跨进程热启动 `snapshot_dir` | warm TTFT 降到 cold 的 0.027–0.046×（8 数据集，质量逐例相同）；多轮重启续跑 40/40 轮命中；快照 = 已用 KV + 0.6 MB logits | 端侧冷启动场景开启（库默认关闭） | 多轮第 2–5 轮 TTFT 降到重算臂的 0.27×/0.26×/0.20×/0.13×；40 轮里 39 轮 f1 逐位相同、1 轮浮点翻转（复用臂更优）；单轮数据集逐位不变 | 多轮部署开启（库默认 off） |
 | AR016 | 执行计划一等化（device/threads/ubatch + 放置校验）+ 延迟预算规划（SLA） | threads 16→12：TTFT 4.2-6.6 s → 2.3-4.4 s（1.39-1.89×）；SLA 2500 ms 下 8 数据集质量逐例不变、TTFT 再降到 2.2-2.3 s；GPU 放置可验证（本机 29/29 层） | 默认开启（plan 由 probe 生成；`budget_target_ms` 默认 0） | 修正 AR015 的假 GPU 记录；发现并修复模型哈希在计时区内重复计算 |
+| AR017 | 多序列批解码（K 序列一次前向）；审计列如实报告实际批大小 | 交错 A/B 解码墙钟 K=2 **2.01×**、K=4 2.74×；单例 E2E K=2 0.89×；36 用例 f1 逐例不变；闸门 10 项 PASS + 2 注入 FAIL | 默认 `K=1`（端侧单用户无并发价值）；服务侧并发开 `K=2` | 锁步批、只批解码不批 prefill、批模式禁快照/会话；K=8 因 KV 份额回落 |
 
 注意"默认"指**部署配置**（`ar012` 臂）。库内代码默认值保持保守（`structure_budget=0`、
 `span_admission=0`、`sentence_completion=0`、`fill_priors=1`），必须由 conf 显式打开；
@@ -73,6 +74,7 @@ threads = <probe>               # AR016 由 probe 实测得出（本机 12，而
 n_gpu_layers = <probe>          # AR016 请求值 + 装载后校验（假放置直接报错）
 cost_a_ms / cost_b_ms_per_token # AR016 probe 产出的成本模型
 budget_target_ms = 0            # AR016 >0 时按延迟目标求解预算（默认关，保持可复现）
+decode_batch_size = 1           # AR017 服务侧并发开 2；1 = 串行（端侧默认）
 ```
 
 关掉的：`head_adaptive`/`head_pattern_routing`/`pyramid_prior`（AR003/AR004）、

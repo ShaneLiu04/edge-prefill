@@ -79,12 +79,12 @@ Status SparsePrefiller::prefill(const std::vector<llama_token>& tokens,
         const KvSignature sig = signature_for(*backend_);
         const auto hit = cache_->find(tokens, sig);
         if (hit && hit->prefix_len > 0) {
-            auto st = backend_->reset_sequence();
+            auto st = backend_->reset_sequence(opts.seq_id);
             if (!st.ok()) return st;
             st = backend_->load_state(hit->state);
             if (!st.ok()) {
                 log_warn("prefix state restore failed; recomputing dense prefix");
-                backend_->reset_sequence();
+                backend_->reset_sequence(opts.seq_id);
             } else {
                 prefix_len = hit->prefix_len;
             }
@@ -92,7 +92,7 @@ Status SparsePrefiller::prefill(const std::vector<llama_token>& tokens,
     }
 
     if (prefix_len == 0 && !opts.append) {
-        auto st = backend_->reset_sequence();
+        auto st = backend_->reset_sequence(opts.seq_id);
         if (!st.ok()) return st;
     }
 
@@ -247,7 +247,7 @@ Status SparsePrefiller::prefill(const std::vector<llama_token>& tokens,
                                    opts.enable_chunking
                                        ? opts.chunk_size
                                        : static_cast<uint32_t>(active_tokens.size()),
-                                   stats);
+                                   stats, opts.seq_id);
         }
         // Always restore the dense attention path so decode and subsequent
         // prefills never inherit stale gather settings.

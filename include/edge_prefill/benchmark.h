@@ -125,6 +125,20 @@ struct BenchmarkConfig {
     double cost_b_ms_per_token = -1.0;
     double cost_r2 = 0.0;
     uint32_t cost_n = 0;
+    // AR017: decode several sequences per forward pass (continuous batching).
+    // 1 = the serial path (bit-identical to AR016). Values > 1 need a context
+    // with n_seq_max >= decode_batch_size and enough KV cells for every
+    // in-flight sequence; the runner sizes it up front and flushes the batch
+    // whenever a case would not fit.
+    uint32_t decode_batch_size = 1;
+    // Total KV cells for the batch context (0 = decode_batch_size * 1536,
+    // clamped to the model's training context).
+    uint32_t decode_batch_ctx = 0;
+    // Largest admitted span (positions) that may join a batch. Longer cases run
+    // serially: in a multi-sequence context the unified KV cache reserves a
+    // ubatch window per stream, and spans above ~1K were observed to collide
+    // with that reservation. 0 = no limit beyond the per-sequence share.
+    uint32_t decode_batch_max_span = 1024;
     std::string out_dir;
 };
 

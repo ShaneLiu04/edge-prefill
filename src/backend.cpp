@@ -234,7 +234,8 @@ Status LlamaBackend::token_to_piece(llama_token token, std::string* out) const {
 Status LlamaBackend::prefill(const std::vector<llama_token>& tokens,
                              const std::vector<llama_pos>& positions,
                              uint32_t chunk_size,
-                             PrefillStats* stats) {
+                             PrefillStats* stats,
+                             int32_t seq_id) {
     if (!ctx_) return Status::error(ErrorCode::Prefill, "context is not created");
     if (!stats) return Status::error(ErrorCode::InvalidArgument, "null prefill stats");
     if (tokens.empty() || tokens.size() != positions.size()) {
@@ -275,7 +276,7 @@ Status LlamaBackend::prefill(const std::vector<llama_token>& tokens,
             batch.token[j] = tokens[i];
             batch.pos[j] = positions[i];
             batch.n_seq_id[j] = 1;
-            batch.seq_id[j][0] = 0;
+            batch.seq_id[j][0] = seq_id;
             const bool last_chunk = (r + 1 == ranges.size());
             const bool last_token = (i + 1 == tokens.size());
             batch.logits[j] = (last_chunk && last_token) ? 1 : 0;
@@ -298,7 +299,7 @@ Status LlamaBackend::prefill(const std::vector<llama_token>& tokens,
             cs.index = static_cast<uint32_t>(r);
             cs.tokens = range.size();
             cs.elapsed_us = elapsed_us;
-            cs.kv_pos_max = llama_memory_seq_pos_max(llama_get_memory(ctx_), 0);
+            cs.kv_pos_max = llama_memory_seq_pos_max(llama_get_memory(ctx_), seq_id);
             stats->chunk_stats.push_back(cs);
         }
     }
@@ -309,8 +310,8 @@ Status LlamaBackend::prefill(const std::vector<llama_token>& tokens,
         std::chrono::duration_cast<std::chrono::microseconds>(end - begin).count());
     stats->ttft_us = stats->total_us;
     auto* mem = llama_get_memory(ctx_);
-    stats->kv_pos_min = llama_memory_seq_pos_min(mem, 0);
-    stats->kv_pos_max = llama_memory_seq_pos_max(mem, 0);
+    stats->kv_pos_min = llama_memory_seq_pos_min(mem, seq_id);
+    stats->kv_pos_max = llama_memory_seq_pos_max(mem, seq_id);
     stats->kv_bytes = llama_state_seq_get_size(ctx_, 0);
     return Status::success();
 }
@@ -433,9 +434,80 @@ Status LlamaBackend::load_state(const std::vector<uint8_t>& in) {
     return Status::success();
 }
 
-Status LlamaBackend::reset_sequence() {
+Status LlamaBackend::reset_sequence(int32_t seq_id) {
     if (!ctx_) return Status::error(ErrorCode::Cache, "context is not created");
-    llama_memory_seq_rm(llama_get_memory(ctx_), 0, -1, -1);
+    llama_memory_seq_rm(llama_get_memory(ctx_), seq_id, -1, -1);
+    return Status::success();
+}
+
+int32_t LlamaBackend::seq_pos_max(int32_t seq_id) const {
+    if (!ctx_) return -1;
+    return llama_memory_seq_pos_max(llama_get_memory(ctx_), seq_id);
+}
+
+// AR017 FR-1: one forward pass, one token per sequence. llama.cpp's batch API
+// carries a per-token sequence id, so this is plain upstream usage -- no patch
+// involvement (the sparse-attention gather is disarmed before decoding).
+Status LlamaBackend::decode_batch(const std::vector<llama_token>& tokens,
+                                  const std::vector<int32_t>& seq_ids,
+                                  const std::vector<llama_pos>& positions,
+                                  std::vector<std::vector<float>>* logits_out) {
+    if (!ctx_) return Status::error(ErrorCode::Decode, "context is not created");
+    if (tokens.empty()) {
+        return Status::error(ErrorCode::InvalidArgument, "empty decode batch");
+    }
+    if (tokens.size() != seq_ids.size() || tokens.size() != positions.size()) {
+        return Status::error(ErrorCode::InvalidArgument,
+                             "decode batch arrays must have equal length");
+    }
+    const int32_t n_seq_max = static_cast<int32_t>(llama_n_seq_max(ctx_));
+    std::vector<int32_t> seen;
+    seen.reserve(seq_ids.size());
+    for (size_t i = 0; i < seq_ids.size(); ++i) {
+        if (seq_ids[i] < 0 || seq_ids[i] >= n_seq_max) {
+            return Status::error(ErrorCode::InvalidArgument,
+                                 "sequence id out of range: " + std::to_string(seq_ids[i]));
+        }
+        if (std::find(seen.begin(), seen.end(), seq_ids[i]) != seen.end()) {
+            return Status::error(ErrorCode::InvalidArgument,
+                                 "duplicate sequence id in decode batch: " +
+                                     std::to_string(seq_ids[i]));
+        }
+        seen.push_back(seq_ids[i]);
+        if (positions[i] < 0) {
+            return Status::error(ErrorCode::InvalidArgument, "negative decode position");
+        }
+    }
+
+    llama_batch batch = llama_batch_init(static_cast<int32_t>(tokens.size()), 0, 1);
+    if (!batch.token) {
+        return Status::error(ErrorCode::OutOfMemory, "failed to allocate decode batch");
+    }
+    for (size_t i = 0; i < tokens.size(); ++i) {
+        batch.token[i] = tokens[i];
+        batch.pos[i] = positions[i];
+        batch.n_seq_id[i] = 1;
+        batch.seq_id[i][0] = seq_ids[i];
+        batch.logits[i] = 1;
+    }
+    batch.n_tokens = static_cast<int32_t>(tokens.size());
+    const int32_t ret = llama_decode(ctx_, batch);
+    llama_batch_free(batch);
+    if (ret != 0) {
+        return Status::error(ErrorCode::Decode,
+                             "llama_decode failed for batched step (ret=" +
+                                 std::to_string(ret) + ")");
+    }
+    if (logits_out) {
+        logits_out->assign(tokens.size(), {});
+        for (size_t i = 0; i < tokens.size(); ++i) {
+            const float* row = llama_get_logits_ith(ctx_, static_cast<int32_t>(i));
+            if (!row) {
+                return Status::error(ErrorCode::Decode, "missing batched decode logits");
+            }
+            (*logits_out)[i].assign(row, row + n_vocab());
+        }
+    }
     return Status::success();
 }
 

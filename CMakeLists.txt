@@ -107,6 +107,8 @@ if(EDGE_PREFILL_BUILD_TESTS)
         tests/test_exec_plan.cpp
         tests/test_cost_model.cpp
         tests/test_plan_exec.cpp
+        tests/test_batched_decode.cpp
+        tests/test_batched_bench.cpp
     )
     target_link_libraries(edge_prefill_tests PRIVATE edge_prefill)
     target_include_directories(edge_prefill_tests PRIVATE ${llama_SOURCE_DIR}/include ${llama_SOURCE_DIR}/ggml/include)

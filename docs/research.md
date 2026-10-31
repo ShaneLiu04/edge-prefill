@@ -1048,3 +1048,74 @@ GPU 能负担 **797–803 个准入 token，而 CPU 只有 610–622**（+29–3
 - SLA 求解依赖 selector 的确定性（当前成立：纯 CPU、无随机）；
 - 线程最优值依赖主机拓扑（本机 12），所以 plan 必须由 probe 产出而不是硬编码；
 - 放置校验依赖 llama.cpp 的日志行（该版本无公开 getter），日志缺失时只能记 `unverified`。
+
+## 19. AR017：把解码从"N 次一步"变成"一步 N 个序列"
+
+AR016 把"跑多快"变成了可验证的对象，但它也把一件更基础的事暴露得很清楚：
+整条流程里**唯一没被并行起来的东西是解码**。所有用例都在同一个进程里排队，
+每个用例生成 48 个 token，每个 token 一次 `llama_decode`，每次只用上一条序列。
+
+### 19.1 为什么批的是解码，不是 prefill
+
+稀疏 prefill 用 gather 把准入 token 从大文档里"捞"出来拼成一个序列，
+每个用例的**位置映射和掩码都不同**（compact 后位置跟着准入集走）。
+把两个用例的 prefill 塞进同一张图，要么退化成 dense（丢掉了 AR012 的全部收益），
+要么要写一张每序列不同 mask 的自定义图，收益远小于代价。
+
+解码不同：每序列每步就是**一个 token**、位置由该序列自己的 KV 长度决定、
+互不干扰。`llama_batch` 的每个 token 本来就带 `n_seq_id/seq_id/pos/logits`，
+把 K 个 token 一次性喂进去，就是一次前向、K 个结果。这是解码侧唯一的线性维度。
+
+### 19.2 实现约束（全部来自实测，不是设计出来的）
+
+| 约束 | 现象 | 处理 |
+|---|---|---|
+| 统一 KV 的多序列容量系数 ≈ 2×span | `failed to find a memory slot for batch of size 512` | `per_seq = ctx/K/2`，默认 `decode_batch_ctx = K*3072`、`decode_batch_max_span = 1024` |
+| 解码位置必须来自序列自身 | `Y = X + 1` 断言失败 | `pos = seq_pos_max(seq)+1`，不读全局 stats |
+| 批结束后必须释放所有序列 | 后续 prefill 报 `no memory slot`，死单元格累积 | `flush_batch` 末尾 `reset_sequence(0..K-1)` |
+| 上下文只能在首序列 prefill 前定容 | `ensure_context` 增长会重建 context、清空已 prefill 的 KV | 先算 `per_seq` 与 `span`，装不下就串行 |
+| 快照假设 seq 0 | 批模式快照会串味 | 批模式禁用快照 |
+| 会话用例依赖跨轮 KV（AR014） | 批内 reset 会打断会话 | `c.session.empty()` 才进批 |
+
+这些不是"边角情况"，而是多头 KV 缓存的结构事实：一个 seq 的 KV 是**非连续网格**里的
+一堆格子，容量必须按"K 条序列共享一个网格"来预留，而网格一旦定了就不能中途变大。
+
+### 19.3 度量：两个口径，因为主机不可信
+
+`decode_wall = batch_wall * ceil(cases / K_eff)` 表示"把全部用例解完需要几次批墙钟"；
+单例 E2E = `ttft + batch_wall`，表示单个用户实际等待。两者不能互相替代：
+批解码**不改 TTFT**，所以答案越短，端到端收益越小。
+
+交错 A/B（同会话内交替各臂）是本机唯一可信的口径：
+
+| K | decode-wall | 单例 E2E |
+|---|---|---|
+| 2 | **2.01×** | 0.89× |
+| 4 | 2.74× | 0.71× |
+| 8 | 2.51× | 0.39× |
+
+K=8 反而比 K=4 低，因为 `decode_batch_ctx` 按 K 份切，份额收窄导致更多用例
+落回串行（`batch_effective` 审计列如实下降）。
+
+### 19.4 质量
+
+36 个用例 f1 逐例与串行相同。`generated_hash` 有 2/72 个批臂差一个 token：
+批形状改变了 GEMM 的归约顺序，属 AR014 已记录的浮点口径（同一答案的并列 token）。
+因此闸门把 `answer-hash` 放宽为 `answer-stability`（≤5% 批臂翻转），
+分母用**批臂数**而不是用例数——每个批臂都是一次独立的翻转机会。
+
+### 19.5 失败与取舍
+
+| 尝试 | 观测 | 结论 |
+|---|---|---|
+| 同批共享一个 seq_id | 第二个用例的 KV 直接覆盖第一个 | 禁止；`decode_batch` 显式拒绝重复 seq（闸门 `shared-seq` 注入） |
+| 让 prefill 也合批 | 每序列位置/掩码不同，共图要么退化 dense 要么无收益 | 只批解码 |
+| 大 K 追更高吞吐 | K=8 decode-wall 低于 K=4，KV 份额压缩导致串行回退 | 推荐 K=2；K>2 只作吞吐报告点 |
+| 批内中途准入（真 continuous batching） | `ensure_context` 不能中途定容；锁步实现简单且可验证 | 未做，记为 AR018 候选 |
+
+### 19.6 局限
+
+- 锁步：整批一起解码、一起退出，短答案等最长答案（`steps_median` 相同即证据）；
+- 只批同进程内、且 span 都 ≤ `decode_batch_max_span` 的用例（`len8k` span 1173 → 串行）；
+- 批模式无快照、无会话；
+- 端侧单用户场景下批解码没有价值（没有并发请求），它的意义在于服务侧并发。

@@ -126,6 +126,17 @@ struct Sample {
     std::string device_state = "cpu";
     double predicted_ttft_ms = 0.0;
     double plan_select_ms = 0.0;
+    // AR017 audit: the decode batch this sample participated in (0 = serial
+    // path), how many sequences shared the steps, the lockstep step count, the
+    // wall time of the whole batch, and the batch's per-step cost.
+    uint32_t batch_size = 1;
+    uint32_t batch_steps = 0;
+    double batch_wall_ms = 0.0;
+    int32_t seq_id = 0;
+    double decode_ms_per_token = 0.0;
+    // AR017: FNV-1a of the generated text. Batching must not change a single
+    // byte of the answer, and f1 alone cannot prove that.
+    uint64_t generated_hash = 0;
 };
 
 class Reporter {

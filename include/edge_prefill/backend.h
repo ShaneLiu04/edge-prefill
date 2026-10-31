@@ -82,8 +82,18 @@ public:
     Status prefill(const std::vector<llama_token>& tokens,
                    const std::vector<llama_pos>& positions,
                    uint32_t chunk_size,
-                   PrefillStats* stats);
+                   PrefillStats* stats,
+                   int32_t seq_id = 0);
     Status decode(llama_token token, llama_pos pos, std::vector<float>* logits);
+    // AR017 FR-1: advance one token per sequence in a single forward pass. Each
+    // entry of `tokens`/`seq_ids`/`positions` is one sequence's next token; the
+    // sequence ids must be distinct (two tokens in one sequence would overwrite
+    // KV cells). Logits are written to `logits_out` in the same order when it is
+    // non-null (resized to tokens.size()).
+    Status decode_batch(const std::vector<llama_token>& tokens,
+                        const std::vector<int32_t>& seq_ids,
+                        const std::vector<llama_pos>& positions,
+                        std::vector<std::vector<float>>* logits_out);
     // Batched probe forward for the offline head classifier: positions are
     // 0..n-1, prefill mode is on, logits are enabled on every position, and
     // the per-position argmax token id is returned. Chunked internally to
@@ -92,7 +102,11 @@ public:
                         std::vector<int32_t>* top1);
     Status save_state(std::vector<uint8_t>* out) const;
     Status load_state(const std::vector<uint8_t>& in);
-    Status reset_sequence();
+    Status reset_sequence(int32_t seq_id = 0);
+    // AR017: llama.cpp requires the first decode position of a sequence to be
+    // exactly last_pos + 1. Read it from the cache instead of reconstructing it
+    // from prefill stats, so the batch can never drift by one token.
+    int32_t seq_pos_max(int32_t seq_id = 0) const;
 
     Status set_prefill_mode(bool prefill);
     bool prefill_mode() const;

@@ -49,7 +49,9 @@ Status Reporter::write_raw_csv(const std::string& path) {
            "snapshot_state,snapshot_key,"
            "device,gpu_layers_requested,gpu_layers_offloaded,gpu_layers_total,"
            "n_threads,n_threads_batch,n_ubatch,plan_source,device_state,"
-           "predicted_ttft_ms,plan_select_ms\n";
+           "predicted_ttft_ms,plan_select_ms,"
+           "batch_size,batch_steps,batch_wall_ms,seq_id,decode_ms_per_token,"
+           "generated_hash\n";
     out << std::setprecision(10);
     for (const auto& s : samples_) {
         out << s.task << ',' << s.case_id << ',' << s.ttft_ms << ',' << s.e2e_ms << ','
@@ -80,7 +82,10 @@ Status Reporter::write_raw_csv(const std::string& path) {
             << s.gpu_layers_requested << ',' << s.gpu_layers_offloaded << ','
             << s.gpu_layers_total << ',' << s.n_threads << ',' << s.n_threads_batch << ','
             << s.n_ubatch << ',' << s.plan_source << ',' << s.device_state << ','
-            << s.predicted_ttft_ms << ',' << s.plan_select_ms << '\n';
+            << s.predicted_ttft_ms << ',' << s.plan_select_ms << ','
+            << s.batch_size << ',' << s.batch_steps << ',' << s.batch_wall_ms << ','
+            << s.seq_id << ',' << s.decode_ms_per_token << ','
+            << s.generated_hash << '\n';
     }
     return Status::success();
 }
