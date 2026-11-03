@@ -17,6 +17,7 @@
 #   ./repro.sh ar016    # AR016 probe/plan + three-arm matrix + SLA gate + injections
 #   ./repro.sh ar017    # AR017 batched decode: K sweep + interleaved A/B + gate
 #   ./repro.sh ar018    # AR018 prefill/decode split: 4-arm matrix + overlap gate
+#   ./repro.sh ar019    # AR019 continuous batching: interleaved A/B + gate
 #
 # Every step is fail-fast (set -euo pipefail) and prints the exact command
 # it runs. Models are downloaded with SHA256 verification into ./models
@@ -375,6 +376,25 @@ case "${SUITE}" in
             --sla-target-ms 2500 > /dev/null 2>&1 \
             && fail "gate did not reject the injected cost-model skew"
         OUT="${ROOT}/benchmarks/results/ar016-exec-plan"
+        ;;
+    ar019)
+        # AR019: continuous batching. Interleaved A/B against the static pipeline
+        # batch at K=4 and K=8; the gate checks answer identity, quality, no
+        # throughput regression and that the scheduler really runs per step.
+        bash benchmarks/scripts/ar019_ab.sh \
+            || fail "AR019 interleaved A/B failed"
+        python3 benchmarks/scripts/ar019_report.py --gate \
+            || fail "AR019 regressed or did not schedule per step"
+        python3 benchmarks/scripts/ar019_report.py --gate --inject quality-drift \
+            > /dev/null 2>&1 \
+            && fail "gate did not reject the injected answer drift"
+        python3 benchmarks/scripts/ar019_report.py --gate --inject lockstep-peers \
+            > /dev/null 2>&1 \
+            && fail "gate did not reject the injected lockstep fallback"
+        python3 benchmarks/scripts/ar019_report.py --gate --inject slow \
+            > /dev/null 2>&1 \
+            && fail "gate did not reject the injected throughput regression"
+        OUT="${ROOT}/benchmarks/results/ar019-continuous"
         ;;
     ar018)
         # AR018: prefill/decode separation. The pipeline runs the sparse

@@ -288,6 +288,9 @@ Status parse_config_file(const std::string& path, Config* out) {
         } else if (key == "pipeline_ahead") {
             if (!parse_u64(value, &u)) goto bad_value;
             out->pipeline_ahead = static_cast<uint32_t>(u);
+        } else if (key == "continuous_batch") {
+            if (!parse_i64(value, &i)) goto bad_value;
+            out->continuous_batch = static_cast<int>(i);
         } else if (key == "allow_cpu_fallback") {
             if (!parse_i64(value, &i)) goto bad_value;
             out->allow_cpu_fallback = static_cast<int>(i);

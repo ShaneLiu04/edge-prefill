@@ -153,6 +153,12 @@ struct BenchmarkConfig {
     // This is what buys the overlap: the worker keeps prefilling while the
     // decoder works through the batch already in flight.
     uint32_t pipeline_ahead = 0;
+    // AR019: continuous batching. Instead of filling a batch of K and running it
+    // to completion, the decoder keeps K slots and, every step, decodes only the
+    // sequences that are still alive: a finished case frees its slot for the next
+    // prefilled one, and a case never waits for K peers to show up. 0 keeps the
+    // lockstep behaviour of AR017/AR018 exactly.
+    bool continuous_batch = false;
     std::string out_dir;
 };
 

@@ -113,6 +113,10 @@ struct Config {
     int32_t pipeline_prefill_gpu_layers = -1;
     int32_t pipeline_prefill_threads = 0;
     uint32_t pipeline_ahead = 0;
+    // AR019: iteration-level scheduling. Off keeps AR017's static batches
+    // (bit-identical); on admits a case as soon as its prefill is done and
+    // retires it the moment it finishes.
+    int continuous_batch = 0;
     std::string dump_selection_dir;
     // AR008 FR-2: measured execution-combination table. Empty keeps the
     // configured (or default) path — routing is opt-in, exactly like the

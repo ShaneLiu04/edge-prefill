@@ -656,6 +656,14 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
         }
         pipe_task_cv.notify_one();
     };
+    auto pipe_try = [&](size_t index, PipeResult* out_result) -> bool {
+        std::lock_guard<std::mutex> lk(pipe_mu);
+        auto it = pipe_results.find(index);
+        if (it == pipe_results.end() || !it->second.ready) return false;
+        *out_result = std::move(it->second);
+        pipe_results.erase(it);
+        return true;
+    };
     auto pipe_wait = [&](size_t index) -> PipeResult {
         std::unique_lock<std::mutex> lk(pipe_mu);
         pipe_done_cv.wait(lk, [&] {
@@ -696,8 +704,26 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
         size_t out_index = 0;
         std::chrono::steady_clock::time_point enqueued;
         double ttft_ms = 0.0;
+        // AR019: continuous-scheduling bookkeeping.
+        int32_t slot = -1;
+        uint32_t admit_step = 0;
+        uint32_t peer_max = 1;
+        std::chrono::steady_clock::time_point case_start;
+        std::chrono::steady_clock::time_point admitted;
     };
     std::vector<BatchJob> batch_jobs;
+    // AR019: iteration-level scheduling. `cont_active` holds the sequences
+    // resident in the decode context right now (at most K); `batch_jobs` acts as
+    // the ready queue. Every step decodes only the live sequences, and a case
+    // that finishes frees its slot for the next one immediately.
+    const bool continuous = cfg.continuous_batch && batching;
+    std::vector<BatchJob> cont_active;
+    std::vector<int32_t> cont_slot_free;   // stack of free KV slots
+    uint64_t cont_steps = 0;
+    uint64_t cont_admits = 0;
+    for (int32_t slot = static_cast<int32_t>(batch_k) - 1; slot >= 0; --slot) {
+        cont_slot_free.push_back(slot);
+    }
     uint32_t batch_steps_total = 0;
     uint32_t batch_effective = 0;
     auto flush_batch = [&](uint32_t limit) -> Status {
@@ -817,6 +843,10 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
                 sample.handoff_ms = job.handoff_ms;
                 sample.handoff_bytes = job.handoff_bytes;
             }
+            if (!job.case_start.time_since_epoch().count()) job.case_start = job.enqueued;
+            sample.e2e_wall_ms = std::chrono::duration<double, std::milli>(
+                                         std::chrono::steady_clock::now() - job.case_start)
+                                         .count();
         }
         batch_jobs.clear();
         batch_jobs = std::move(deferred_tail);
@@ -825,6 +855,159 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
         // fail to find a slot for its ubatch.
         for (uint32_t s = 0; s < batch_k; ++s) {
             backend.reset_sequence(static_cast<int32_t>(s));
+        }
+        return Status::success();
+    };
+
+    // AR019 FR-1: admit every prefilled case that fits a free slot right now.
+    auto cont_admit = [&](bool may_block) -> Status {
+        while (cont_active.size() < batch_k && !batch_jobs.empty()) {
+            if (batch_jobs.front().deferred && cont_slot_free.empty()) break;
+            BatchJob job = std::move(batch_jobs.front());
+            batch_jobs.erase(batch_jobs.begin());
+            if (job.deferred) {
+                PipeResult result;
+                if (!pipe_try(job.pipe_index, &result)) {
+                    if (!may_block) {
+                        // Not prefilled yet: put the job back at the head and
+                        // stop admitting. Decoding continues with what is
+                        // resident, which is what keeps the batch full.
+                        batch_jobs.insert(batch_jobs.begin(), std::move(job));
+                        break;
+                    }
+                    result = pipe_wait(job.pipe_index);
+                }
+                if (!result.status.ok()) {
+                    return Status::error(result.status.code,
+                                         "continuous prefill failed: " +
+                                             result.status.message);
+                }
+                job.slot = cont_slot_free.back();
+                cont_slot_free.pop_back();
+                const auto hs = std::chrono::steady_clock::now();
+                const Status hst = backend.set_seq_state(job.slot, result.state);
+                job.handoff_ms = std::chrono::duration<double, std::milli>(
+                                         std::chrono::steady_clock::now() - hs)
+                                         .count();
+                if (!hst.ok()) return hst;
+                job.handoff_bytes = result.state.size();
+                job.prefill_ms = result.prefill_ms;
+                job.pos = static_cast<llama_pos>(backend.seq_pos_max(job.slot)) + 1;
+                job.next = greedy(result.logits);
+                job.seq = job.slot;
+                job.deferred = false;
+            } else {
+                // Single-context path: the prefill already ran on this context
+                // at job.seq, and that slot was taken out of the pool when the
+                // case was enqueued.
+                job.slot = job.seq;
+            }
+            const double waited = std::chrono::duration<double, std::milli>(
+                                          std::chrono::steady_clock::now() - job.enqueued)
+                                          .count();
+            job.queue_wait_ms = std::max(0.0, waited - job.prefill_ms - job.handoff_ms);
+            job.admit_step = static_cast<uint32_t>(cont_steps);
+            job.admitted = std::chrono::steady_clock::now();
+            cont_active.push_back(std::move(job));
+            ++cont_admits;
+        }
+        return Status::success();
+    };
+
+    // AR019 FR-1/FR-3: one decode step over the live sequences only.
+    auto cont_step = [&]() -> Status {
+        std::vector<llama_token> toks;
+        std::vector<int32_t> seqs;
+        std::vector<llama_pos> poss;
+        std::vector<size_t> live;
+        for (size_t i = 0; i < cont_active.size(); ++i) {
+            if (cont_active[i].done) continue;
+            live.push_back(i);
+            toks.push_back(cont_active[i].next);
+            seqs.push_back(cont_active[i].seq);
+            poss.push_back(cont_active[i].pos);
+        }
+        if (live.empty()) return Status::success();
+        std::vector<std::vector<float>> logits;
+        const Status st = backend.decode_batch(toks, seqs, poss, &logits);
+        if (!st.ok()) return st;
+        const uint32_t peers = static_cast<uint32_t>(live.size());
+        for (size_t k = 0; k < live.size(); ++k) {
+            BatchJob& job = cont_active[live[k]];
+            std::string piece;
+            backend.token_to_piece(job.next, &piece);
+            job.generated += piece;
+            job.pos += 1;
+            job.steps += 1;
+            if (peers > 1) job.peer_max = std::max(job.peer_max, peers);
+            if (job.next == llama_vocab_eos(backend.vocab()) || job.steps >= job.max_new) {
+                job.done = true;
+                continue;
+            }
+            job.next = greedy(logits[k]);
+        }
+        ++cont_steps;
+        // Retire finished sequences and hand their slots to the ready queue.
+        for (size_t i = 0; i < cont_active.size();) {
+            BatchJob& job = cont_active[i];
+            if (!job.done) {
+                ++i;
+                continue;
+            }
+            if (job.out_index < out->size()) {
+                Sample& sample = (*out)[job.out_index];
+                const double own_ms = std::chrono::duration<double, std::milli>(
+                                              std::chrono::steady_clock::now() - job.admitted)
+                                              .count();
+                sample.quality = f1_score(job.generated, job.answer);
+                sample.generated_hash = text_hash(job.generated);
+                sample.e2e_ms = std::chrono::duration<double, std::milli>(
+                                        std::chrono::steady_clock::now() - job.enqueued)
+                                        .count();
+                sample.e2e_wall_ms = std::chrono::duration<double, std::milli>(
+                                             std::chrono::steady_clock::now() - job.case_start)
+                                             .count();
+                sample.ttft_ms = job.prefill_ms;
+                sample.ttft_min_ms = job.prefill_ms;
+                sample.queue_wait_ms = job.queue_wait_ms;
+                sample.handoff_ms = job.handoff_ms;
+                sample.handoff_bytes = job.handoff_bytes;
+                sample.batch_size = job.peer_max;
+                sample.batch_steps = job.steps;
+                sample.batch_wall_ms = own_ms;
+                sample.seq_id = job.seq;
+                sample.decode_ms_per_token =
+                        job.steps > 0 ? own_ms / static_cast<double>(job.steps) : 0.0;
+                sample.continuous = 1;
+                sample.slot = job.slot;
+                sample.admit_step = job.admit_step;
+                sample.own_steps = job.steps;
+                sample.peer_steps = job.peer_max;
+            }
+            backend.reset_sequence(job.seq);
+            cont_slot_free.push_back(job.slot);
+            cont_active.erase(cont_active.begin() + static_cast<long>(i));
+        }
+        return Status::success();
+    };
+
+    // AR019 FR-2: keep decoding while every slot is busy; stop when a slot is
+    // free and nothing is ready, so the producer can catch up (that pause is
+    // what keeps a late case out of the queue). `drain` runs to the end.
+    auto cont_pump = [&](bool drain) -> Status {
+        for (;;) {
+            const bool starved = cont_active.empty();
+            const Status ast = cont_admit(drain && starved);
+            if (!ast.ok()) return ast;
+            if (cont_active.empty()) {
+                // Nothing resident: only the drain may wait for the producer,
+                // otherwise the caller gets control back to submit more work.
+                if (drain && !batch_jobs.empty()) continue;
+                break;
+            }
+            if (!drain && cont_active.size() < batch_k && batch_jobs.empty()) break;
+            const Status sst = cont_step();
+            if (!sst.ok()) return sst;
         }
         return Status::success();
     };
@@ -1899,7 +2082,17 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
                                 required_ctx <= base.decode_batch_max_span;
                         if (required_ctx <= per_seq && span_ok) {
                             batch_case = true;
-                            batch_seq = static_cast<int32_t>(batch_jobs.size());
+                            if (continuous && !pipeline_mode) {
+                                // The inline prefill needs a resident slot now.
+                                while (cont_slot_free.empty()) {
+                                    const Status dst = cont_pump(true);
+                                    if (!dst.ok()) return dst;
+                                }
+                                batch_seq = cont_slot_free.back();
+                                cont_slot_free.pop_back();
+                            } else {
+                                batch_seq = static_cast<int32_t>(batch_jobs.size());
+                            }
                             popts.seq_id = batch_seq;
                             popts.append = false;
                         } else if (!batch_jobs.empty()) {
@@ -1929,10 +2122,19 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
                     double ttft_ms = 0.0;
                     double ttft_min_ms = 0.0;
                     std::vector<double> ttft_reps;
-                    std::chrono::steady_clock::time_point last_begin =
+                    const std::chrono::steady_clock::time_point case_start =
                             std::chrono::steady_clock::now();
+                    std::chrono::steady_clock::time_point last_begin = case_start;
                     bool pipeline_pending = false;
                     size_t pipeline_index = 0;
+                    log_info("loop: case=" + c.id + "@" + std::to_string(length));
+                    if (continuous) {
+                        log_info("cont: case=" + c.id + " seq_slot=" +
+                                 std::to_string(batch_seq) + " free=" +
+                                 std::to_string(cont_slot_free.size()) + " active=" +
+                                 std::to_string(cont_active.size()) + " queue=" +
+                                 std::to_string(batch_jobs.size()));
+                    }
                     if (pipeline_mode && !selection.dense && c.session.empty()) {
                         PipeTask task;
                         task.index = pipe_submitted;
@@ -2138,6 +2340,7 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
                         job.max_new = base.max_new_tokens;
                         job.answer = c.answer;
                         job.enqueued = std::chrono::steady_clock::now();
+                        job.case_start = case_start;
                         job.seq = -1;
                         batch_jobs.push_back(job);
                         quality = 0.0;
@@ -2178,6 +2381,7 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
                         job.answer = c.answer;
                         job.ttft_ms = ttft_min_ms;
                         job.enqueued = std::chrono::steady_clock::now();
+                        job.case_start = case_start;
                         batch_jobs.push_back(job);
                         quality = 0.0;
                     } else if (first_logits) {
@@ -2285,22 +2489,37 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
                         // The case is queued: attach the sample index so the
                         // flush can patch quality/e2e, and flush when full.
                         batch_jobs.back().out_index = out->size() - 1;
-                        // AR018: hold a full batch plus the lookahead so the
-                        // prefill worker still has work while the decoder runs.
-                        const uint32_t ahead = cfg.pipeline_ahead != 0
-                                                       ? cfg.pipeline_ahead
-                                                       : 2 * batch_k;
-                        const uint32_t trigger = pipeline_mode ? batch_k + ahead : batch_k;
-                        if (batch_jobs.size() >= trigger) {
-                            const Status fst = flush_batch(batch_k);
-                            if (!fst.ok()) return fst;
+                        if (continuous) {
+                            // AR019: submissions are cheap (selection only), so
+                            // the loop enqueues everything and the drain at the
+                            // end keeps every slot busy while the prefill worker
+                            // runs. Pumping here instead would give each new case
+                            // a single solo step (measured: peers=1.0).
+                        } else {
+                            // AR018: hold a full batch plus the lookahead so the
+                            // prefill worker still has work while the decoder runs.
+                            const uint32_t ahead = cfg.pipeline_ahead != 0
+                                                           ? cfg.pipeline_ahead
+                                                           : 2 * batch_k;
+                            const uint32_t trigger = pipeline_mode ? batch_k + ahead : batch_k;
+                            if (batch_jobs.size() >= trigger) {
+                                const Status fst = flush_batch(batch_k);
+                                if (!fst.ok()) return fst;
+                            }
                         }
                     }
                 }
             }
         }
     }
-    if (batching) {
+    if (batching && continuous) {
+        const Status pst = cont_pump(true);
+        if (!pst.ok()) return pst;
+        log_info("continuous: admits=" + std::to_string(cont_admits) +
+                 " steps=" + std::to_string(cont_steps) + " slots=" +
+                 std::to_string(batch_k));
+    }
+    if (batching && !continuous) {
         // Drain every remaining job: with a pipeline lookahead the queue is
         // longer than one batch, so a single flush would leave cases unpatched
         // (their samples would keep the placeholder quality).
@@ -2334,6 +2553,7 @@ Status BenchmarkRunner::run(const BenchmarkConfig& cfg, std::vector<Sample>* out
                 sample.prefill_device = prefill_device_name;
                 sample.prefill_device_state = prefill_device_state;
             }
+            if (continuous) sample.continuous = 1;
             if (sample.n_threads <= 0) {
                 const unsigned hw = std::thread::hardware_concurrency();
                 sample.n_threads = static_cast<int32_t>(hw > 0 ? hw : 4);

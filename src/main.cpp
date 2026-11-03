@@ -1728,6 +1728,7 @@ Status bench_command(const Args& args) {
     bench.pipeline_prefill_gpu_layers = cfg.pipeline_prefill_gpu_layers;
     bench.pipeline_prefill_threads = cfg.pipeline_prefill_threads;
     bench.pipeline_ahead = cfg.pipeline_ahead;
+    bench.continuous_batch = cfg.continuous_batch != 0;
     bench.decode_batch_size = cfg.decode_batch_size;
     bench.decode_batch_ctx = cfg.decode_batch_ctx;
     bench.decode_batch_max_span = cfg.decode_batch_max_span;

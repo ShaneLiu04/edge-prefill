@@ -3,6 +3,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -111,4 +112,68 @@ TEST_CASE(pipeline_matches_serial) {
     CHECK_EQ(piped[0].pipeline_mode, 1);
     CHECK(std::string(piped[0].prefill_device_state) == "cpu");
     CHECK_GT(static_cast<double>(piped[0].handoff_bytes), 0.0);
+}
+
+// AR019: iteration-level scheduling must change *when* a case runs, never what
+// it produces. Same dataset, same budget: the answers have to match the static
+// batch byte for byte, and the audit columns must show the scheduler did its job
+// (own steps > 0, a slot per case).
+TEST_CASE(continuous_matches_serial) {
+    const std::string model = pipeline_model();
+    if (model.empty()) {
+        std::printf("SKIP continuous_matches_serial (no EDGE_PREFILL_TEST_MODEL)\n");
+        return;
+    }
+    const auto dir = std::filesystem::temp_directory_path() / "edge_prefill_cont_test";
+    CHECK(pipeline_dataset(dir, 400, 3));
+
+    auto run = [&](bool continuous, std::vector<Sample>* out) -> Status {
+        BenchmarkConfig bcfg;
+        bcfg.model = model;
+        bcfg.data_dir = dir.string();
+        bcfg.modes = {Mode::Balanced};
+        bcfg.budgets = {0.05};
+        bcfg.lengths = {0};
+        bcfg.repeats = 1;
+        bcfg.warmup = 0;
+        bcfg.max_new_tokens = 8;
+        bcfg.n_threads = 4;
+        bcfg.n_threads_batch = 4;
+        bcfg.n_ubatch = 128;
+        bcfg.position_compaction = 1;
+        bcfg.decode_batch_size = 2;
+        bcfg.decode_batch_ctx = 2 * 3072;
+        bcfg.pipeline_mode = true;
+        bcfg.pipeline_prefill_gpu_layers = 0;
+        bcfg.pipeline_prefill_threads = 4;
+        bcfg.pipeline_ahead = 2;
+        bcfg.continuous_batch = continuous;
+        bcfg.plan_source = "cli";
+        bcfg.out_dir = dir.string();
+        std::vector<std::string> warnings;
+        return BenchmarkRunner().run(bcfg, out, &warnings);
+    };
+
+    std::vector<Sample> stat;
+    CHECK_OK(run(false, &stat));
+    std::vector<Sample> cont;
+    CHECK_OK(run(true, &cont));
+
+    std::map<std::string, const Sample*> by_case;
+    for (const auto& s : stat) {
+        if (!s.dense) by_case[s.case_id] = &s;
+    }
+    size_t compared = 0;
+    for (const auto& s : cont) {
+        if (s.dense) continue;
+        auto it = by_case.find(s.case_id);
+        if (it == by_case.end()) continue;
+        CHECK_EQ(it->second->generated_hash, s.generated_hash);
+        CHECK_NEAR(it->second->quality, s.quality, 1e-9);
+        CHECK_EQ(s.continuous, 1);
+        CHECK_GT(static_cast<double>(s.own_steps), 0.0);
+        CHECK(s.slot >= 0);
+        ++compared;
+    }
+    CHECK_EQ(compared, 3u);
 }

@@ -53,7 +53,8 @@ Status Reporter::write_raw_csv(const std::string& path) {
            "batch_size,batch_steps,batch_wall_ms,seq_id,decode_ms_per_token,"
            "generated_hash,"
            "pipeline_mode,prefill_device,prefill_device_state,queue_wait_ms,"
-           "handoff_ms,handoff_bytes\n";
+           "handoff_ms,handoff_bytes,"
+           "continuous,slot,admit_step,own_steps,peer_steps,e2e_wall_ms\n";
     out << std::setprecision(10);
     for (const auto& s : samples_) {
         out << s.task << ',' << s.case_id << ',' << s.ttft_ms << ',' << s.e2e_ms << ','
@@ -92,7 +93,9 @@ Status Reporter::write_raw_csv(const std::string& path) {
                                          : s.prefill_device)
             << ',' << (s.prefill_device_state.empty() ? s.device_state : s.prefill_device_state)
             << ',' << s.queue_wait_ms << ',' << s.handoff_ms << ','
-            << s.handoff_bytes << '\n';
+            << s.handoff_bytes << ',' << s.continuous << ',' << s.slot << ','
+            << s.admit_step << ',' << s.own_steps << ',' << s.peer_steps << ','
+            << s.e2e_wall_ms << '\n';
     }
     return Status::success();
 }

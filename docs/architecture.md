@@ -453,6 +453,32 @@ hidden. Snapshots (AR015) and session cases (AR014) are disabled in this mode
 with a warning rather than silently mangled, and the dense reference arm is
 skipped explicitly (it would need a whole document in a batch-sized context).
 
+## Iteration-level scheduling (AR019, optional)
+
+`continuous_batch = 1` replaces "fill K, run to completion" with a slot loop:
+K KV slots, and every step decodes only the sequences that are still alive.
+
+```
+cont_pump(drain):
+  loop:
+    admit():  move ready, prefilled jobs into free slots   (non-blocking probe;
+              the drain blocks only when nothing is resident)
+    if nothing resident: return (unless draining)
+    step():   decode_batch(one token per live sequence)
+              retire finished -> patch sample, reset_sequence(slot), free slot
+```
+
+Two properties this buys and one it does not:
+
+- a case starts decoding as soon as its own prefill is done (no waiting for K peers);
+- a finished case stops occupying a batch slot immediately (no lockstep tail);
+- it does **not** make the prefill faster, and on this machine the pipeline is
+  prefill-bound (30 s prefill vs 8-14 s decode), which is why the measured gain
+  is 1.03-1.08x and the mode is opt-in (see `docs/research.md` §21).
+
+`e2e_wall_ms` (entry to last token) exists because AR017's `e2e_ms` (ttft + batch
+wall) hides peer-prefill waiting and cannot compare schedulers.
+
 ## Chunked prefill
 
 `ChunkScheduler` splits a long prompt into physical ubatches.

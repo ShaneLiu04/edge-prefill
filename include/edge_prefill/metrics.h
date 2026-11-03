@@ -146,6 +146,20 @@ struct Sample {
     double queue_wait_ms = 0.0;
     double handoff_ms = 0.0;
     uint64_t handoff_bytes = 0;
+    // AR019 audit: continuous scheduling. `own_steps` is how many decode steps
+    // this case actually needed, `peer_steps` how many of them had batch peers,
+    // `admit_step` the scheduler step it entered at, and `slot` the KV slot it
+    // ran in (reused across cases).
+    // Wall-clock latency from the moment this case entered the runner to its
+    // final token: includes peer prefill waiting and scheduler queueing, so
+    // lockstep and continuous arms are comparable. e2e_ms keeps the AR017
+    // definition (ttft + batch wall).
+    double e2e_wall_ms = 0.0;
+    int32_t continuous = 0;
+    int32_t slot = -1;
+    uint32_t admit_step = 0;
+    uint32_t own_steps = 0;
+    uint32_t peer_steps = 0;
 };
 
 class Reporter {
